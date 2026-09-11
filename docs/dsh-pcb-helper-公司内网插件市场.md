@@ -361,7 +361,16 @@ dshmarket **不允许**直接安装 `http://服务器/...tgz`（安全限制，�
 strict-ssl=false
 ```
 
-发版：`./scripts/internal-market/pack.sh` → `./scripts/internal-market/upload.sh`  
+发版：`./scripts/internal-market/pack.sh` → `./scripts/internal-market/upload.sh` → **`./scripts/internal-market/install-latest.sh`**（本机强制覆盖旧版）
+
+`install-latest.sh` 会：
+
+1. 读本地/线上 `plugins.json` 的最新 `version`  
+2. 用制品 tgz **直接覆盖** `~/.dsh/profiles/web/node_modules/@zhongruan/...`  
+3. 把 Profile `package.json` 依赖钉成**精确版本**（去掉 `^0.1.1` 这种锁死升级）  
+4. 写入 `@zhongruan:registry=...` 到 Profile `.npmrc`  
+
+市场 `install` 字段也会带 `@version`，例如：`dsh plugin --profile web add @zhongruan/dsh-remote-review@0.1.5`。
 
 ---
 
