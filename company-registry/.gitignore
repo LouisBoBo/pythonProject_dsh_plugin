@@ -1,0 +1,3 @@
+artifacts/*.tgz
+plugins.json
+npm/

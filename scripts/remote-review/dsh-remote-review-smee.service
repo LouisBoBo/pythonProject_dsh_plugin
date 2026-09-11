@@ -1,0 +1,17 @@
+[Unit]
+Description=Zhongruan Remote Review Smee Relay (GitHub → smee.io → 本机 webhook)
+After=network-online.target dsh-remote-review.service
+Wants=network-online.target
+Requires=dsh-remote-review.service
+
+[Service]
+Type=simple
+# 出站连 smee.io，不占用腾讯云入站 80；GitHub Payload URL 填 Environment 里的 SMEE_URL
+EnvironmentFile=-/www/wwwroot/dsh-remote-review/smee.env
+ExecStart=/usr/bin/npx --yes smee-client@4.3.1 --url ${SMEE_URL} --target http://127.0.0.1:18787/webhook --path /
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

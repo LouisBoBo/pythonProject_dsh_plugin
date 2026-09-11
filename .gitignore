@@ -1,0 +1,25 @@
+# deps & build
+node_modules/
+.pnpm-store/
+dist/
+*.tgz
+*.tsbuildinfo
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# local env / secrets
+.plugin_env/
+.env
+.env.*
+*.pem
+server.env
+smee.env
+**/config.json.bak*
+
+# logs
+*.log
+npm-debug.log*

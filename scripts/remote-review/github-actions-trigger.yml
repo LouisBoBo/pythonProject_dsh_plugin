@@ -1,0 +1,88 @@
+# 绕开腾讯云 ↔ GitHub 双向不通：
+# Actions checkout → rsync 进机 → 本机 POST webhook(local_path)
+#
+# Secrets：STAGING_SSH_HOST / STAGING_SSH_USER / STAGING_SSH_KEY / REMOTE_REVIEW_SECRET
+
+name: Remote Review Trigger
+
+on:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-review-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require secrets
+        env:
+          STAGING_SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+          STAGING_SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          REMOTE_REVIEW_SECRET: ${{ secrets.REMOTE_REVIEW_SECRET }}
+        run: |
+          for k in STAGING_SSH_HOST STAGING_SSH_USER STAGING_SSH_KEY REMOTE_REVIEW_SECRET; do
+            if [ -z "${!k}" ]; then
+              echo "::error::缺少 Secret: $k"
+              exit 1
+            fi
+          done
+
+      - name: Ensure remote workspace
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script_stop: true
+          script: |
+            mkdir -p /root/.zhongruan/remote-review/workspaces/gh-LouisBoBo-pythonProject_zr_aicoding
+
+      - name: Rsync workspace
+        env:
+          HOST: ${{ secrets.STAGING_SSH_HOST }}
+          USER: ${{ secrets.STAGING_SSH_USER }}
+          KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          KEYFILE=$(mktemp)
+          trap 'rm -f "$KEYFILE"' EXIT
+          printf '%s\n' "$KEY" > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+          REMOTE_DIR="/root/.zhongruan/remote-review/workspaces/gh-LouisBoBo-pythonProject_zr_aicoding"
+          rsync -az --delete --exclude '.git' \
+            -e "ssh -i $KEYFILE -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20" \
+            ./ "${USER}@${HOST}:${REMOTE_DIR}/"
+
+      - name: Enqueue local_path review
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script_stop: true
+          envs: SECRET,SHA,REF_NAME,REPO
+          script: |
+            set -euo pipefail
+            REMOTE_DIR="/root/.zhongruan/remote-review/workspaces/gh-LouisBoBo-pythonProject_zr_aicoding"
+            BODY=$(printf '{"event":"simulate","local_path":"%s","commit":"%s","branch":"%s","repo":"%s","focus":"GitHub Actions %s@%s"}' \
+              "$REMOTE_DIR" "$SHA" "$REF_NAME" "$REPO" "$REPO" "${SHA:0:8}")
+            echo "$BODY" | curl -sS -f -X POST 'http://127.0.0.1:18787/webhook' \
+              -H 'Content-Type: application/json' \
+              -H "X-Remote-Review-Secret: $SECRET" \
+              --data-binary @-
+            echo
+        env:
+          SECRET: ${{ secrets.REMOTE_REVIEW_SECRET }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}

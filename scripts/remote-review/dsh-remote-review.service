@@ -1,0 +1,20 @@
+[Unit]
+Description=Zhongruan DSH Remote Review Webhook
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/www/wwwroot/dsh-remote-review
+EnvironmentFile=-/www/wwwroot/dsh-remote-review/server.env
+ExecStart=/usr/bin/node /www/wwwroot/dsh-remote-review/lib/cli.js
+Restart=on-failure
+RestartSec=3
+User=root
+# 仅本机回环；公网走 nginx /remote-review/
+Environment=REMOTE_REVIEW_LISTEN=127.0.0.1
+Environment=REMOTE_REVIEW_PORT=18787
+Environment=REMOTE_REVIEW_REQUIRE_SECRET=1
+Environment=WORKBUDDY_ENGINE=http://127.0.0.1:8091
+
+[Install]
+WantedBy=multi-user.target
