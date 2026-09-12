@@ -10,10 +10,30 @@ import { loadConfig, saveConfig } from './config.js'
 import { pathInScope } from './pathScope.js'
 import {
   _resetPendingConfirmForTests,
+  bindPendingJob,
   createPendingConfirm,
+  findPendingForCard,
 } from './pendingConfirm.js'
-import { prepareSandboxForJob, prepareSandboxSparse, prepareSandboxReuse } from './sandbox.js'
-import { relativizeToolPath } from './transcript.js'
+import { inferSparseBeforeAfter, diffSnapshots, prepareSandboxForJob, prepareSandboxSparse, prepareSandboxReuse } from './sandbox.js'
+import {
+  cardIdentity,
+  detachStaleJobUi,
+  requirementsConflict,
+} from './cardBootstrap.js'
+import { buildLiveEditSnippet, previewFileSnippet } from './editSnippet.js'
+import { relativizeToolPath, toolSnippetFromArgs, snippetFromTextDiff } from './transcript.js'
+import { createJob, findLatestJobForSession, loadJob, patchJob, setStatus } from './jobs.js'
+import {
+  hasClarifyEvidence,
+  looksLikeFollowUp,
+  needsRequirementClarify,
+} from './requirementGate.js'
+import { decideCodingGate, readAskUserAfterLastUser } from './clarifyFlow.js'
+import {
+  expandWriteScopeWithCompanions,
+  selectCompanionPromotions,
+} from './scopeCompanions.js'
+import { compactParentHandoff } from './sessionMemory.js'
 import { startServer, stopServer, getListenAddr } from './server.js'
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -88,6 +108,268 @@ async function main() {
     console.log('ok: tilde expand contract')
   }
 
+  // 门禁极薄：只拦空诉求；意图分流交给 LLM（工具 description）
+  {
+    const colMsg = '员工工时报表列表新增一列班别 分白班和晚班'
+    assert(!needsRequirementClarify(colMsg), '新增一列不得被当成新页面硬拦')
+    assert(!needsRequirementClarify('员工工时报表写入成功 但提示请求失败 请修复'), '修 bug 不得硬拦')
+    assert(needsRequirementClarify(''), '空诉求应硬拦')
+    assert(needsRequirementClarify('再改一下', true) === false, 'clarified=true 应放行')
+    assert(
+      needsRequirementClarify('报表中心菜单新增设备维修报表'),
+      '新增菜单/报表入口必须澄清',
+    )
+    assert(
+      needsRequirementClarify('报表中心菜单删除设备维修、设备保养、设备点检报表'),
+      '删除菜单/报表入口必须澄清',
+    )
+    assert(
+      needsRequirementClarify('报表中心菜单删除设备维修、设备保养、设备点检报表', true),
+      '空传 clarified=true 不得跳过澄清',
+    )
+    assert(
+      needsRequirementClarify('报表中心菜单彻底删除员工工时报表', true),
+      '原话含彻底删除 + 空 clarified 仍须拦',
+    )
+    assert(
+      hasClarifyEvidence('报表中心菜单彻底删除员工工时报表') === false,
+      '原话不得算已澄清',
+    )
+    assert(
+      hasClarifyEvidence('报表中心菜单彻底删除员工工时报表\n范围：菜单入口 + 对应页面文件/路由'),
+      '选择题结论（菜单入口+页面/路由）应算已澄清',
+    )
+    assert(
+      !needsRequirementClarify(
+        '报表中心菜单彻底删除员工工时报表\n范围：菜单入口 + 对应页面文件/路由',
+        true,
+      ),
+      '答完选择题后的范围结论应出确认卡',
+    )
+    {
+      const orig = '报表中心菜单彻底删除员工工时报表'
+      assert(decideCodingGate({ message: orig }).action === 'block', '无事件须拦')
+      assert(
+        decideCodingGate({ message: orig, clarified: true }).action === 'block',
+        '空 clarified 不得跳过',
+      )
+      const events = [
+        { type: 'user/message', data: { message: { content: orig } } },
+        { type: 'tool/call', data: { callId: 'c1', name: 'ask_user_question', arguments: '{}' } },
+        {
+          type: 'tool/result',
+          data: {
+            message: {
+              source: { kind: 'tool', callId: 'c1' },
+              content: [
+                {
+                  type: 'tool-result',
+                  content: [
+                    {
+                      type: 'text',
+                      text: JSON.stringify({
+                        answers: [
+                          {
+                            id: 'scope',
+                            selected: ['菜单入口 + 对应页面文件/路由'],
+                          },
+                        ],
+                      }),
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      ]
+      const ask = readAskUserAfterLastUser(events)
+      assert(ask.answered === true, 'DSH call/result 配对应算已答完')
+      assert(ask.summary.includes('菜单入口'), '应抽出选项文案')
+      const passed = decideCodingGate({ message: orig, clarified: true, events })
+      if (passed.action !== 'pass') throw new Error('答完后即使原话也放出确认卡')
+      assert(passed.via === 'ask_user_answered', 'via 应为会话答完')
+      assert(passed.requirement.includes('澄清结论'), '应把选项并进诉求')
+      const evidence = decideCodingGate({
+        message: orig + '\n范围：菜单入口 + 对应页面文件/路由',
+        clarified: true,
+      })
+      if (evidence.action !== 'pass') throw new Error('无事件时文案兜底仍放行')
+      assert(evidence.via === 'message_evidence', 'via 应为文案兜底')
+      assert(
+        decideCodingGate({
+          message: orig,
+          clarified: true,
+          events: [
+            { type: 'user/message', data: {} },
+            { type: 'tool/call', data: { callId: 'c1', name: 'ask_user_question', arguments: '{}' } },
+          ],
+        }).action === 'block',
+        '只出题未作答仍须拦',
+      )
+    }
+    assert(
+      !needsRequirementClarify(
+        '报表中心菜单删除设备维修等报表\n澄清：只去菜单项，保留路由与页面文件',
+        true,
+      ),
+      '带澄清痕迹后应放行',
+    )
+    assert(
+      needsRequirementClarify('报表中心新增一个员工考勤汇总页'),
+      '新增页面必须澄清',
+    )
+    assert(
+      !needsRequirementClarify(
+        '报表中心菜单新增设备维修报表\n澄清结论：明细表+筛选+分页',
+        true,
+      ),
+      '澄清后应放行',
+    )
+    assert(looksLikeFollowUp(colMsg), '非空诉求可挂续改 parent')
+    assert(looksLikeFollowUp('从零新增一个全新报表中心模块'), '非空即可；是否 begin/continue 由 LLM 选工具')
+    const j = createJob({ workspace, requirement: 't' })
+    setStatus(j, 'succeeded', 'ok')
+    patchJob(j.id, { conclusion_delivered: true })
+    assert(loadJob(j.id)?.conclusion_delivered === true, 'conclusion_delivered 应落盘')
+    console.log('ok: page/menu clarify gate + conclusion_delivered')
+  }
+
+  // 进度卡代码片断：从写码工具 args 抽取、限行、敏感路径跳过
+  {
+    const sn = toolSnippetFromArgs(
+      {
+        path: 'src/a.ts',
+        old_string: 'const x = 1',
+        new_string: 'const x = 2\nconst y = 3\n',
+      },
+      'StrReplace',
+      'src/a.ts',
+    )
+    assert(sn && sn.includes('+ const x = 2'), 'StrReplace 应抽 +new_string 片断')
+    assert(!toolSnippetFromArgs({ path: '.env', contents: 'SECRET=1' }, 'Write', '.env'), '.env 不得抽片断')
+    assert(!toolSnippetFromArgs({ path: 'a.ts', pattern: 'foo' }, 'Grep', 'a.ts'), 'Grep 不抽片断')
+    const live = snippetFromTextDiff('const a = 1\n', 'const a = 2\nconst b = 3\n')
+    assert(live && live.includes('- const a = 1') && live.includes('+ const a = 2'), '沙箱 diff 片断应含 +/-')
+    console.log('ok: progress tool snippets')
+  }
+
+  // 真实 edit 无 args：沙箱 diff + 写入后才发 running 的污染场景 + 预览兜底
+  {
+    const root = mkdtempSync(join(tmpdir(), 'cc-snip-'))
+    const ws = join(root, 'ws')
+    const sb = join(root, 'sb')
+    mkdirSync(join(ws, 'src'), { recursive: true })
+    mkdirSync(join(sb, 'src'), { recursive: true })
+    writeFileSync(join(ws, 'src', 'a.ts'), 'export const a = 1\n', 'utf8')
+    // 模拟 SDK：先写入沙箱，再发 running（旧逻辑会污染基线）
+    writeFileSync(join(sb, 'src', 'a.ts'), 'export const a = 2\nexport const b = 3\n', 'utf8')
+    const baseline = new Map<string, string>()
+    buildLiveEditSnippet({
+      sandbox: sb,
+      workspace: ws,
+      relPath: 'src/a.ts',
+      baseline,
+      phase: 'running',
+    })
+    const sn = buildLiveEditSnippet({
+      sandbox: sb,
+      workspace: ws,
+      relPath: 'src/a.ts',
+      baseline,
+      phase: 'completed',
+    })
+    assert(sn && sn.includes('+ export const a = 2'), '晚到 running 仍须出 +/- diff，实际=' + sn)
+    assert(previewFileSnippet('a\n\nb\nc\n')?.includes('c'), '预览兜底应取尾部非空行')
+    // 无变更时也要有预览片断
+    const baseline2 = new Map<string, string>()
+    writeFileSync(join(ws, 'src', 'same.ts'), 'same line\n', 'utf8')
+    writeFileSync(join(sb, 'src', 'same.ts'), 'same line\n', 'utf8')
+    const prev = buildLiveEditSnippet({
+      sandbox: sb,
+      workspace: ws,
+      relPath: 'src/same.ts',
+      baseline: baseline2,
+      phase: 'completed',
+    })
+    assert(prev && prev.includes('same line'), '无 diff 时须文件预览兜底')
+    rmSync(root, { recursive: true, force: true })
+    console.log('ok: live edit snippet race + fallback')
+  }
+
+  // 工具卡串台：新诉求不得挂上旧「已完成」job
+  {
+    const oldUi = {
+      job_id: 'ccj-20260912-191312-37f8',
+      requirement: '报表中心菜单新增设备点检报表\n澄清结论…',
+      status: 'succeeded',
+      kind: 'live',
+    }
+    const det = detachStaleJobUi({
+      ui: oldUi,
+      argsMessage: '报表中心菜单新增设备维修报表\n澄清结论…',
+    })
+    assert(det.stale === true, '点检→维修应判定串台')
+    assert(!det.ui.job_id, '串台后必须清空 job_id')
+    assert(String(det.ui.requirement || '').includes('维修'), '应改用本轮维修诉求')
+    const same = detachStaleJobUi({
+      ui: oldUi,
+      argsMessage: '报表中心菜单新增设备点检报表 澄清结论',
+    })
+    assert(same.stale === false, '同诉求刷新不应误拆')
+    assert(requirementsConflict('设备点检报表', '设备维修报表'), '点检/维修须冲突')
+    assert(
+      cardIdentity({ callId: 'call-new' }) !== cardIdentity({ callId: 'call-old' }),
+      '不同 callId 须不同卡身份',
+    )
+    console.log('ok: card bootstrap anti-stale')
+    {
+      const dir = mkdtempSync(join(tmpdir(), 'cc-sparse-'))
+      const ws = join(dir, 'ws')
+      const sb = join(dir, 'sb')
+      mkdirSync(join(ws, 'frontend/src/views/reports'), { recursive: true })
+      mkdirSync(join(ws, 'frontend/src/views/other'), { recursive: true })
+      mkdirSync(join(sb, 'frontend/src/views/reports'), { recursive: true })
+      writeFileSync(join(ws, 'frontend/src/views/reports/Keep.vue'), 'keep')
+      writeFileSync(join(ws, 'frontend/src/views/reports/Gone.vue'), 'gone')
+      writeFileSync(join(ws, 'frontend/src/views/other/Skip.vue'), 'skip')
+      writeFileSync(join(sb, 'frontend/src/views/reports/Keep.vue'), 'keep')
+      const { before, after } = inferSparseBeforeAfter(ws, sb, ['frontend/src/views/'])
+      const diff = diffSnapshots(before, after)
+      assert(
+        diff.deleted.includes('frontend/src/views/reports/Gone.vue'),
+        '同目录缺失应视为删除',
+      )
+      assert(
+        !diff.deleted.some((p) => p.includes('Skip.vue')),
+        '未进沙箱的目录不得当删除',
+      )
+      rmSync(dir, { recursive: true, force: true })
+      console.log('ok: sparse infer delete')
+    }
+  }
+
+  // 写范围连带 + 审后提升（防半套契约）
+  {
+    const expanded = expandWriteScopeWithCompanions(['backend/app/routers/', 'frontend/src/views/reports/'])
+    assert(expanded.some((x) => x.endsWith('schemas.py')), 'routers 应连带 schemas.py')
+    assert(expanded.some((x) => x.endsWith('models.py')), 'routers 应连带 models.py')
+    assert(expanded.some((x) => x.includes('api/')), 'views 应连带 api/')
+    const promoted = selectCompanionPromotions(
+      ['backend/app/routers/reports.py'],
+      ['backend/app/schemas.py', 'backend/erp.db', 'README.md'],
+    )
+    assert(promoted.includes('backend/app/schemas.py'), '应提升 schemas.py')
+    assert(!promoted.includes('backend/erp.db'), '不应提升 db')
+    const byScope = selectCompanionPromotions(
+      [],
+      ['backend/app/schemas.py'],
+      ['backend/app/routers/'],
+    )
+    assert(byScope.includes('backend/app/schemas.py'), '仅写范围含 routers 也应提升 schemas')
+    console.log('ok: scope companions')
+  }
+
   try {
     _resetHitlStoreForTests()
     _resetPendingConfirmForTests()
@@ -104,6 +386,91 @@ async function main() {
     assert(boot.ok, '服务启动失败: ' + boot.detail)
     const base = getListenAddr()
     assert(base, '无 listen addr')
+
+    // 会话隔离：同一工作区两张卡不得互相抢 pending / 已开工 job
+    {
+      _resetPendingConfirmForTests()
+      const a = createPendingConfirm({
+        workspace,
+        requirement: '会话A新增报表',
+        call_id: 'call-a',
+        session_id: 'sess-a',
+      })
+      const b = createPendingConfirm({
+        workspace,
+        requirement: '会话B改按钮',
+        call_id: 'call-b',
+        session_id: 'sess-b',
+      })
+      bindPendingJob(a.id, 'ccj-old-from-a')
+      const hitB = findPendingForCard({
+        workspace,
+        call_id: 'call-b',
+        session_id: 'sess-b',
+        requirement: '会话B改按钮',
+      })
+      assert(hitB && hitB.id === b.id, 'call-b 应对上自己的 waiting pending')
+      assert(!hitB.job_id, 'B 卡不应拿到 A 的 job_id')
+      const hitA = findPendingForCard({ workspace, call_id: 'call-a' })
+      assert(hitA && hitA.job_id === 'ccj-old-from-a', 'call-a 刷新后仍应对上已开工 job')
+      const steal = findPendingForCard({
+        workspace,
+        session_id: 'sess-b',
+        requirement: '会话B改按钮',
+      })
+      assert(steal && steal.id === b.id && steal.status === 'waiting', '无 call_id 时也不得返回已开工的 A')
+      assert(
+        !findPendingForCard({ workspace }),
+        '仅 workspace 不得命中 pending（防 CSRF）',
+      )
+      const resBare = await fetch(
+        base +
+          '/api/cursor-coding/pending-latest?workspace=' +
+          encodeURIComponent(workspace),
+      )
+      assert(resBare.status === 400, '仅 workspace 的 pending-latest 应 400，实际 ' + resBare.status)
+      const resA = await fetch(
+        base +
+          '/api/cursor-coding/pending-latest?workspace=' +
+          encodeURIComponent(workspace) +
+          '&call_id=call-b',
+      )
+      const bodyA = (await resA.json()) as { pending?: { confirm_token?: string; job_id?: string } }
+      assert(bodyA.pending && bodyA.pending.confirm_token === b.id, 'HTTP call_id 应对 B')
+      assert(!bodyA.pending.job_id, 'HTTP 不得把 A 的 job 交给 B')
+      _resetPendingConfirmForTests()
+      console.log('ok: pending-latest isolated by call_id')
+    }
+
+    // 续改记忆：按 DSH session 隔离，不按工作区抢最新成功 Job
+    {
+      const wsIso = workspace + '-iso'
+      mkdirSync(wsIso, { recursive: true })
+      const ja = createJob({
+        workspace: wsIso,
+        requirement: '会话A',
+        dsh_session_id: 'sess-a',
+        dsh_call_id: 'call-a',
+      })
+      setStatus(ja, 'succeeded', 'A完成')
+      const jb = createJob({
+        workspace: wsIso,
+        requirement: '会话B',
+        dsh_session_id: 'sess-b',
+        dsh_call_id: 'call-b',
+      })
+      setStatus(jb, 'succeeded', 'B完成')
+      const hitB = findLatestJobForSession({ workspace: wsIso, session_id: 'sess-b' })
+      assert(hitB && hitB.id === jb.id, '续改应命中本会话 Job')
+      const miss = findLatestJobForSession({ workspace: wsIso, session_id: 'sess-x' })
+      assert(!miss, '其它会话不得继承 Job')
+      const noSid = findLatestJobForSession({ workspace: wsIso })
+      assert(!noSid, '无 session_id 时不得按工作区抢成功 Job')
+      const handoff = compactParentHandoff(loadJob(jb.id)!)
+      assert(handoff.includes('parent=' + jb.id), 'handoff 须带 parent id')
+      assert(handoff.includes('会话B'), 'handoff 须带上次诉求')
+      console.log('ok: session-scoped job memory')
+    }
 
     // 非本机 Origin：403
     {
@@ -124,17 +491,22 @@ async function main() {
 
     // 无 Key：403
     {
+      const pending = createPendingConfirm({ workspace, requirement: '改一下标题' })
       const issued = issue({
         action: 'cursor-coding.confirm',
         workspace,
         requirement: '改一下标题',
+        confirm_token: pending.id,
       })
       const res = await fetch(base + '/api/cursor-coding/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          withConfirmToken(workspace, '改一下标题', { nonce: issued.nonce }),
-        ),
+        body: JSON.stringify({
+          workspace,
+          requirement: '改一下标题',
+          confirm_token: pending.id,
+          nonce: issued.nonce,
+        }),
       })
       assert(res.status === 403, '无 Key 时应 403，实际 ' + res.status)
     }
@@ -151,6 +523,20 @@ async function main() {
         body: JSON.stringify(withConfirmToken(workspace, '改一下标题')),
       })
       assert(res.status === 401, '无 nonce 应 401，实际 ' + res.status)
+    }
+
+    // HTTP 签发 confirm 无 token：400
+    {
+      const res = await fetch(base + '/api/hitl/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'cursor-coding.confirm',
+          workspace,
+          requirement: '改一下标题',
+        }),
+      })
+      assert(res.status === 400, 'HTTP confirm 无 confirm_token 应 400，实际 ' + res.status)
     }
 
     // 无 confirm_token：400
@@ -208,7 +594,13 @@ async function main() {
       const body = readFileSync(join(workspace, '.cursor-coding-mock.md'), 'utf8')
       assert(body.includes('阶段 B 自检'), '同步内容应含诉求摘要')
       const jobRes = await fetch(base + '/api/cursor-coding/jobs/' + encodeURIComponent(jobId))
-      const jobJson = (await jobRes.json()) as { job?: { assistant_text?: string; transcript?: unknown[]; thinking_text?: string } }
+      const jobJson = (await jobRes.json()) as {
+        job?: {
+          assistant_text?: string
+          transcript?: { kind?: string; name?: string; snippet?: string }[]
+          thinking_text?: string
+        }
+      }
       assert(
         String(jobJson.job?.assistant_text || '').includes('说明方案'),
         'assistant_text 应保留 Cursor 正文',
@@ -217,7 +609,63 @@ async function main() {
         Array.isArray(jobJson.job?.transcript) && (jobJson.job?.transcript?.length || 0) > 0,
         'transcript 应有对话片段',
       )
+      const writeTool = (jobJson.job?.transcript || []).find(
+        (it) =>
+          it.kind === 'tool' &&
+          /write|edit/i.test(String(it.name || '')),
+      )
+      assert(writeTool && String(writeTool.snippet || '').length > 0, '写码工具进度行应带代码片断（无 args 时由沙箱 diff/预览补齐）')
+      assert(
+        /mock run|\+ |export|requirement/i.test(String(writeTool.snippet || '')),
+        '片断应含实际代码内容，实际=' + String(writeTool.snippet || '').slice(0, 80),
+      )
       assert(String(jobJson.job?.thinking_text || '').length > 0, 'thinking_text 应有内容（Mock）')
+
+      // cancel 须 HITL
+      {
+        const bad = await fetch(
+          base + '/api/cursor-coding/jobs/' + encodeURIComponent(jobId) + '/cancel',
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+        )
+        assert(bad.status === 401, 'cancel 无 nonce 应 401，实际 ' + bad.status)
+      }
+    }
+
+    // 续改：带 parent_job_id + 新诉求（增列班别）→ 新 job，不得复用旧 job id
+    {
+      _resetHitlStoreForTests()
+      const contReq = '员工工时报表列表新增一列班别 分白班和晚班'
+      const issued = issue({
+        action: 'cursor-coding.confirm',
+        workspace,
+        requirement: contReq,
+      })
+      const res = await fetch(base + '/api/cursor-coding/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          withConfirmToken(workspace, contReq, {
+            nonce: issued.nonce,
+            parent_job_id: jobId,
+          }),
+        ),
+      })
+      const data = (await res.json()) as { ok?: boolean; job_id?: string }
+      assert(res.ok && data.ok && data.job_id, '增列续改 confirm 应成功')
+      assert(data.job_id !== jobId, '续改必须产生新 job_id，禁止复用旧完成任务')
+      const childId = data.job_id!
+      const terminal = await waitJobStatus(base, childId, ['succeeded', 'failed', 'pending_review'])
+      assert(
+        terminal.status === 'succeeded' || terminal.status === 'pending_review',
+        '续改应跑完，实际 ' + terminal.status,
+      )
+      const jobRes = await fetch(base + '/api/cursor-coding/jobs/' + encodeURIComponent(childId))
+      const jobBody = (await jobRes.json()) as {
+        job?: { parent_job_id?: string; requirement?: string; status?: string }
+      }
+      assert(jobBody.job?.parent_job_id === jobId, '续改应记录 parent_job_id')
+      assert(String(jobBody.job?.requirement || '').includes('班别'), '续改诉求应是本轮增列，不是旧请求失败文案')
+      console.log('ok: continue new job for column tweak')
     }
 
     // 续改：带 parent_job_id → 自动同步成功

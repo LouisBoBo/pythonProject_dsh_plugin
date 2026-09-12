@@ -475,6 +475,70 @@ export function snapshotSandbox(sandbox: string): Map<string, string> {
   return map
 }
 
+/** 按写范围给真工程做指纹快照（目录会展开）。 */
+export function snapshotScope(root: string, scope: string[]): Map<string, string> {
+  const map = new Map<string, string>()
+  const r = resolve(root)
+  if (!existsSync(r)) return map
+  for (const raw of scope || []) {
+    const rel0 = normalizeRel(raw).replace(/\/$/, '')
+    if (!rel0) continue
+    const p = join(r, rel0)
+    if (!existsSync(p)) continue
+    let st
+    try {
+      st = statSync(p)
+    } catch {
+      continue
+    }
+    if (st.isFile()) {
+      map.set(rel0, fingerprintFile(p))
+      continue
+    }
+    if (!st.isDirectory()) continue
+    for (const child of walkFiles(p)) {
+      const rel = normalizeRel(rel0 + '/' + child)
+      map.set(rel, fingerprintFile(join(p, child)))
+    }
+  }
+  return map
+}
+
+/**
+ * 进程崩溃后无法拿到开工前快照时：用稀疏沙箱现存文件 + 同目录真工程文件推断 before。
+ * 只把「沙箱里已经有过该目录」的缺失文件当删除，避免把未拷进沙箱的写范围整目录删掉。
+ */
+export function inferSparseBeforeAfter(
+  workspace: string,
+  sandbox: string,
+  writeScope: string[],
+): { before: Map<string, string>; after: Map<string, string> } {
+  const after = snapshotSandbox(sandbox)
+  const before = new Map<string, string>()
+  const ws = resolve(workspace)
+  for (const [rel] of after) {
+    const p = join(ws, rel)
+    try {
+      if (existsSync(p) && statSync(p).isFile()) before.set(rel, fingerprintFile(p))
+      else before.set(rel, '__absent__')
+    } catch {
+      before.set(rel, '__absent__')
+    }
+  }
+  const sandboxParents = new Set<string>()
+  for (const rel of after.keys()) {
+    const d = dirname(rel).replace(/\\/g, '/')
+    if (d && d !== '.') sandboxParents.add(d)
+  }
+  const scoped = snapshotScope(ws, writeScope)
+  for (const [rel, fp] of scoped) {
+    if (after.has(rel)) continue
+    const d = dirname(rel).replace(/\\/g, '/')
+    if (sandboxParents.has(d)) before.set(rel, fp)
+  }
+  return { before, after }
+}
+
 export function diffSnapshots(
   before: Map<string, string>,
   after: Map<string, string>,

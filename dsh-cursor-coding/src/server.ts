@@ -3,7 +3,7 @@
  * 仅绑定 127.0.0.1；阶段 A：confirm 后后台沙箱 → Cursor → 受限同步。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -17,20 +17,30 @@ import {
 import { consume, issue } from './hitl.js'
 import {
   createJob,
-  findLatestSucceeded,
+  findLatestJobForSession,
+  forceCancelJob,
   jobSummary,
   listJobs,
   loadJob,
   saveJob,
   setStatus,
 } from './jobs.js'
-import { runJobBackground, applyJobReview, steerJobBackground } from './orchestrator/runJob.js'
+import { runJobBackground, applyJobReview, steerJobBackground, healStalePendingReview, recoverOrphanRunningJobs } from './orchestrator/runJob.js'
+import { expandWriteScopeWithCompanions } from './scopeCompanions.js'
+import { needsRequirementClarify } from './requirementGate.js'
 import {
   browserOriginAllowed,
   isLoopbackBrowserOrigin,
   requestOrigin,
 } from './localAccess.js'
-import { bindPendingJob, findLatestPendingForWorkspace, loadPendingConfirm } from './pendingConfirm.js'
+import {
+  bindPendingJob,
+  claimPendingConfirm,
+  createPendingConfirm,
+  findPendingForCard,
+  loadPendingConfirm,
+  releasePendingClaim,
+} from './pendingConfirm.js'
 import { formatDialogMarkdown } from './transcript.js'
 import type { HitlAction } from './types.js'
 
@@ -162,16 +172,32 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (method === 'GET' && path === '/health') {
+    const sampleDelete = '报表中心菜单删除设备维修、设备保养、设备点检报表'
+    let pluginVersion = '0.6.30'
+    try {
+      const pkg = JSON.parse(
+        readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+      ) as { version?: string }
+      if (pkg.version) pluginVersion = pkg.version
+    } catch {
+      /* ignore */
+    }
     send(
       res,
       200,
       {
         ok: true,
         service: SERVICE_NAME,
+        pluginVersion,
         listen: listenAddr || `http://${cfg.listen}:${cfg.port}`,
         view: publicConfigView(cfg),
         cursorKeyReady: cursorKeyReady(cfg),
         ui: '/ui',
+        gate: {
+          sample: sampleDelete,
+          mustClarify: needsRequirementClarify(sampleDelete),
+          fakeClarifiedBlocked: needsRequirementClarify(sampleDelete, true),
+        },
         detail: cursorKeyReady(cfg)
           ? '服务就绪；写码前已配置 Cursor API Key'
           : '请到「设置 → Cursor 写码」填写 Cursor API Key（硬性要求）',
@@ -231,6 +257,51 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return
   }
 
+  if (method === 'POST' && path === '/api/cursor-coding/pending') {
+    if (rejectBadOrigin(req, res)) return
+    let body: Record<string, unknown> = {}
+    try {
+      body = parseJson(await readBody(req))
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const workspace = resolve(String(body.workspace || '').trim())
+    const requirement = String(body.requirement || '').trim()
+    if (!workspace || !requirement) {
+      send(res, 400, { ok: false, detail: '缺少 workspace 或 requirement' }, req)
+      return
+    }
+    if (!existsSync(workspace) || !statSync(workspace).isDirectory()) {
+      send(res, 400, { ok: false, detail: `工程路径无效：${workspace}` }, req)
+      return
+    }
+    const pending = createPendingConfirm({
+      workspace,
+      requirement,
+      parent_job_id: typeof body.parent_job_id === 'string' ? body.parent_job_id : undefined,
+      call_id: typeof body.call_id === 'string' ? body.call_id : undefined,
+      session_id: typeof body.session_id === 'string' ? body.session_id : undefined,
+    })
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        confirm_token: pending.id,
+        pending: {
+          confirm_token: pending.id,
+          workspace: pending.workspace,
+          requirement: pending.requirement,
+          status: pending.status,
+          created_at: pending.created_at,
+        },
+      },
+      req,
+    )
+    return
+  }
+
   if (method === 'POST' && path === '/api/hitl/issue') {
     if (rejectBadOrigin(req, res)) return
     let body: Record<string, unknown> = {}
@@ -241,16 +312,74 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return
     }
     const action = String(body.action || '').trim() as HitlAction
-    if (action !== 'cursor-coding.confirm' && action !== 'cursor-coding.apply' && action !== 'cursor-coding.steer') {
+    if (
+      action !== 'cursor-coding.confirm' &&
+      action !== 'cursor-coding.apply' &&
+      action !== 'cursor-coding.steer' &&
+      action !== 'cursor-coding.cancel'
+    ) {
       send(
         res,
         400,
         {
           ok: false,
-          detail: 'action 须为 cursor-coding.confirm / apply / steer',
+          detail: 'action 须为 cursor-coding.confirm / apply / steer / cancel',
         },
         req,
       )
+      return
+    }
+    // confirm：必须绑定有效 waiting pending，禁止无卡签发 nonce
+    if (action === 'cursor-coding.confirm') {
+      const confirmToken = String(body.confirm_token || '').trim()
+      if (!confirmToken) {
+        send(
+          res,
+          400,
+          {
+            ok: false,
+            code: 'confirm_token_required',
+            detail: '签发 confirm 须携带 confirm_token',
+          },
+          req,
+        )
+        return
+      }
+      const pending = loadPendingConfirm(confirmToken)
+      if (!pending || pending.status === 'cancelled') {
+        send(res, 400, { ok: false, detail: '确认令牌无效', code: 'pending_invalid' }, req)
+        return
+      }
+      if (pending.status !== 'waiting' && pending.status !== 'claiming') {
+        send(res, 400, { ok: false, detail: '确认单已不可签发', code: 'pending_not_waiting' }, req)
+        return
+      }
+      const issued = issue({
+        action,
+        workspace: pending.workspace,
+        requirement: pending.requirement,
+        confirm_token: pending.id,
+      })
+      send(res, 200, issued, req)
+      return
+    }
+    if (action === 'cursor-coding.cancel') {
+      const jobId = String(body.job_id || '').trim()
+      if (!jobId) {
+        send(res, 400, { ok: false, detail: '签发 cancel 须携带 job_id' }, req)
+        return
+      }
+      const job = loadJob(jobId)
+      if (!job) {
+        send(res, 404, { ok: false, detail: '任务不存在' }, req)
+        return
+      }
+      const issued = issue({
+        action,
+        workspace: job.workspace,
+        job_id: job.id,
+      })
+      send(res, 200, issued, req)
       return
     }
     const issued = issue({
@@ -285,19 +414,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
       return
     }
-    const workspace = String(body.workspace || '').trim()
-    const requirement = String(body.requirement || '').trim()
     const nonce = String(body.nonce || body.hitl_nonce || '').trim()
-    const parentJobId = String(body.parent_job_id || '').trim() || null
     const confirmToken = String(body.confirm_token || '').trim()
-    if (!workspace) {
-      send(res, 400, { ok: false, detail: 'workspace 不能为空（本机工程绝对路径）' }, req)
-      return
-    }
-    if (!requirement) {
-      send(res, 400, { ok: false, detail: 'requirement 不能为空' }, req)
-      return
-    }
     if (!confirmToken) {
       send(
         res,
@@ -311,52 +429,99 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       )
       return
     }
-    const abs = resolve(workspace)
-    if (!existsSync(abs)) {
-      send(res, 400, { ok: false, detail: `工程路径不存在：${abs}` }, req)
-      return
-    }
-    const pending = loadPendingConfirm(confirmToken)
-    if (!pending || pending.status === 'cancelled') {
+    const pending0 = loadPendingConfirm(confirmToken)
+    if (!pending0 || pending0.status === 'cancelled') {
       send(res, 400, { ok: false, detail: `确认令牌无效：${confirmToken}` }, req)
       return
     }
-    if (pending.status === 'started' && pending.job_id) {
+    // 幂等：已开工直接返回
+    if ((pending0.status === 'started' || pending0.status === 'claiming') && pending0.job_id) {
       send(
         res,
         200,
         {
           ok: true,
-          job_id: pending.job_id,
-          job: loadJob(pending.job_id),
+          job_id: pending0.job_id,
+          job: loadJob(pending0.job_id),
           detail: '该确认已开工',
-          stream: `/api/cursor-coding/jobs/${encodeURIComponent(pending.job_id)}/stream`,
+          stream: `/api/cursor-coding/jobs/${encodeURIComponent(pending0.job_id)}/stream`,
         },
         req,
       )
       return
     }
-    if (pending.workspace !== abs || pending.requirement !== requirement) {
-      send(res, 400, { ok: false, detail: '确认令牌与工作区/诉求不匹配' }, req)
+    // 诉求/工作区以 pending 为准，避免卡上 lastUserUtterance 与 Agent message 不一致导致 400
+    const abs = resolve(pending0.workspace)
+    const requirement = pending0.requirement
+    const parentJobId =
+      String(pending0.parent_job_id || body.parent_job_id || '').trim() || null
+    if (!requirement) {
+      send(res, 400, { ok: false, detail: '确认单缺少诉求' }, req)
       return
     }
+    if (!existsSync(abs)) {
+      send(res, 400, { ok: false, detail: `工程路径不存在：${abs}` }, req)
+      return
+    }
+    try {
+      if (!statSync(abs).isDirectory()) {
+        send(res, 400, { ok: false, detail: `工程路径须为目录：${abs}` }, req)
+        return
+      }
+    } catch {
+      send(res, 400, { ok: false, detail: `无法读取工程路径：${abs}` }, req)
+      return
+    }
+    // HITL 绑定 pending 上的 workspace/requirement + confirm_token
     const hitl = consume({
       nonce,
       action: 'cursor-coding.confirm',
       workspace: abs,
       requirement,
+      confirm_token: confirmToken,
     })
     if (!hitl.ok) {
       send(res, 401, { ok: false, detail: hitl.detail, code: hitl.code }, req)
       return
     }
+    const claimed = claimPendingConfirm(confirmToken)
+    if (!claimed.ok) {
+      if (claimed.pending?.job_id) {
+        send(
+          res,
+          200,
+          {
+            ok: true,
+            job_id: claimed.pending.job_id,
+            job: loadJob(claimed.pending.job_id),
+            detail: '该确认已开工',
+            stream: `/api/cursor-coding/jobs/${encodeURIComponent(claimed.pending.job_id)}/stream`,
+          },
+          req,
+        )
+        return
+      }
+      send(
+        res,
+        409,
+        {
+          ok: false,
+          code: claimed.code || 'pending_busy',
+          detail: claimed.detail || '确认正在处理中，请稍候',
+        },
+        req,
+      )
+      return
+    }
     if (parentJobId) {
       const parent = loadJob(parentJobId)
       if (!parent) {
+        releasePendingClaim(confirmToken)
         send(res, 400, { ok: false, detail: `parent_job_id 不存在：${parentJobId}` }, req)
         return
       }
       if (parent.workspace !== abs) {
+        releasePendingClaim(confirmToken)
         send(
           res,
           400,
@@ -369,14 +534,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         return
       }
     }
-    const job = createJob({
-      workspace: abs,
-      requirement,
-      parent_job_id: parentJobId,
-      write_scope: cfg.writeScope,
-      continue_count: parentJobId ? (loadJob(parentJobId)?.continue_count || 0) + 1 : 0,
-    })
-    bindPendingJob(confirmToken, job.id)
+    let job
+    try {
+      job = createJob({
+        workspace: abs,
+        requirement,
+        parent_job_id: parentJobId,
+        dsh_session_id: pending0.session_id || null,
+        dsh_call_id: pending0.call_id || null,
+        write_scope: expandWriteScopeWithCompanions(cfg.writeScope),
+        continue_count: parentJobId ? (loadJob(parentJobId)?.continue_count || 0) + 1 : 0,
+      })
+      bindPendingJob(confirmToken, job.id)
+    } catch (err) {
+      releasePendingClaim(confirmToken)
+      send(res, 500, { ok: false, detail: '创建任务失败' }, req)
+      console.error('[cursor-coding] createJob failed', err)
+      return
+    }
     setStatus(job, 'queued', '已确认入队，后台启动 Cursor…')
     setImmediate(() => startPipeline(job.id))
     send(
@@ -484,7 +659,30 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       send(res, 400, { ok: false, detail: '缺少 workspace' }, req)
       return
     }
-    const pending = findLatestPendingForWorkspace(workspace)
+    const callId = String(u.searchParams.get('call_id') || '').trim()
+    const sessionId = String(u.searchParams.get('session_id') || '').trim()
+    const requirement = String(u.searchParams.get('requirement') || '').trim()
+    // 禁止仅 workspace：否则本机其它页可偷到 confirm_token
+    if (!callId && !(sessionId && requirement)) {
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code: 'card_identity_required',
+          detail: 'pending-latest 须带 call_id，或同时带 session_id + requirement',
+          pending: null,
+        },
+        req,
+      )
+      return
+    }
+    const pending = findPendingForCard({
+      workspace,
+      call_id: callId,
+      session_id: sessionId,
+      requirement,
+    })
     send(
       res,
       200,
@@ -498,6 +696,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
               parent_job_id: pending.parent_job_id || '',
               status: pending.status,
               job_id: pending.job_id || '',
+              call_id: pending.call_id || '',
+              session_id: pending.session_id || '',
               created_at: pending.created_at,
             }
           : null,
@@ -594,6 +794,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       writeEv({ type: 'hello', job_id: id, service: SERVICE_NAME })
       const tick = () => {
         if (closed) return
+        healStalePendingReview(id)
         const job = loadJob(id)
         if (!job) {
           writeEv({ type: 'error', message: '任务消失' })
@@ -638,7 +839,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
 
     const id = decodeURIComponent(rest)
-    const job = loadJob(id)
+    const healed = healStalePendingReview(id)
+    const job = healed || loadJob(id)
     if (!job) {
       send(res, 404, { ok: false, detail: '任务不存在' }, req)
       return
@@ -650,24 +852,44 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (method === 'POST' && path.match(/^\/api\/cursor-coding\/jobs\/[^/]+\/cancel$/)) {
     if (rejectBadOrigin(req, res)) return
     const id = decodeURIComponent(path.split('/')[4] || '')
-    const job = loadJob(id)
+    let body: Record<string, unknown> = {}
+    try {
+      const raw = await readBody(req)
+      if (raw && String(raw).trim()) body = parseJson(raw)
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const nonce = String(body.nonce || body.hitl_nonce || '').trim()
+    const hitl = consume({
+      nonce,
+      action: 'cursor-coding.cancel',
+      job_id: id,
+    })
+    if (!hitl.ok) {
+      send(res, 401, { ok: false, detail: hitl.detail, code: hitl.code }, req)
+      return
+    }
+    const job = forceCancelJob(id)
     if (!job) {
       send(res, 404, { ok: false, detail: '任务不存在' }, req)
       return
     }
-    job.cancelled = true
-    saveJob(job)
-    setStatus(job, 'cancelled', '用户取消')
-    send(res, 200, { ok: true, job: loadJob(id) }, req)
+    send(res, 200, { ok: true, job }, req)
     return
   }
 
   if (method === 'GET' && path === '/api/cursor-coding/continue-hint') {
     if (rejectBadOrigin(req, res)) return
-    const workspace = String(
-      new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('workspace') || '',
-    ).trim()
-    const parent = workspace ? findLatestSucceeded(resolve(workspace)) : null
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const workspace = String(u.searchParams.get('workspace') || '').trim()
+    const sessionId = String(u.searchParams.get('session_id') || '').trim()
+    const parent = workspace
+      ? findLatestJobForSession({
+          workspace: resolve(workspace),
+          session_id: sessionId,
+        })
+      : null
     send(
       res,
       200,
@@ -677,8 +899,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         parent_job_id: parent?.id || null,
         workspace: parent?.workspace || null,
         detail: parent
-          ? '同工程存在成功任务，可走续改确认卡'
-          : '无成功 parent，请走首轮 begin',
+          ? sessionId
+            ? '本会话存在成功任务，可走续改确认卡'
+            : '同工程存在成功任务（未带 session_id，仅排查）'
+          : sessionId
+            ? '本会话无成功 parent，请走首轮 begin 或显式 parent_job_id'
+            : '无成功 parent，请走首轮 begin',
       },
       req,
     )
@@ -709,19 +935,36 @@ export async function startServer(): Promise<{
   return new Promise((resolvePromise) => {
     const s = createServer((req, res) => {
       void handle(req, res).catch((err) => {
-        if (!res.headersSent) send(res, 500, { ok: false, detail: String(err) }, req)
+        if (!res.headersSent) send(res, 500, { ok: false, detail: '内部错误' }, req)
+        console.error('[cursor-coding] handle error', err)
       })
     })
     s.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         const addr = `http://${cfg.listen}:${cfg.port}`
-        listenAddr = addr
-        resolvePromise({
-          ok: true,
-          addr,
-          already: true,
-          detail: `端口 ${cfg.port} 已有服务：${addr}（若非本插件请改设置端口）`,
-        })
+        void (async () => {
+          try {
+            const res = await fetch(addr + '/health', { signal: AbortSignal.timeout(2000) })
+            const body = (await res.json()) as { service?: string }
+            if (body && body.service === SERVICE_NAME) {
+              listenAddr = addr
+              resolvePromise({
+                ok: true,
+                addr,
+                already: true,
+                detail: `端口 ${cfg.port} 已是本插件服务：${addr}`,
+              })
+              return
+            }
+          } catch {
+            /* not our service */
+          }
+          resolvePromise({
+            ok: false,
+            addr: '',
+            detail: `端口 ${cfg.port} 已被其它进程占用（不是 dsh-cursor-coding）。请改设置端口或结束占用进程。`,
+          })
+        })()
         return
       }
       resolvePromise({ ok: false, addr: '', detail: String(err) })
@@ -730,6 +973,11 @@ export async function startServer(): Promise<{
       server = s
       listenAddr = `http://${cfg.listen}:${cfg.port}`
       console.log(`[cursor-coding] 本机服务已监听 ${listenAddr}`)
+      void recoverOrphanRunningJobs()
+        .then((n) => {
+          if (n) console.log(`[cursor-coding] 已收口 ${n} 个中断中的写码任务`)
+        })
+        .catch((err) => console.warn('[cursor-coding] 收口中断任务失败', err))
       resolvePromise({ ok: true, addr: listenAddr, detail: `服务: ${listenAddr}` })
     })
   })

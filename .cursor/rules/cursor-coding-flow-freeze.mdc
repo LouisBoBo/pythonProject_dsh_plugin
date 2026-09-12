@@ -6,14 +6,23 @@ alwaysApply: false
 
 # Cursor 写码插件 · 主流程冻结
 
-权威说明：`docs/04-Cursor-AI-Coding逼真版本/Cursor写码插件-主流程冻结.md`
+权威说明：`docs/04-Cursor-AI-Coding逼真版本/Cursor写码插件-主流程冻结.md`  
+会话分层：`docs/架构与选型/DSH会话与记忆分层.md`
 
 ## 冻结步骤（勿改顺序/职责）
 
-1. **澄清**：大改/新增/删除页菜单 → DSH `ask_user_question`（禁止长文反问、禁止自造问卷）
+1. **澄清**：新增/删除页面·菜单·报表入口 → **必须** DSH `ask_user_question`（禁止跳过直接确认卡；「新增一列」等小改除外）
 2. **确认卡**：`zr_cursor_begin` 阻塞到用户点确认（确认前不写码、不 finish、正文空）
 3. **进度卡**：点确认后才开工；卡内只过程（无说明方案/结论）
-4. **正文结论**：仅 `zr_cursor_finish` 在同步完成后输出「本轮结论」
+4. **正文结论**：写码终态后必须在聊天正文输出「本轮结论」（begin/continue 返回时带回；finish 仅兜底）。**凡写码（含续改）一定要有结论。**
+
+## 会话分层（禁止自造）
+
+- 聊天 / 压缩 / `callId`·`sessionId` → **DSH**
+- 写码过程 / 沙箱 / 同步 → **本机 Job**（须记 `dsh_session_id` / `dsh_call_id`）
+- `sessionStorage` → **仅加速**（前缀 `dsh-cc-accel:`）
+- 确认卡对账用 **callId**；续改只找 **本会话** 成功 Job
+- 禁止：按工作区抢 pending/Job；禁止 Cursor thinking 倒进 DSH 聊天
 
 ## 允许
 
@@ -25,3 +34,4 @@ alwaysApply: false
 - 进度未结束就往聊天正文倒内容  
 - 卡内与正文双份结论  
 - 用 jobs/status/wait 代替主路径  
+- 插件另造会话树 / 把 sessionStorage 当权威  

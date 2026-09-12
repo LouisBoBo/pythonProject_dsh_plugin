@@ -517,7 +517,20 @@
         const workspace = $('workspace').value.trim()
         const requirement = $('requirement').value.trim()
         if (!workspace || !requirement) throw new Error('请填写工程路径与诉求')
-        const nonce = await issueHitl('cursor-coding.confirm', { workspace, requirement })
+        const pendOut = await api('/api/cursor-coding/pending', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace, requirement }),
+        })
+        if (!pendOut.data || !pendOut.data.ok || !pendOut.data.confirm_token) {
+          throw new Error((pendOut.data && pendOut.data.detail) || '创建确认单失败')
+        }
+        const confirmToken = String(pendOut.data.confirm_token)
+        const nonce = await issueHitl('cursor-coding.confirm', {
+          workspace,
+          requirement,
+          confirm_token: confirmToken,
+        })
         const scope = $('writeScope').value
           .split(/[\n,]+/)
           .map((s) => s.trim())
@@ -533,7 +546,7 @@
         const out = await api('/api/cursor-coding/confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspace, requirement, nonce }),
+          body: JSON.stringify({ workspace, requirement, nonce, confirm_token: confirmToken }),
         })
         if (!out.data || !out.data.ok) throw new Error((out.data && out.data.detail) || 'confirm 失败')
         transcript = []

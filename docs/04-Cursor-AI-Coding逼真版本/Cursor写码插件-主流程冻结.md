@@ -1,21 +1,23 @@
 # Cursor 写码插件 · 主流程冻结（0.6.7）
 
 > **状态：已冻结**  
-> 包：`@zhongruan/dsh-cursor-coding@0.6.7`  
+> 包：`@zhongruan/dsh-cursor-coding`（主流程形态冻结；会话分层见 [DSH会话与记忆分层.md](../架构与选型/DSH会话与记忆分层.md)）  
 > 口径：整体流程已对齐产品验收，**禁止再改主流程形态**；仅允许在不改变步骤顺序与职责边界的前提下做细节优化（文案、滚动、性能、边界 bug）。
+>
+> **会话**：聊天/压缩交给 DSH；插件只维护本机 Job 执行账本（`dsh_session_id`/`dsh_call_id` 对账），`sessionStorage` 仅加速。
 
 ---
 
 ## 冻结主流程（一步一步）
 
 ```text
-1. 需求澄清（大改/新增/删除报表·页面·菜单）
+1. 需求澄清（**新增/删除** 报表·页面·菜单入口 —— 服务端硬拦；「新增一列」等小改除外）
    → DSH 原生 ask_user_question（模型按理解出选择题卡）
    → 用户勾选提交
-   → 禁止：长文反问、插件自造澄清表单、先 begin
+   → 禁止：长文反问、插件自造澄清表单、跳过澄清直接 begin
 
 2. 确认卡（HITL）
-   → zr_cursor_begin（clarified=true；小改可直接 begin）
+   → zr_cursor_begin（澄清后 clarified=true；小改可直接 begin）
    → 只出确认卡，并阻塞到用户点击「确认并用 Cursor 开写」
    → 确认前：不写码、不调 finish、聊天正文零输出、助手禁止复述/报状态
 
@@ -25,9 +27,9 @@
    → 禁止：卡内展示「说明方案/结论」与正文重复
 
 4. 正文结论
-   → zr_cursor_finish(job_id|workspace) 等进度与同步结束后
-   → 仅此时把「本轮结论」写入聊天正文
-   → 追问在对话框继续（续改走 zr_cursor_continue，同样确认卡）
+   → 写码与同步结束后，聊天正文必须有「本轮结论」（begin/continue 终态返回；zr_cursor_finish 仅兜底）
+   → **凡写码（含续改）一定要有结论**
+   → 追问/续改同样：确认卡 → 进度 → 正文结论
 ```
 
 ---
@@ -39,7 +41,7 @@
 | 澄清 | DSH `ask_user_question` | 空（勿复述选项表） |
 | 确认 | 插件确认卡 | 空 |
 | 写码过程 | 插件进度卡 | 空 |
-| 收口 | `zr_cursor_finish` | 仅「本轮结论」 |
+| 收口 | begin/continue 终态返回（finish 兜底） | 「本轮结论」必进正文 |
 
 | 做 | 不做 |
 | --- | --- |

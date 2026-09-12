@@ -40,6 +40,112 @@ window.__ModuleLoader__.load({
       return 'http://' + host + ':' + port
     }
 
+    var TERMINAL_JOB = {
+      succeeded: 1,
+      failed: 1,
+      cancelled: 1,
+      blocked_no_runner: 1,
+    }
+
+    function sealTranscriptItems(items) {
+      if (!Array.isArray(items)) return items
+      return items.map(function (it) {
+        return it && it.streaming ? Object.assign({}, it, { streaming: false }) : it
+      })
+    }
+
+    function toolBlockCancelled(block) {
+      if (!block) return false
+      var err = block.error || {}
+      var code = String(err.code || '')
+      var name = String(err.name || '')
+      var msg = String(err.message || err.detail || '')
+      if (code === 'interrupted' || code === 'cancelled' || code === 'aborted') return true
+      if (/interrupt|cancel|abort/i.test(code + ' ' + name + ' ' + msg)) return true
+      return false
+    }
+
+    function toolBlockSettled(block) {
+      if (!block) return false
+      if (block.kind === 'tool-result') return true
+      if (block.isError === true) return true
+      if (block.result || block.value) return true
+      return false
+    }
+
+    function phaseFromJobStatus(st, detail, inScopeLen) {
+      var s = String(st || '').trim()
+      if (TERMINAL_JOB[s]) return 'done'
+      if (s === 'pending_review') {
+        var d = String(detail || '')
+        var n = typeof inScopeLen === 'number' ? inScopeLen : -1
+        // 无可同步 / 待勾选：结束转圈，进入完成或待审 UI（追问与首轮同一状态机）
+        if (
+          /无可同步项|均在范围外|写码已结束|契约文件未/.test(d) ||
+          (n === 0 && /待审|范围外/.test(d))
+        ) {
+          return 'done'
+        }
+        if (/请勾选后同步/.test(d)) return 'review'
+        return 'running'
+      }
+      if (s) return 'running'
+      return 'form'
+    }
+
+    function labelFromJobStatus(st, detail, inScopeLen) {
+      var s = String(st || '').trim()
+      if (s === 'succeeded') return '已完成'
+      if (s === 'failed') return '失败'
+      if (s === 'cancelled') return '已取消'
+      if (s === 'blocked_no_runner') return '无 Runner'
+      if (s === 'pending_review') {
+        var d = String(detail || '')
+        var n = typeof inScopeLen === 'number' ? inScopeLen : -1
+        if (/无可同步项|均在范围外|写码已结束|契约文件未/.test(d) || (n === 0 && /待审|范围外/.test(d))) {
+          return '已完成·有范围外文件'
+        }
+        if (/请勾选后同步/.test(d)) return '待审同步'
+        if (/自动同步失败/.test(d)) return '同步失败'
+        return '自动同步中'
+      }
+      if (s === 'syncing') return '自动同步中'
+      if (s === 'running' || s === 'queued') return '写码中'
+      return s || ''
+    }
+
+    function sessionCacheKey(jid) {
+      return 'dsh-cc-accel:' + String(jid || '').trim()
+    }
+
+    function loadSessionCache(jid) {
+      try {
+        var raw = sessionStorage.getItem(sessionCacheKey(jid))
+        if (!raw) return null
+        var o = JSON.parse(raw)
+        return o && typeof o === 'object' ? o : null
+      } catch (e) {
+        return null
+      }
+    }
+
+    function saveSessionCache(jid, patch) {
+      var id = String(jid || '').trim()
+      if (!id) return
+      try {
+        var prev = loadSessionCache(id) || {}
+        var next = Object.assign({}, prev, {
+          job_id: id,
+          updated_at: Date.now(),
+        })
+        var p = patch || {}
+        Object.keys(p).forEach(function (k) {
+          if (p[k] !== undefined) next[k] = p[k]
+        })
+        sessionStorage.setItem(sessionCacheKey(id), JSON.stringify(next))
+      } catch (e) {}
+    }
+
     function ensureCss() {
       if (typeof document === 'undefined') return
       var style = document.getElementById('cc-set-css')
@@ -103,9 +209,12 @@ window.__ModuleLoader__.load({
         '.cc-spin{display:inline-block;width:12px;height:12px;border:2px solid rgba(47,111,237,.25);border-top-color:#2f6fed;border-radius:50%;animation:ccspin .7s linear infinite;flex:0 0 auto;margin-top:3px}' +
         '.cc-live-bar{display:flex;align-items:center;gap:10px;margin:0 0 8px;padding:8px 10px;border-radius:8px;background:rgba(47,111,237,.08);border:1px solid rgba(47,111,237,.2);font-size:12.5px}' +
         '.cc-live-bar .cc-spin{margin-top:0}' +
-        '.cc-tool-desc{display:block;font-size:12px;line-height:1.45}' +
+        '.cc-tool-desc{display:block;font-size:12px;line-height:1.45;min-width:0;flex:1}' +
         '.cc-tool-desc .why{opacity:.9}' +
         '.cc-tool-desc .meta{opacity:.65;font-size:11px;margin-top:2px}' +
+        '.cc-snippet{margin-top:6px;padding:7px 9px;border-radius:6px;background:rgba(30,30,30,.92);color:#d6d6d6;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.45;white-space:pre;overflow:auto;max-height:9.2em;overscroll-behavior:contain;border:1px solid rgba(255,255,255,.06)}' +
+        '.cc-snippet .add{color:#3fb950}' +
+        '.cc-snippet .del{color:#f85149}' +
         '.cc-bubble.thinking.is-stream details{border-color:rgba(47,111,237,.45);background:rgba(47,111,237,.05)}' +
         '.cc-bubble.thinking.is-stream summary{color:#2f6fed}' +
         '.cc-steer{margin-top:10px;border-top:1px solid var(--color-border,rgba(127,127,127,.3));padding-top:10px}' +
@@ -121,7 +230,7 @@ window.__ModuleLoader__.load({
         style.id = 'cc-set-css'
         document.head.appendChild(style)
       }
-      style.setAttribute('data-cc-css', '0.6.7')
+      style.setAttribute('data-cc-css', '0.6.26')
       style.textContent = css
     }
 
@@ -357,7 +466,7 @@ window.__ModuleLoader__.load({
         h(
           'p',
           { className: 'cc-set-lead' },
-          '独立插件：在 DSH 聊天里确认后由 Cursor Local 改本机工程。过程与结论以工具结果正文回传（无确认卡）。可在下方按 job 回看。',
+          '独立插件：在 DSH 聊天里走「确认卡 → 进度卡 → 正文结论」。Cursor 在沙箱中摸清项目后再改，再按可写范围同步回本机工程。下方可按 job_id 回看正文。',
         ),
         h(
           'div',
@@ -399,7 +508,7 @@ window.__ModuleLoader__.load({
           h(
             'p',
             { className: 'cc-set-hint' },
-            '建议写目录前缀并以 / 结尾。只填单个文件时沙箱会自动加只读锚点/同级文件，同步仍仅限写范围内。',
+            '建议写目录前缀并以 / 结尾。含 `…/routers/` 时会自动连带同包 schemas/models；审后也会把契约文件从「范围外」提升进同步，避免半套改动。仍建议显式写上 schemas.py。',
           ),
           draft.dataRoot ? h('p', { className: 'cc-set-hint' }, '数据目录：' + draft.dataRoot) : null,
         ),
@@ -571,10 +680,92 @@ window.__ModuleLoader__.load({
       return false
     }
 
+    /** 保留：供调试；确认卡显隐只认 need_clarify / await_ask_user，避免与服务端阻塞死锁 */
+    function clientNeedsClarify(msg) {
+      var t = String(msg || '').replace(/\s+/g, '')
+      if (!t) return false
+      if (/新增一列|加一列|增加一列|修一下|请求失败|bug/i.test(t)) return false
+      var evidence = /澄清|选项|用户已选|用户选择|已确认[:：]|结论[:：]|只删|仅删|只去菜单|保留页面|保留路由/.test(
+        String(msg || ''),
+      )
+      if (evidence) return false
+      if (/(菜单|子菜单|页面|界面|路由|入口).{0,24}(删除|去掉|移除|下线)/.test(t)) return true
+      if (/(删除|去掉|移除).{0,40}(报表)/.test(t) && /(菜单|报表中心|中心|导航|侧栏)/.test(t)) return true
+      if (/(新增|增加|添加|新建).{0,28}(菜单|子菜单|页面|界面)/.test(t)) return true
+      if (/(菜单|子菜单).{0,16}(新增|增加|添加|新建)/.test(t)) return true
+      if (/(新增|增加|添加|新建).{0,24}(报表)/.test(t) && /(菜单|报表中心|中心|页面|页)/.test(t)) return true
+      return false
+    }
+
+    function normReq(s) {
+      return String(s || '')
+        .replace(/\s+/g, '')
+        .trim()
+    }
+
+    function requirementsConflict(a, b) {
+      var na = normReq(a)
+      var nb = normReq(b)
+      if (!na || !nb) return false
+      if (na === nb) return false
+      var n = Math.min(80, na.length, nb.length)
+      if (n >= 8 && na.slice(0, n) === nb.slice(0, n)) return false
+      var head = Math.min(20, na.length, nb.length)
+      return na.slice(0, head) !== nb.slice(0, head)
+    }
+
+    function cardIdentity(props, argsMsg, confirmTok) {
+      var callId = String((props && props.callId) || '').trim()
+      if (callId) return 'call:' + callId
+      var block = props && props.block
+      var blockId = String(
+        (block && (block.id || block.callId || block.toolCallId || block.tool_call_id)) || '',
+      ).trim()
+      if (blockId) return 'block:' + blockId
+      var tok = String(confirmTok || '').trim()
+      if (tok) return 'tok:' + tok
+      var msg = normReq(argsMsg || '')
+      if (msg) return 'msg:' + msg.slice(0, 96)
+      return ''
+    }
+
+    /** 拆掉与本轮入参冲突的旧 job，禁止「新诉求却显示上一轮已完成」 */
+    function detachStaleJobUi(uiRaw, argsMsg, lastUser) {
+      var jobId = String((uiRaw && uiRaw.job_id) || '').trim()
+      if (!jobId) return { ui: uiRaw || {}, stale: false }
+      var args = String(argsMsg || '').trim()
+      var user = String(lastUser || '').trim()
+      var uiReq = String((uiRaw && (uiRaw.requirement || uiRaw.original_goal)) || '').trim()
+      var live = args || user
+      var stale = false
+      if (live && uiReq && requirementsConflict(live, uiReq)) stale = true
+      else if (live && !uiReq) stale = true
+      if (!stale) return { ui: uiRaw || {}, stale: false }
+      return {
+        stale: true,
+        ui: {
+          kind: uiRaw.parent_job_id || uiRaw.job_id ? 'continue' : uiRaw.kind || 'live',
+          workspace: uiRaw.workspace,
+          requirement: live,
+          parent_job_id: uiRaw.parent_job_id || uiRaw.job_id || '',
+          service: uiRaw.service,
+          confirm_token: '',
+          job_id: '',
+          status: '',
+          detail: '',
+        },
+      }
+    }
+
     function CursorCodingBeginCard(props) {
       ensureCss()
-      var ui = readUiFromProps(props) || {}
-      // 未澄清时不展示误导性等待卡（应走 ask_user_question）；若仍进到此分支则极简提示
+      var uiRaw = readUiFromProps(props) || {}
+      var argsMsg = toolArgsMessage(props && props.block)
+      var lastUser = lastUserUtterance(props)
+      var detached = detachStaleJobUi(uiRaw, argsMsg, lastUser)
+      var ui = detached.ui
+      var staleReuse = detached.stale
+      // 须澄清：只认服务端 need_clarify / await_ask_user。禁止靠文案猜，否则会把已阻塞的确认卡藏掉。
       if (readAwaitAskUser(props) || ui.kind === 'await_ask_user' || ui.kind === 'clarify') {
         return null
       }
@@ -582,16 +773,28 @@ window.__ModuleLoader__.load({
       var wsState = useState(initialWs)
       var workspace = wsState[0]
       var setWorkspace = wsState[1]
-      var reqState = useState(initialRequirement(props, ui))
+      var reqState = useState(
+        staleReuse ? String(argsMsg || lastUser || ui.requirement || '').trim() : initialRequirement(props, ui),
+      )
       var requirement = reqState[0]
       var setRequirement = reqState[1]
       var parentState = useState(String(ui.parent_job_id || ''))
       var parentJobId = parentState[0]
+      var setParentJobId = parentState[1]
       var tokenState = useState(String(ui.confirm_token || ''))
       var confirmToken = tokenState[0]
       var setConfirmToken = tokenState[1]
-      // pending_review 在自动同步时也是中间态，默认当 running，勿进人工审
-      var phaseState = useState(ui.job_id ? 'running' : 'form')
+      var jobIdInit = staleReuse ? '' : String(ui.job_id || '').trim()
+      var cache0 = jobIdInit ? loadSessionCache(jobIdInit) : null
+      // 相位：优先缓存/服务终态；禁止刷新时用陈旧 ui.status=queued 误判成「刚开跑」
+      var statusInit = String(
+        (cache0 && cache0.status) || ui.status || (cache0 && cache0.statusLabel) || '',
+      ).trim()
+      var detailInit = String((cache0 && cache0.detail) || ui.detail || '').trim()
+      var phaseInit = jobIdInit
+        ? phaseFromJobStatus(statusInit || (cache0 && cache0.phase) || 'running', detailInit, -1)
+        : 'form'
+      var phaseState = useState(phaseInit)
       var phase = phaseState[0]
       var setPhase = phaseState[1]
       var busyState = useState(false)
@@ -600,17 +803,21 @@ window.__ModuleLoader__.load({
       var errState = useState('')
       var err = errState[0]
       var setErr = errState[1]
-      var jobState = useState(String(ui.job_id || ''))
+      var jobState = useState(jobIdInit)
       var jobId = jobState[0]
       var setJobId = jobState[1]
       var streamState = useState('')
       var streamText = streamState[0]
       var setStreamText = streamState[1]
-      var transcriptState = useState([])
+      var transcriptState = useState(
+        cache0 && Array.isArray(cache0.transcript) ? cache0.transcript : [],
+      )
       var transcript = transcriptState[0]
       var setTranscript = transcriptState[1]
       var statusLabelState = useState(
-        ui.job_id ? (ui.status === 'pending_review' ? '自动同步中' : '写码中') : '',
+        (cache0 && cache0.statusLabel) ||
+          labelFromJobStatus(statusInit) ||
+          (jobIdInit ? (phaseInit === 'done' ? '已完成' : '写码中') : ''),
       )
       var statusLabel = statusLabelState[0]
       var setStatusLabel = statusLabelState[1]
@@ -628,7 +835,74 @@ window.__ModuleLoader__.load({
       var setSteerText = steerState[1]
       var reviewReadyRef = useRef(false)
       var esRef = useRef(null)
-      var stickBottomRef = useRef(true)
+      // 卡内过程区：进展中强制贴底；完成后才允许自由滚
+      var dialogPinRef = useRef(phaseInit === 'running' || phaseInit === 'review')
+      var stickBottomRef = useRef(phaseInit === 'running' || phaseInit === 'review')
+      // 整页聊天滚动：仅本页点确认后才允许轻推；刷新 remount 禁止抢会话位置
+      var liveChatScrollRef = useRef(false)
+      var phasePrevRef = useRef(phaseInit)
+      // 工具卡身份：callId 变化必须硬重置，防止 React 复用实例带着旧 job「秒完成」
+      var identityRef = useRef('')
+      var identity = cardIdentity(props, argsMsg, ui.confirm_token)
+      var cancelOnceRef = useRef(false)
+
+      function hardResetToConfirm(nextReq) {
+        try {
+          if (esRef.current && typeof esRef.current.close === 'function') esRef.current.close()
+        } catch (e) {}
+        esRef.current = null
+        reviewReadyRef.current = false
+        liveChatScrollRef.current = false
+        dialogPinRef.current = false
+        stickBottomRef.current = false
+        setJobId('')
+        setPhase('form')
+        setBusy(false)
+        setErr('')
+        setStreamText('')
+        setTranscript([])
+        setStatusLabel('')
+        setReview({ inScope: [], deleted: [], deferred: [] })
+        setSelected({})
+        setConfirmToken('')
+        setParentJobId('')
+        var req = String(nextReq || argsMsg || lastUser || '').trim()
+        if (req) setRequirement(req)
+      }
+
+      // 新工具调用 / 新诉求：绝不继承上一张卡的已完成 job
+      useEffect(
+        function () {
+          if (!identity) return
+          var prev = identityRef.current
+          if (prev === identity) {
+            // 同卡：只用本轮工具入参 argsMsg 比对，禁止 lastUser（会话最新一句会误拆进行中的卡）
+            if (jobId && argsMsg && requirement) {
+              var live = String(argsMsg || '').trim()
+              if (live && requirementsConflict(live, requirement) && (phase === 'done' || phase === 'running')) {
+                hardResetToConfirm(live)
+              }
+            }
+            return
+          }
+          identityRef.current = identity
+          if (!prev) return
+          hardResetToConfirm(argsMsg || requirement)
+        },
+        [identity, argsMsg, jobId, requirement, phase],
+      )
+
+      function isProgressPhase(p) {
+        return p === 'running' || p === 'review'
+      }
+
+      function scrollDialogToBottom() {
+        try {
+          var el = document.getElementById('cc-dialog-' + (jobId || 'x'))
+          if (!el) return
+          el.scrollTop = el.scrollHeight
+        } catch (e) {}
+      }
 
       // 会话工作区 / 用户原话晚到时再补一次
       useEffect(
@@ -653,29 +927,57 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      // 仅贴底时才跟随新内容；用户往上翻时不强制滚回
+      // 相位切换：进展中钉死贴底；完成后放开手动滚
       useEffect(
         function () {
-          try {
-            var el = document.getElementById('cc-dialog-' + (jobId || 'x'))
-            if (!el) return
-            if (!stickBottomRef.current) return
-            el.scrollTop = el.scrollHeight
-          } catch (e) {}
+          if (isProgressPhase(phase)) {
+            dialogPinRef.current = true
+            stickBottomRef.current = true
+            scrollDialogToBottom()
+          } else {
+            dialogPinRef.current = false
+            stickBottomRef.current = false
+          }
         },
-        [transcript, phase, jobId],
+        [phase],
+      )
+
+      // 进展中：过程区随 transcript/日志强制滚到底（与整页滚动无关）
+      useEffect(
+        function () {
+          if (!isProgressPhase(phase)) return
+          dialogPinRef.current = true
+          stickBottomRef.current = true
+          var raf = 0
+          var t = setTimeout(function () {
+            raf = requestAnimationFrame(function () {
+              scrollDialogToBottom()
+            })
+          }, 0)
+          return function () {
+            clearTimeout(t)
+            if (raf) cancelAnimationFrame(raf)
+          }
+        },
+        [transcript, phase, jobId, streamText, statusLabel],
       )
 
       function onDialogScroll(e) {
         try {
           var el = e && e.currentTarget
           if (!el) return
+          // 进展中不允许「上翻取消贴底」——必须跟到底
+          if (dialogPinRef.current || isProgressPhase(phase)) {
+            stickBottomRef.current = true
+            el.scrollTop = el.scrollHeight
+            return
+          }
           var gap = el.scrollHeight - el.scrollTop - el.clientHeight
           stickBottomRef.current = gap < 48
         } catch (err) {}
       }
 
-      // begin 阻塞等待确认时：result 尚未返回，轮询 pending-latest 取 confirm_token
+      // begin 阻塞等待确认时：result 尚未返回。用 DSH callId 对账本机 pending，禁止按工作区抢别人的 job。
       useEffect(
         function () {
           if (phase !== 'form') return
@@ -685,23 +987,40 @@ window.__ModuleLoader__.load({
           }
           var ws = String(resolveDshCwd(props) || workspace || '').trim()
           if (!ws) return
+          var callId = String((props && props.callId) || '').trim()
+          var sessionId = String((props && props.sessionId) || '').trim()
+          var req = String(requirement || '').trim()
           var stopped = false
           function pull() {
             if (stopped) return
-            fetch(serviceBase() + '/api/cursor-coding/pending-latest?workspace=' + encodeURIComponent(ws))
+            var qs =
+              'workspace=' +
+              encodeURIComponent(ws) +
+              (callId ? '&call_id=' + encodeURIComponent(callId) : '') +
+              (sessionId ? '&session_id=' + encodeURIComponent(sessionId) : '') +
+              (req ? '&requirement=' + encodeURIComponent(req) : '')
+            fetch(serviceBase() + '/api/cursor-coding/pending-latest?' + qs)
               .then(function (r) {
                 return r.json()
               })
               .then(function (d) {
                 if (!d || !d.pending) return
+                var sameCall =
+                  !callId ||
+                  !d.pending.call_id ||
+                  String(d.pending.call_id) === callId
+                if (!sameCall) return
                 if (d.pending.confirm_token) setConfirmToken(String(d.pending.confirm_token))
-                if (d.pending.requirement && !String(requirement || '').trim()) {
-                  setRequirement(String(d.pending.requirement))
-                }
-                if (d.pending.job_id) {
+                // 诉求/续改 parent 以 pending 为准（与 begin 入参一致），勿用 lastUserUtterance 覆盖
+                if (d.pending.requirement) setRequirement(String(d.pending.requirement))
+                if (d.pending.parent_job_id) setParentJobId(String(d.pending.parent_job_id))
+                if (d.pending.workspace) setWorkspace(String(d.pending.workspace))
+                // 已开工只允许挂回「这张卡」自己的 job（须有 DSH callId），且诉求不得串台
+                if (d.pending.job_id && callId && sameCall) {
+                  var pendReq = String(d.pending.requirement || '').trim()
+                  if (req && pendReq && requirementsConflict(req, pendReq)) return
                   setJobId(String(d.pending.job_id))
-                  setPhase('running')
-                  setStatusLabel('写码中')
+                  reconcileJob(String(d.pending.job_id))
                 }
               })
               .catch(function () {})
@@ -713,53 +1032,166 @@ window.__ModuleLoader__.load({
             clearInterval(t)
           }
         },
-        [phase, workspace, ui && ui.confirm_token],
+        [phase, workspace, ui && ui.confirm_token, props && props.callId, props && props.sessionId, requirement],
       )
 
-      // begin 已开工：挂 SSE 进度（不二次确认）
+      // begin 已开工：立刻从服务水合会话态（刷新后不依赖陈旧 presentationMeta），再挂 SSE
       useEffect(
         function () {
-          var jid = String(jobId || (ui && ui.job_id) || '').trim()
-          if (!jid) return
-          if (esRef.current) return
-          if (phase === 'form') {
-            setPhase('running')
-            setStatusLabel(String((ui && ui.status) || '') === 'pending_review' ? '自动同步中' : '写码中')
+          var jid = String(jobId || '').trim()
+          if (!jid) {
+            var cand = String((ui && ui.job_id) || '').trim()
+            if (cand && !staleReuse) {
+              var live0 = String(argsMsg || lastUser || requirement || '').trim()
+              var ureq0 = String((ui && (ui.requirement || ui.original_goal)) || '').trim()
+              // 禁止用与本轮入参冲突的旧 presentationMeta.job_id 重新挂上
+              if (!live0 || !ureq0 || !requirementsConflict(live0, ureq0)) jid = cand
+            }
           }
-          openStream(jid)
+          if (!jid) return
+          if (phase === 'form') {
+            setPhase(phaseFromJobStatus((ui && ui.status) || 'running'))
+            setStatusLabel(labelFromJobStatus((ui && ui.status) || 'running') || '写码中')
+          }
+          reconcileJob(jid)
+          if (!esRef.current) openStream(jid)
         },
-        [jobId || (ui && ui.job_id)],
+        [jobId, identity, staleReuse, argsMsg, lastUser, requirement],
+      )
+
+      function onCancelTask() {
+        cancelOnceRef.current = true
+        setTranscript(function (prev) {
+          return sealTranscriptItems(prev)
+        })
+        setPhase('done')
+        setStatusLabel('已取消')
+        dialogPinRef.current = false
+        stickBottomRef.current = false
+        try {
+          if (esRef.current && typeof esRef.current.close === 'function') esRef.current.close()
+        } catch (e0) {}
+        var jid = String(jobId || (ui && ui.job_id) || '').trim()
+        if (!jid) return
+        fetch(base() + '/api/hitl/issue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'cursor-coding.cancel', job_id: jid }),
+        })
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (issued) {
+            if (!issued || !issued.ok || !issued.nonce) {
+              throw new Error((issued && issued.detail) || '签发取消令牌失败')
+            }
+            return fetch(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(jid) + '/cancel', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ nonce: issued.nonce }),
+            })
+          })
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (d) {
+            if (d && d.job && Array.isArray(d.job.transcript)) {
+              setTranscript(sealTranscriptItems(d.job.transcript))
+            }
+            setPhase('done')
+            setStatusLabel('已取消')
+          })
+          .catch(function () {})
+      }
+
+      useEffect(
+        function () {
+          var block = props && props.block
+          if (toolBlockCancelled(block)) {
+            if (!cancelOnceRef.current) onCancelTask()
+            return
+          }
+          if (toolBlockSettled(block) && phase === 'running' && jobId) {
+            reconcileJob(jobId)
+          }
+        },
+        [props && props.block, phase, jobId],
       )
 
       function applyJobSnapshot(job) {
         if (!job) return
         var st = String(job.status || '')
-        if (st === 'succeeded' || st === 'failed' || st === 'cancelled') {
+        var detail = String(job.detail || '')
+        var inScopeLen = Array.isArray(job.review_in_scope) ? job.review_in_scope.length : -1
+        var nextPhase = phaseFromJobStatus(st, detail, inScopeLen)
+        var nextLabel = labelFromJobStatus(st, detail, inScopeLen)
+        if (nextPhase === 'done') {
           setPhase('done')
-          setStatusLabel(st === 'succeeded' ? '已完成' : st === 'failed' ? '失败' : '已取消')
+          setStatusLabel(nextLabel || '已完成')
+          dialogPinRef.current = false
+          stickBottomRef.current = false
+        } else if (nextPhase === 'review' || (st === 'pending_review' && /请勾选/.test(detail))) {
+          setPhase('review')
+          setStatusLabel(nextLabel || '待审同步')
+          dialogPinRef.current = true
+          stickBottomRef.current = true
+          setTimeout(scrollDialogToBottom, 0)
+          if (job.review_in_scope || job.review_deferred) {
+            enterReview({
+              in_scope: job.review_in_scope || [],
+              deleted: job.review_deleted || [],
+              deferred: job.review_deferred || job.deferred_files || [],
+            })
+          }
         } else if (st === 'pending_review') {
           setPhase('running')
-          setStatusLabel('自动同步中')
+          setStatusLabel(nextLabel || '自动同步中')
+          dialogPinRef.current = true
+          stickBottomRef.current = true
+          setTimeout(scrollDialogToBottom, 0)
         } else if (st === 'running' || st === 'queued' || st === 'syncing') {
           setPhase('running')
-          setStatusLabel(st === 'syncing' ? '自动同步中' : '写码中')
+          setStatusLabel(st === 'syncing' ? '自动同步中' : nextLabel || '写码中')
+          dialogPinRef.current = true
+          stickBottomRef.current = true
+          setTimeout(scrollDialogToBottom, 0)
+        } else if (st) {
+          setPhase(nextPhase === 'form' ? 'running' : nextPhase)
+          if (nextLabel) setStatusLabel(nextLabel)
         }
         if (Array.isArray(job.transcript) && job.transcript.length) {
-          setTranscript(job.transcript)
+          setTranscript(nextPhase === 'done' ? sealTranscriptItems(job.transcript) : job.transcript)
+        }
+        var jid = String(job.id || jobId || '').trim()
+        if (jid) {
+          saveSessionCache(jid, {
+            status: st,
+            phase: nextPhase === 'form' ? 'running' : nextPhase,
+            statusLabel: nextLabel || st,
+            transcript: Array.isArray(job.transcript) ? job.transcript : undefined,
+          })
         }
       }
 
       function reconcileJob(jid) {
         var id = String(jid || jobId || '').trim()
-        if (!id) return
-        fetch(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(id))
+        if (!id) return Promise.resolve(null)
+        return fetch(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(id))
           .then(function (r) {
             return r.json()
           })
           .then(function (j) {
-            if (j && (j.id || j.job_id || j.status)) applyJobSnapshot(j)
+            // 服务返回 { ok, job }，旧逻辑误读顶层 status 导致刷新永不恢复终态
+            var job = j && j.job ? j.job : j
+            if (job && (job.id || job.status)) {
+              applyJobSnapshot(job)
+              return job
+            }
+            return null
           })
-          .catch(function () {})
+          .catch(function () {
+            return null
+          })
       }
 
       function base() {
@@ -809,39 +1241,43 @@ window.__ModuleLoader__.load({
             var data = JSON.parse(ev.data)
             if (data.type === 'hello') return
             if (data.type === 'snapshot') {
-              if (Array.isArray(data.transcript)) {
-                setTranscript(
-                  data.transcript.map(function (it) {
-                    if (!it || it.kind !== 'tool') return it
-                    var st = String(it.tool_status || '').toLowerCase()
-                    if (st === 'completed' || st === 'done' || st === 'success') {
-                      return Object.assign({}, it, { tool_status: 'completed', streaming: false })
-                    }
-                    return it
-                  }),
-                )
-              }
+              applyJobSnapshot({
+                id: jid,
+                status: data.status,
+                detail: data.detail,
+                transcript: Array.isArray(data.transcript)
+                  ? data.transcript.map(function (it) {
+                      if (!it || it.kind !== 'tool') return it
+                      var st = String(it.tool_status || '').toLowerCase()
+                      if (st === 'completed' || st === 'done' || st === 'success') {
+                        return Object.assign({}, it, { tool_status: 'completed', streaming: false })
+                      }
+                      return it
+                    })
+                  : undefined,
+                review_in_scope: data.review_in_scope,
+                review_deleted: data.review_deleted,
+                review_deferred: data.review_deferred,
+              })
               if (data.status === 'pending_review') {
-                // 自动同步中：保持 running，不要进人工审 UI
-                setPhase('running')
-                setStatusLabel('自动同步中')
-                if (data.review_in_scope || data.review_deleted || data.review_deferred) {
+                var dtl = String(data.detail || '')
+                var inN = Array.isArray(data.review_in_scope) ? data.review_in_scope.length : 0
+                if (
+                  /无可同步项|均在范围外|写码已结束|契约文件未/.test(dtl) ||
+                  (inN === 0 && /待审|范围外/.test(dtl))
+                ) {
+                  setPhase('done')
+                  setStatusLabel('已完成·有范围外文件')
+                } else if (data.auto_apply) {
+                  setPhase('running')
+                  setStatusLabel('自动同步中')
+                } else if (data.review_in_scope || data.review_deleted || data.review_deferred) {
                   setReview({
                     inScope: data.review_in_scope || [],
                     deleted: data.review_deleted || [],
                     deferred: data.review_deferred || [],
                   })
                 }
-              } else if (data.status === 'running' || data.status === 'queued' || data.status === 'syncing') {
-                setPhase('running')
-                setStatusLabel(data.status === 'syncing' ? '自动同步中' : '写码中')
-              } else if (data.status === 'succeeded' || data.status === 'failed' || data.status === 'cancelled') {
-                setPhase('done')
-                setStatusLabel(
-                  data.status === 'succeeded' ? '已完成' : data.status === 'failed' ? '失败' : '已取消',
-                )
-              } else if (data.status) {
-                setStatusLabel(String(data.status))
               }
               return
             }
@@ -872,11 +1308,13 @@ window.__ModuleLoader__.load({
             if (data.type === 'done') {
               var dst = String(data.status || 'done')
               appendStream('— 流结束：' + dst)
+              setTranscript(function (prev) {
+                return sealTranscriptItems(prev)
+              })
               if (dst === 'succeeded' || dst === 'failed' || dst === 'cancelled') {
                 setPhase('done')
                 setStatusLabel(dst === 'succeeded' ? '已完成' : dst === 'failed' ? '失败' : '已取消')
               } else {
-                // done 事件状态异常时主动对账，避免卡在「自动同步中」
                 reconcileJob(jid)
               }
               try {
@@ -1082,6 +1520,7 @@ window.__ModuleLoader__.load({
             action: 'cursor-coding.confirm',
             workspace: ws,
             requirement: req,
+            confirm_token: token,
           }),
         })
           .then(function (r) {
@@ -1122,7 +1561,11 @@ window.__ModuleLoader__.load({
             setStatusLabel('写码中')
             appendStream('已确认 ' + jid)
             openStream(jid)
-            // 过程开始后先把确认卡滚入视口；结束后再滚到正文结论
+            // 进展中：卡内强制贴底；整页仅本页确认后轻推一次
+            dialogPinRef.current = true
+            stickBottomRef.current = true
+            liveChatScrollRef.current = true
+            setTimeout(scrollDialogToBottom, 0)
             scrollChatTowardBottom(true)
           })
           .catch(function (e) {
@@ -1134,8 +1577,12 @@ window.__ModuleLoader__.load({
       }
 
       function scrollChatTowardBottom(force) {
+        // 刷新恢复：禁止动整页滚动条（会话滚动权在用户 / DSH，插件不得抢）
+        if (!liveChatScrollRef.current) return
         try {
-          var card = document.querySelector('.cc-card')
+          var cardId =
+            'cc-card-' + String(identity || jobId || confirmToken || (ui && ui.confirm_token) || 'x').trim()
+          var card = document.getElementById(cardId) || document.querySelector('.cc-card')
           if (!card) return
           var node = card.parentElement
           var scrolled = false
@@ -1152,23 +1599,28 @@ window.__ModuleLoader__.load({
           }
           if (!scrolled && force) {
             try {
-              card.scrollIntoView({ block: 'end', behavior: 'smooth' })
+              card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
             } catch (e2) {}
           }
         } catch (e) {}
       }
 
-      // 终态后持续把聊天滚到下方，确保 finish 输出的「本轮结论」可见
+      // 仅「本页用户点过确认」且 running/review→done 时，轻推一次到结论附近；
+      // 禁止刷新水合（陈旧 running→done）与长间隔连滚抢会话位置
       useEffect(
         function () {
+          var prev = phasePrevRef.current
+          phasePrevRef.current = phase
+          if (!liveChatScrollRef.current) return
           if (phase !== 'done') return
+          if (prev !== 'running' && prev !== 'review') return
           scrollChatTowardBottom(true)
           var n = 0
           var t = setInterval(function () {
             n += 1
             scrollChatTowardBottom(true)
-            if (n >= 20) clearInterval(t)
-          }, 800)
+            if (n >= 3) clearInterval(t)
+          }, 600)
           return function () {
             clearInterval(t)
           }
@@ -1176,12 +1628,14 @@ window.__ModuleLoader__.load({
         [phase],
       )
 
-      var kind = (ui && ui.kind) || 'live'
+      var kind = (ui && ui.kind) || (parentJobId ? 'continue' : 'live')
       var title =
         (ui && ui.job_id) || phase === 'running' || phase === 'review' || phase === 'done'
-          ? 'Cursor 写码 · 进度'
-          : kind === 'continue'
-            ? 'Cursor 写码 · 续改'
+          ? parentJobId || kind === 'continue'
+            ? 'Cursor 写码 · 续改进度'
+            : 'Cursor 写码 · 进度'
+          : kind === 'continue' || parentJobId
+            ? 'Cursor 写码 · 续改确认'
             : 'Cursor 写码 · 确认'
       var canStart = Boolean(String(workspace || '').trim() && String(requirement || '').trim())
 
@@ -1251,6 +1705,15 @@ window.__ModuleLoader__.load({
 
       function renderTranscript() {
         if (!transcript || !transcript.length) {
+          if (phase === 'done') {
+            return h(
+              'div',
+              { className: 'cc-note', style: { margin: '8px 0' } },
+              statusZh === '已完成' || statusZh === '失败' || statusZh === '已取消'
+                ? '本轮写码已结束（' + statusZh + '）。过程片段正从本机服务恢复；若仍为空，结论见下方对话正文。'
+                : '本轮过程已结束。',
+            )
+          }
           return h(
             'div',
             { className: 'cc-live-bar' },
@@ -1268,7 +1731,7 @@ window.__ModuleLoader__.load({
             )
           }
           if (it.kind === 'thinking') {
-            var streaming = !!it.streaming
+            var streaming = !!it.streaming && phase !== 'done'
             return h(
               'div',
               { key: it.id, className: 'cc-bubble thinking' + (streaming ? ' is-stream' : '') },
@@ -1289,6 +1752,22 @@ window.__ModuleLoader__.load({
           if (it.kind === 'tool') {
             var info = toolExplain(it.name, it.path, it.tool_status)
             var live = !info.done && String(it.tool_status || '').toLowerCase() === 'running'
+            var snip = String(it.snippet || '').trim()
+            var snipNode = null
+            if (snip) {
+              var parts = snip.split('\n')
+              var snipLines = parts.map(function (line, i) {
+                var cls = ''
+                if (/^\+/.test(line) && !/^\+\+\+/.test(line)) cls = 'add'
+                else if (/^-/.test(line) && !/^---/.test(line)) cls = 'del'
+                return h(
+                  'span',
+                  { key: 's' + i, className: cls || undefined },
+                  line + (i < parts.length - 1 ? '\n' : ''),
+                )
+              })
+              snipNode = h('pre', { className: 'cc-snippet', 'aria-label': '代码片断' }, snipLines)
+            }
             return h(
               'div',
               { key: it.id, className: 'cc-bubble tool' },
@@ -1300,6 +1779,7 @@ window.__ModuleLoader__.load({
                 info.path || it.name
                   ? h('div', { className: 'meta' }, (it.name || 'tool') + (info.path ? ' · ' + info.path : ''))
                   : null,
+                snipNode,
               ),
             )
           }
@@ -1327,7 +1807,10 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'cc-card' },
+        {
+          className: 'cc-card',
+          id: 'cc-card-' + String(identity || jobId || confirmToken || (ui && ui.confirm_token) || 'x').trim(),
+        },
         h('h4', null, title),
         h(
           'p',
@@ -1380,7 +1863,13 @@ window.__ModuleLoader__.load({
                   requirement || '（空——请在对话里说明要改什么，或新开一轮让助手带上原话）',
                 ),
               ),
-              parentJobId ? h('p', { className: 'cc-set-hint' }, '续改 parent：' + parentJobId) : null,
+              parentJobId
+                ? h(
+                    'p',
+                    { className: 'cc-set-hint' },
+                    '续改：将基于本会话任务 ' + parentJobId + ' 开新一轮（点确认后才会写码）',
+                  )
+                : null,
               err ? h('p', { className: 'cc-set-msg err' }, err) : null,
               !canStart && !err
                 ? h(
@@ -1425,9 +1914,25 @@ window.__ModuleLoader__.load({
                     String((transcript || []).length),
                 ),
                 h(
-                  'button',
-                  { type: 'button', className: 'cc-set-btn', onClick: copyDialog },
-                  '复制对话',
+                  'span',
+                  { style: { display: 'flex', gap: '8px' } },
+                  phase === 'running'
+                    ? h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'cc-set-btn',
+                          disabled: busy,
+                          onClick: onCancelTask,
+                        },
+                        '取消任务',
+                      )
+                    : null,
+                  h(
+                    'button',
+                    { type: 'button', className: 'cc-set-btn', onClick: copyDialog },
+                    '复制对话',
+                  ),
                 ),
               ),
               h('div', {

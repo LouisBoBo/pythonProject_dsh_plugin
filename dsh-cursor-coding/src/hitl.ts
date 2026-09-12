@@ -21,6 +21,7 @@ export function issue(opts: {
   workspace?: string
   requirement?: string
   job_id?: string
+  confirm_token?: string
   ttl_sec?: number
 }): { ok: true; nonce: string; action: HitlAction; exp: number } {
   const ttl = Math.max(60, Math.min(3600, opts.ttl_sec ?? DEFAULT_TTL_SEC))
@@ -34,6 +35,7 @@ export function issue(opts: {
   if (opts.workspace) rec.workspace = String(opts.workspace).trim()
   if (opts.requirement !== undefined) rec.requirement_hash = hashRequirement(opts.requirement)
   if (opts.job_id) rec.job_id = String(opts.job_id).trim()
+  if (opts.confirm_token) rec.confirm_token = String(opts.confirm_token).trim()
   STORE.set(nonce, rec)
   return { ok: true, nonce, action: opts.action, exp }
 }
@@ -44,6 +46,7 @@ export function consume(opts: {
   workspace?: string
   requirement?: string
   job_id?: string
+  confirm_token?: string
 }): { ok: boolean; detail?: string; code?: string } {
   const token = String(opts.nonce || '').trim()
   if (!token) {
@@ -86,6 +89,16 @@ export function consume(opts: {
   }
   if (rec.job_id && opts.job_id && rec.job_id !== String(opts.job_id).trim()) {
     return { ok: false, detail: 'HITL nonce 与 job_id 不匹配', code: 'hitl_job' }
+  }
+  if (rec.confirm_token) {
+    const got = String(opts.confirm_token || '').trim()
+    if (!got || rec.confirm_token !== got) {
+      return {
+        ok: false,
+        detail: 'HITL nonce 与 confirm_token 不匹配',
+        code: 'hitl_confirm_token',
+      }
+    }
   }
   rec.used = true
   STORE.set(token, rec)

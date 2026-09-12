@@ -8,7 +8,10 @@ docs/
 ├── 01-插件开发与市场/         ← DSH 插件开发、公司市场、安装排障
 ├── 02-审码自动化/             ← 第一种 Hook / 第二种 Webhook + 飞书
 ├── 03-业务样例/               ← 业务报告样例等
-└── 04-Cursor-AI-Coding逼真版本/  ← 接 Cursor 写码体验（含独立插件版）
+├── 04-Cursor-AI-Coding逼真版本/  ← 接 Cursor 写码体验（含独立插件版）
+├── 05-功能使用手册说明/       ← 使用向手册归档（可与各主题手册交叉引用）
+├── 06-复盘总结/               ← 联调收口后的复盘（弯路、定稿、排障）
+└── 架构与选型/                ← 宿主会话/记忆分层等跨仓定稿（与 WorkBuddy 对齐）
 ```
 
 ---
@@ -37,6 +40,7 @@ docs/
 
 | 文档 | 说明 | 状态 |
 | --- | --- | --- |
+| [远端Webhook审码-新用户使用手册.md](./02-审码自动化/远端Webhook审码-新用户使用手册.md) | **新用户照做**：安装、设置、装 Hook/Push、看飞书、排障 | 使用向 |
 | [remote-review-远端Webhook审码-完整实施方案.md](./02-审码自动化/remote-review-远端Webhook审码-完整实施方案.md) | **第二种知识积累总册**：架构、清单、分阶段照做、验收、故障速查 | **照做即可成功**（2026-09-11 整链已通） |
 | [ide-commit-hook-自动审码-MVP.md](./02-审码自动化/ide-commit-hook-自动审码-MVP.md) | **第一种**：本机 `post-commit` → 本机引擎审码 | 已有脚本 `scripts/hook-review/` |
 | [remote-push-服务器审码-方案确认.md](./02-审码自动化/remote-push-服务器审码-方案确认.md) | **第二种**：Webhook → 审码 API → 飞书（Markdown 转块） | **整链已通** |
@@ -67,14 +71,34 @@ docs/
 
 | 文档 | 说明 | 状态 |
 | --- | --- | --- |
-| [AI-Coding接入Cursor-插件版实施方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-插件版实施方案.md) | **按五条硬约束重写**：独立 Bundle、零改 WorkBuddy、UI 挂 DSH 原生插槽 | **阶段 A 已落地**；B/C 待开工 |
+| [Cursor写码插件-新用户使用手册.md](./04-Cursor-AI-Coding逼真版本/Cursor写码插件-新用户使用手册.md) | **新用户照做**：装插件、填 Key、澄清→确认→进度→结论、续改、排障 | 使用向 |
+| [Cursor写码插件-主流程冻结.md](./04-Cursor-AI-Coding逼真版本/Cursor写码插件-主流程冻结.md) | 主交互四步冻结口径 | 产品冻结 |
+| [AI-Coding接入Cursor-插件版实施方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-插件版实施方案.md) | **按五条硬约束重写**：独立 Bundle、零改 WorkBuddy、UI 挂 DSH 原生插槽 | 实施向 |
 | [AI-Coding接入Cursor-体验逼近方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-体验逼近方案.md) | 体验/分期母本（原落点在 WorkBuddy 引擎 + mes-bridge） | 对照用 |
 
 **仓库内插件：** `dsh-cursor-coding/`（`@zhongruan/dsh-cursor-coding`）
 
 ---
 
-## 5. 相关脚本（仓库根，非 docs）
+## 5. 复盘总结 → [`06-复盘总结/`](./06-复盘总结/)
+
+| 文档 | 说明 | 状态 |
+| --- | --- | --- |
+| [Cursor写码插件-写码删码续改复盘.md](./06-复盘总结/Cursor写码插件-写码删码续改复盘.md) | 写码 / 删菜单 / 续改联调收口：弯路、定稿决策、排障 | **基本通**（2026-09-12） |
+
+> 审码侧飞书联调复盘仍放在 [`02-审码自动化/`](./02-审码自动化/remote-review-飞书文档库联调复盘.md)；新主题复盘统一进本目录。
+
+---
+
+## 6. 架构与选型 → [`架构与选型/`](./架构与选型/)
+
+| 文档 | 说明 |
+| --- | --- |
+| [DSH会话与记忆分层.md](./架构与选型/DSH会话与记忆分层.md) | **定稿**：聊天认 DSH、执行认本机 Job、加速仅 sessionStorage；与 WorkBuddy 同源 |
+
+---
+
+## 7. 相关脚本（仓库根，非 docs）
 
 | 路径 | 用途 |
 | --- | --- |

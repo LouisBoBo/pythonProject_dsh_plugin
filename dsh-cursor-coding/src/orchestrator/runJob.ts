@@ -1,12 +1,11 @@
-/**
- * Job 编排：沙箱 → Cursor 对话流 → pending_review；apply 后同步；支持卡内追问 steer。
- */
 import { createHash } from 'node:crypto'
 import { loadConfig } from '../config.js'
 import { clampAssistantText, mergeAssistantDelta } from '../assistantText.js'
 import { buildPrompt, runCursorLocal, type CursorRunEvent } from '../cursor/runner.js'
+import { buildLiveEditSnippet, shouldAttachEditSnippet } from '../editSnippet.js'
 import { nudgeAfterSync } from '../viteNudge.js'
-import { appendEvent, loadJob, patchJob, setStatus } from '../jobs.js'
+import { appendEvent, listJobs, loadJob, patchJob, setStatus } from '../jobs.js'
+import { compactParentHandoff } from '../sessionMemory.js'
 import {
   isSensitiveRel,
   normalizeRel,
@@ -15,8 +14,15 @@ import {
   pathInScope,
 } from '../pathScope.js'
 import {
+  criticalDeferredFiles,
+  expandWriteScopeWithCompanions,
+  isIdlePendingReview,
+  selectCompanionPromotions,
+} from '../scopeCompanions.js'
+import {
   applyDeletesToTarget,
   diffSnapshots,
+  inferSparseBeforeAfter,
   prepareSandboxForJob,
   snapshotSandbox,
   syncChangedToTarget,
@@ -32,8 +38,8 @@ import {
 
 function scopeOf(jobWriteScope: string[], cfgScope: string[]): string[] {
   const fromJob = normalizeWriteScope(jobWriteScope)
-  if (fromJob.length) return fromJob
-  return normalizeWriteScope(cfgScope)
+  const base = fromJob.length ? fromJob : normalizeWriteScope(cfgScope)
+  return expandWriteScopeWithCompanions(base)
 }
 
 export function hashAcceptList(paths: string[]): string {
@@ -79,6 +85,8 @@ function bindEmit(jobId: string) {
   let thinkingSegmentStart = 0
   let assistantId: string | null = null
   const toolMap = new Map<string, string>()
+  /** 同 job 内各文件最近一次已展示片断时的内容，用于连续 edit 出增量 diff */
+  const editBaseline = new Map<string, string>()
 
   const sealThinkingSegment = () => {
     thinkingId = null
@@ -159,7 +167,6 @@ function bindEmit(jobId: string) {
       sealThinkingSegment()
       patchJob(jobId, { assistant_text: clampAssistantText(merged.full) })
       upsertTranscript((items) => {
-        // 封上一条 thinking streaming
         const sealed = items.map((it) =>
           it.kind === 'thinking' && it.streaming ? { ...it, streaming: false } : it,
         )
@@ -199,6 +206,34 @@ function bindEmit(jobId: string) {
       assistantId = null
       const displayPath = relativizeToolPath(ev.path, j.sandbox_path || undefined)
       const key = ev.call_id || `${ev.name || 'tool'}:${displayPath || ev.path || ''}`
+      const st = String(ev.tool_status || '').toLowerCase()
+      let snippet = ev.snippet
+      if (
+        !snippet &&
+        shouldAttachEditSnippet(ev.name) &&
+        displayPath &&
+        j.sandbox_path &&
+        j.workspace
+      ) {
+        if (st === 'running' || st === 'in_progress') {
+          buildLiveEditSnippet({
+            sandbox: j.sandbox_path,
+            workspace: j.workspace,
+            relPath: displayPath,
+            baseline: editBaseline,
+            phase: 'running',
+          })
+        } else if (st === 'completed' || st === 'done' || st === 'success' || !st) {
+          snippet =
+            buildLiveEditSnippet({
+              sandbox: j.sandbox_path,
+              workspace: j.workspace,
+              relPath: displayPath,
+              baseline: editBaseline,
+              phase: 'completed',
+            }) || undefined
+        }
+      }
       upsertTranscript((items) => {
         const sealed = items.map((it) =>
           it.streaming ? { ...it, streaming: false } : it,
@@ -217,6 +252,7 @@ function bindEmit(jobId: string) {
               path: displayPath,
               tool_status: ev.tool_status || 'running',
               call_id: ev.call_id,
+              snippet,
             },
           ]
         }
@@ -227,6 +263,7 @@ function bindEmit(jobId: string) {
                 name: ev.name || it.name,
                 path: displayPath || it.path,
                 tool_status: ev.tool_status || it.tool_status,
+                snippet: snippet || it.snippet,
                 at,
               }
             : it,
@@ -239,6 +276,7 @@ function bindEmit(jobId: string) {
         path: displayPath || ev.path,
         tool_status: ev.tool_status,
         call_id: ev.call_id,
+        snippet,
         status: loadJob(jobId)!.status,
       })
       return
@@ -273,12 +311,27 @@ async function enterReviewFromDiff(
     thinking_text: clampText(cre.thinking || loadJob(jobId)?.thinking_text || ''),
   })
 
-  // 封住仍 streaming 的片段
-  const j0 = loadJob(jobId)
-  if (j0?.transcript?.length) {
-    patchJob(jobId, {
-      transcript: j0.transcript.map((it) => (it.streaming ? { ...it, streaming: false } : it)),
-    })
+  // 封住仍 streaming 的片段；同步前补齐缺失的 edit 代码片断（进度卡必须可见）
+  {
+    const j0 = loadJob(jobId)
+    if (j0?.transcript?.length) {
+      const baseline = new Map<string, string>()
+      const next = j0.transcript.map((it) => {
+        const sealed = it.streaming ? { ...it, streaming: false } : it
+        if (sealed.kind !== 'tool' || sealed.snippet) return sealed
+        if (!shouldAttachEditSnippet(sealed.name) || !sealed.path) return sealed
+        if (!j0.sandbox_path || !j0.workspace) return sealed
+        const snip = buildLiveEditSnippet({
+          sandbox: j0.sandbox_path,
+          workspace: j0.workspace,
+          relPath: sealed.path,
+          baseline,
+          phase: 'completed',
+        })
+        return snip ? { ...sealed, snippet: snip } : sealed
+      })
+      patchJob(jobId, { transcript: next })
+    }
   }
 
   if (!cre.ok) {
@@ -290,9 +343,19 @@ async function enterReviewFromDiff(
   const after = snapshotSandbox(meta.sandbox)
   const diff = diffSnapshots(before, after)
   const job = loadJob(jobId)!
-  const writeScope = job.write_scope || []
-  const { inScope, deferred } = partitionChangedPaths(diff.changed, writeScope)
+  // 配置连带 + 审后提升：改 routers 时 schemas/models 不得永久 defer
+  const writeScope = expandWriteScopeWithCompanions(job.write_scope || [])
+  const { inScope: inScope0, deferred: deferred0 } = partitionChangedPaths(diff.changed, writeScope)
   const deletedPart = partitionChangedPaths(diff.deleted, writeScope)
+  const promoted = selectCompanionPromotions(inScope0, deferred0, writeScope)
+  const promoteSet = new Set(promoted)
+  const inScope = [...inScope0, ...promoted.filter((p) => !inScope0.includes(p))]
+  const deferred = deferred0.filter((p) => !promoteSet.has(normalizeRel(p)))
+  if (promoted.length || writeScope.join('\n') !== (job.write_scope || []).join('\n')) {
+    patchJob(jobId, {
+      write_scope: normalizeWriteScope([...writeScope, ...promoted]),
+    })
+  }
 
   patchJob(jobId, {
     changed_files: diff.changed,
@@ -323,11 +386,31 @@ async function enterReviewFromDiff(
   const autoRaw = String(process.env.CURSOR_CODING_AUTO_APPLY || '1').trim().toLowerCase()
   const autoApply = !(autoRaw === '0' || autoRaw === 'false' || autoRaw === 'off' || autoRaw === 'no')
 
-  if (!autoApply || !accept.length) {
+  // 自动模式但无可同步项：必须收口为终态，禁止永久「自动同步中」转圈（追问/续改同主流程）
+  if (autoApply && !accept.length) {
+    const crit = criticalDeferredFiles(deferredAll)
+    const detail = crit.length
+      ? `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围含 schemas/models 后走续改。`
+      : `写码已结束；变更均在写范围外未同步（${deferredAll.length}）。`
+    setStatus(loadJob(jobId)!, 'succeeded', detail)
+    patchJob(jobId, {
+      last_synced_files: [],
+      review_in_scope: [],
+      review_deferred: deferredAll,
+    })
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
+    return
+  }
+
+  if (!autoApply) {
+    const crit = criticalDeferredFiles(deferredAll)
     const detail =
       `待审：范围内 ${inScope.length} 改 / ${deletedPart.inScope.length} 删；范围外 ${deferredAll.length}` +
       (cre.mocked ? '（Mock）' : '') +
-      (accept.length ? '。请勾选后同步。' : '。范围内无可同步项（均在范围外）。')
+      (accept.length ? '。请勾选后同步。' : '。范围内无可同步项（均在范围外）。') +
+      (crit.length
+        ? ` ⚠ 契约文件未进范围：${crit.slice(0, 5).join(', ')}——扩大写范围或勾选同步，否则易「请求失败」。`
+        : '')
     setStatus(loadJob(jobId)!, 'pending_review', detail)
     appendEvent(loadJob(jobId)!, {
       type: 'review',
@@ -336,6 +419,7 @@ async function enterReviewFromDiff(
         in_scope: inScope,
         deleted: deletedPart.inScope,
         deferred: deferredAll,
+        promoted_companions: promoted,
       }),
     })
     return
@@ -349,11 +433,16 @@ async function enterReviewFromDiff(
       in_scope: inScope,
       deleted: deletedPart.inScope,
       deferred: deferredAll,
+      promoted_companions: promoted,
       auto_apply: true,
     }),
   })
 
-  const applied = applyJobReview({ job_id: jobId, accept })
+  const applied = applyJobReview({
+    job_id: jobId,
+    accept,
+    expand_scope: promoted,
+  })
   if (!applied.ok) {
     setStatus(loadJob(jobId)!, 'pending_review', applied.detail || '自动同步失败，请手动同步')
     return
@@ -377,9 +466,14 @@ async function enterReviewFromDiff(
       ? asst.slice(0, 1200) + '…'
       : asst
     : ''
+  const critLeft = criticalDeferredFiles(deferredAll)
   const detail =
     `${applied.detail || '已自动同步'}；${compileNote}` +
+    (promoted.length ? `；已连带同步契约 ${promoted.length} 个` : '') +
     (deferredAll.length ? `；另有 ${deferredAll.length} 个范围外未同步` : '') +
+    (critLeft.length
+      ? `；⚠ 仍有契约文件未同步：${critLeft.slice(0, 5).join(', ')}`
+      : '') +
     '。请自行打开页面确认效果；如需调整请在对话框继续说明。'
   setStatus(j, 'succeeded', detail)
   appendEvent(loadJob(jobId)!, {
@@ -410,16 +504,7 @@ async function executeJob(jobId: string): Promise<void> {
     let parentSummary = ''
     let resumeAgentId: string | null = null
     if (parent) {
-      const files = parent.last_synced_files?.length
-        ? parent.last_synced_files
-        : parent.synced_files || []
-      parentSummary =
-        files
-          .slice(0, 40)
-          .map((f: string) => `- ${f}`)
-          .join('\n') ||
-        parent.detail ||
-        ''
+      parentSummary = compactParentHandoff(parent)
       resumeAgentId = parent.agent_id || null
       patchJob(jobId, { continue_count: (parent.continue_count || 0) + 1 })
     }
@@ -647,4 +732,106 @@ export function applyJobReview(opts: {
     appendEvent(loadJob(job.id)!, { type: 'done', status: 'failed', message: msg })
     return { ok: false, detail: msg, code: 'sync_error' }
   }
+}
+
+/**
+ * 治愈卡死的 pending_review（FINISHED 但 UI 永久「自动同步中」）。
+ * 追问/续改与首轮同一套状态机，禁止另搞加载态。
+ */
+export function healStalePendingReview(jobId: string): ReturnType<typeof loadJob> {
+  const job = loadJob(jobId)
+  if (!job || job.status !== 'pending_review') return job
+  const inScope = job.review_in_scope || []
+  const deferred = job.review_deferred || job.deferred_files || []
+  if (!isIdlePendingReview(job.detail || '', inScope.length)) return job
+  // 人工勾选待审不治愈
+  if (inScope.length > 0 && /请勾选后同步/.test(job.detail || '')) return job
+
+  // 尝试把扩展写范围内的契约文件补同步
+  const expanded = expandWriteScopeWithCompanions(job.write_scope || [])
+  const promoted = selectCompanionPromotions(inScope, deferred, job.write_scope || [])
+  const toSync = [
+    ...new Set([
+      ...promoted,
+      ...deferred.filter((p) => pathInScope(p, expanded) && !/\.(db|sqlite3?)$/i.test(p)),
+    ]),
+  ]
+  if (toSync.length && job.sandbox_path) {
+    try {
+      setStatus(job, 'pending_review', '自动同步中…')
+      const applied = applyJobReview({
+        job_id: jobId,
+        accept: toSync,
+        expand_scope: toSync,
+      })
+      if (applied.ok) return loadJob(jobId)
+    } catch {
+      /* fall through to close out */
+    }
+  }
+
+  const crit = criticalDeferredFiles(deferred)
+  const detail = crit.length
+    ? `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围后走续改。`
+    : inScope.length
+      ? `写码已结束；请在进度卡勾选后同步（或已超时收口）。`
+      : `写码已结束；变更均在写范围外未同步（${deferred.length}）。`
+  setStatus(loadJob(jobId)!, 'succeeded', detail)
+  appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
+  return loadJob(jobId)
+}
+
+/**
+ * 宿主重启后：内存里的 Cursor run 已没了，磁盘上却仍是 running。
+ * 按沙箱已改文件收口并自动同步，避免进度卡永远「正在等待 Vite」。
+ */
+export async function recoverOrphanRunningJobs(): Promise<number> {
+  let n = 0
+  for (const job of listJobs(40)) {
+    if (job.status !== 'running' && job.status !== 'queued') continue
+    if (isJobRunning(job.id)) continue
+    if (!job.sandbox_path || !job.workspace) {
+      setStatus(job, 'failed', '写码进程中断，沙箱不完整')
+      appendEvent(loadJob(job.id)!, {
+        type: 'done',
+        status: 'failed',
+        message: '写码进程中断',
+      })
+      n += 1
+      continue
+    }
+    try {
+      running.add(job.id)
+      setStatus(loadJob(job.id)!, 'running', '写码中断后按已改文件收口…')
+      const { before } = inferSparseBeforeAfter(
+        job.workspace,
+        job.sandbox_path,
+        job.write_scope || [],
+      )
+      await enterReviewFromDiff(
+        job.id,
+        {
+          sandbox: job.sandbox_path,
+          mode: 'sparse',
+          copied_files: 0,
+          total_bytes: 0,
+        },
+        before,
+        {
+          ok: true,
+          text: job.assistant_text || '',
+          thinking: (job.thinking_text || '') + '\n（空等 Vite / 进程中断，已按沙箱改动收口）',
+        },
+      )
+      n += 1
+    } catch (err) {
+      const j = loadJob(job.id)
+      if (j && (j.status === 'running' || j.status === 'queued')) {
+        setStatus(j, 'failed', `收口失败：${String(err).slice(0, 240)}`)
+      }
+    } finally {
+      running.delete(job.id)
+    }
+  }
+  return n
 }

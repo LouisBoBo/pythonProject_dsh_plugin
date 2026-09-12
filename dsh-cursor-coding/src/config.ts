@@ -61,8 +61,15 @@ export function loadConfig(): CursorCodingConfig {
     }
   }
   const dataRoot = env.CURSOR_CODING_HOME || asString(disk.dataRoot, base.dataRoot)
+  const listenRaw = env.CURSOR_CODING_LISTEN || asString(disk.listen, base.listen)
+  const listen =
+    listenRaw === 'localhost' || listenRaw === '127.0.0.1'
+      ? listenRaw === 'localhost'
+        ? '127.0.0.1'
+        : listenRaw
+      : '127.0.0.1'
   const cfg: CursorCodingConfig = {
-    listen: env.CURSOR_CODING_LISTEN || asString(disk.listen, base.listen),
+    listen,
     port: asNumber(env.CURSOR_CODING_PORT || disk.port, base.port),
     dataRoot,
     cursorApiKey: env.CURSOR_API_KEY || asString(disk.cursorApiKey, base.cursorApiKey),
@@ -114,7 +121,12 @@ export function maskSecret(value: string): string {
 }
 
 export function cursorKeyReady(cfg: CursorCodingConfig): boolean {
-  return Boolean(cfg.cursorApiKey.trim())
+  const k = cfg.cursorApiKey.trim()
+  if (!k) return false
+  // Mock 自检允许任意非空 Key；正式运行拒绝 test-* 伪装成已配置
+  if (process.env.CURSOR_CODING_MOCK === '1') return true
+  if (k === 'test-key-not-real' || /^test-/i.test(k)) return false
+  return true
 }
 
 /** 对外公开视图：不回传 Key 明文 */

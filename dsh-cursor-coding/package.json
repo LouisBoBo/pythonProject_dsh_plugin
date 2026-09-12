@@ -1,7 +1,7 @@
 {
   "name": "@zhongruan/dsh-cursor-coding",
-  "version": "0.6.8",
-  "description": "主流程已冻结：澄清→确认卡→进度卡→正文结论（见 docs 冻结说明）",
+  "version": "0.6.36",
+  "description": "主流程冻结；会话认 DSH、执行认本机 Job（见 docs/架构与选型/DSH会话与记忆分层.md）",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -16,6 +16,7 @@
   "scripts": {
     "build": "tsc && cp src/client.js lib/client.js && mkdir -p lib/ui && cp src/ui/console.html lib/ui/console.html",
     "self-test": "node lib/self-test.js",
+    "verify:clarify": "node lib/verify-clarify-gate.js",
     "verify:wait": "node lib/verify-wait-fast.js",
     "verify:a": "node lib/verify-real-a.js",
     "verify:bc": "node lib/verify-real-bc.js",

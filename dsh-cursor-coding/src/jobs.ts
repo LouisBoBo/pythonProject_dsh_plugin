@@ -32,6 +32,9 @@ export function newJobId(): string {
 function migrateJob(raw: CursorCodingJob): CursorCodingJob {
   return {
     ...raw,
+    parent_job_id: raw.parent_job_id ?? null,
+    dsh_session_id: raw.dsh_session_id ?? null,
+    dsh_call_id: raw.dsh_call_id ?? null,
     deleted_files: raw.deleted_files || [],
     deferred_files: raw.deferred_files || [],
     synced_files: raw.synced_files || [],
@@ -41,6 +44,7 @@ function migrateJob(raw: CursorCodingJob): CursorCodingJob {
     agent_id: raw.agent_id ?? null,
     run_id: raw.run_id ?? null,
     continue_count: raw.continue_count ?? 0,
+    conclusion_delivered: Boolean(raw.conclusion_delivered),
     assistant_text: raw.assistant_text || '',
     thinking_text: raw.thinking_text || '',
     transcript: Array.isArray(raw.transcript) ? raw.transcript : [],
@@ -93,6 +97,8 @@ export function createJob(input: {
   workspace: string
   requirement: string
   parent_job_id?: string | null
+  dsh_session_id?: string | null
+  dsh_call_id?: string | null
   write_scope?: string[]
   continue_count?: number
 }): CursorCodingJob {
@@ -103,6 +109,8 @@ export function createJob(input: {
     workspace: String(input.workspace || '').trim(),
     requirement: String(input.requirement || '').trim(),
     parent_job_id: input.parent_job_id ? String(input.parent_job_id).trim() : null,
+    dsh_session_id: input.dsh_session_id ? String(input.dsh_session_id).trim() : null,
+    dsh_call_id: input.dsh_call_id ? String(input.dsh_call_id).trim() : null,
     created_at: now,
     updated_at: now,
     detail: '已入队',
@@ -117,6 +125,7 @@ export function createJob(input: {
     agent_id: null,
     run_id: null,
     continue_count: input.continue_count ?? 0,
+    conclusion_delivered: false,
     assistant_text: '',
     thinking_text: '',
     transcript: [],
@@ -151,13 +160,34 @@ export function jobSummary(job: CursorCodingJob): string {
   return `${job.id}｜${job.status}｜${job.workspace || '（无路径）'}｜${job.detail || ''}`
 }
 
-export function findLatestSucceeded(workspace: string): CursorCodingJob | null {
-  const ws = String(workspace || '').trim()
+export function findLatestJobForSession(opts: {
+  workspace: string
+  session_id?: string
+  statuses?: JobStatus[]
+  /**
+   * 无 session_id 时是否退回「同工作区任意成功 Job」。
+   * 续改默认 false（禁止按工作区抢别人的会话）；仅兼容排查可开。
+   */
+  allowWorkspaceFallback?: boolean
+}): CursorCodingJob | null {
+  const ws = String(opts.workspace || '').trim()
   if (!ws) return null
-  for (const j of listJobs(50)) {
-    if (j.workspace === ws && j.status === 'succeeded') return j
+  const sid = String(opts.session_id || '').trim()
+  const statuses = opts.statuses && opts.statuses.length ? opts.statuses : (['succeeded'] as JobStatus[])
+  const ok = (j: CursorCodingJob) => j.workspace === ws && statuses.includes(j.status)
+  const jobs = listJobs(80)
+  if (sid) {
+    return jobs.find((j) => ok(j) && j.dsh_session_id === sid) || null
+  }
+  if (opts.allowWorkspaceFallback) {
+    return jobs.find(ok) || null
   }
   return null
+}
+
+/** @deprecated 排查用；续改请用带 session_id 的 findLatestJobForSession */
+export function findLatestSucceeded(workspace: string): CursorCodingJob | null {
+  return findLatestJobForSession({ workspace, allowWorkspaceFallback: true })
 }
 
 export function patchJob(id: string, patch: Partial<CursorCodingJob>): CursorCodingJob | null {
@@ -165,4 +195,25 @@ export function patchJob(id: string, patch: Partial<CursorCodingJob>): CursorCod
   if (!job) return null
   Object.assign(job, patch)
   return saveJob(job)
+}
+
+function sealedTranscript(job: CursorCodingJob): CursorCodingJob['transcript'] {
+  return (job.transcript || []).map((it) => (it.streaming ? { ...it, streaming: false } : it))
+}
+
+const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
+
+/**
+ * 用户取消：立刻终态。封住思考流，通知 SSE。
+ * 进行中的任务改为 cancelled；已结束的只封流，不改写业务结果。
+ */
+export function forceCancelJob(id: string): CursorCodingJob | null {
+  const job = loadJob(String(id || '').trim())
+  if (!job) return null
+  patchJob(job.id, { cancelled: true, transcript: sealedTranscript(job) })
+  const cur = loadJob(job.id)!
+  if (JOB_ENDED.includes(cur.status)) return cur
+  setStatus(cur, 'cancelled', '用户取消')
+  appendEvent(loadJob(job.id)!, { type: 'done', status: 'cancelled', message: '用户取消' })
+  return loadJob(job.id)
 }

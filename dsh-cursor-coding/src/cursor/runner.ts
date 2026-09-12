@@ -9,6 +9,7 @@ import {
   clampText,
   newTranscriptId,
   toolPathFromArgs,
+  toolSnippetFromArgs,
   type TranscriptItem,
 } from '../transcript.js'
 
@@ -19,6 +20,8 @@ export type CursorRunEvent = {
   path?: string
   tool_status?: string
   call_id?: string
+  /** 写码工具短代码片断（仅进度卡） */
+  snippet?: string
   thinking_duration_ms?: number
   /** 完整思考正文（快照） */
   full?: string
@@ -43,28 +46,33 @@ export function buildPrompt(opts: {
 }): string {
   const req = String(opts.requirement || '').trim()
   const parent = opts.parentSummary
-    ? `\n【续改上下文】上次已同步/已改文件摘要：\n${opts.parentSummary}\n请在此基础上增量修改。\n`
+    ? `\n【续改压缩上下文】（仅执行器手递，不进 DSH 聊天）\n${opts.parentSummary}\n请在此基础上增量修改。\n`
     : ''
   // 过程口吻偏 Composer；终稿仍要可验收结构
   return (
-    '你是 Cursor 本机写码助手，正在沙箱工程里改代码。\n' +
+    '你是 Cursor 本机写码助手，在沙箱工程里改代码。\n' +
     '【工作区】cwd = 沙箱根目录，请直接读写此目录。\n' +
     `【用户本机同步目录（勿当 cwd）】${opts.workspaceHint}\n\n` +
-    '说话方式：像 Cursor IDE 对话框一样——边想边做边说；中文短句说明在干什么；\n' +
-    '不要大段贴源码到对话；工具调用正常进行即可。\n' +
-    '全部改完后，另起一段终稿，第一行必须恰好是：\n## 说明方案\n' +
-    '随后写：结论、改动文件列表、验收步骤。\n' +
-    '规则：只改 cwd 内文件；最小必要改动；禁止碰 `.ssh`、`.env`、密钥与宿主机家目录。\n' +
+    '【原则】先摸清再改：用工具了解本仓库真实技术栈、目录与相关现有实现，沿用现有模式，禁止另起一套平行实现。\n' +
+    '摸底范围按诉求裁剪（不必机械扫全仓清单）。\n\n' +
+    '【契约一致】改接口字段时前后端/schema 一次改齐；禁止半套契约导致「写入成功却请求失败」。\n' +
+    '优先复用已有命名与模块；最小必要改动；只改 cwd 内文件；勿碰密钥与宿主机敏感路径。\n\n' +
+    '【禁止空等编译】不要 npm run dev / npm run build / npx vite / 等待 Vite/HMR/构建完成。' +
+    '改完立刻写终稿收工。页面热更新由同步后的插件处理，不是你的验收步骤。' +
+    'Shell 只许短命令（ls/grep/python3 -c）；禁止启动长驻进程。\n\n' +
+    '说话像 Cursor IDE：短句推进。不要大段贴源码到对话。\n' +
+    '全部改完后另起终稿，第一行恰好是：\n## 说明方案\n' +
+    '随后写：结论、改动文件、验收步骤（按实际改动写，勿套空模板）。\n' +
     parent +
     `\n【用户诉求】\n${req}\n`
   )
 }
 
 function shouldMock(apiKey: string): boolean {
+  // 仅显式 MOCK=1 才走假写码；禁止靠 test-* Key 在「已配置」表象下改真工程
   if (process.env.CURSOR_CODING_MOCK === '1') return true
   const k = String(apiKey || '').trim()
   if (!k) return true
-  if (k === 'test-key-not-real' || k.startsWith('test-')) return true
   return false
 }
 
@@ -113,20 +121,74 @@ function extractThinking(message: unknown): { text: string; duration?: number } 
   return { text, duration }
 }
 
+function coerceToolArgs(raw: unknown, depth = 0): Record<string, unknown> | null {
+  if (raw == null || depth > 5) return null
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (!(t.startsWith('{') || t.startsWith('['))) return null
+    try {
+      return coerceToolArgs(JSON.parse(t), depth + 1)
+    } catch {
+      return null
+    }
+  }
+  if (typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (typeof o.argsRaw === 'string') {
+    const inner = coerceToolArgs(o.argsRaw, depth + 1)
+    if (inner) return inner
+  }
+  if (typeof o.arguments === 'string') {
+    const inner = coerceToolArgs(o.arguments, depth + 1)
+    if (inner) return inner
+  }
+  if (o.args && typeof o.args === 'object') return o.args as Record<string, unknown>
+  if (o.arguments && typeof o.arguments === 'object') return o.arguments as Record<string, unknown>
+  if (o.input && typeof o.input === 'object') return o.input as Record<string, unknown>
+  if (o.params && typeof o.params === 'object') return o.params as Record<string, unknown>
+  return o
+}
+
 function extractToolMeta(message: unknown): {
   name?: string
   path?: string
   status?: string
   call_id?: string
+  snippet?: string
 } {
   if (!message || typeof message !== 'object') return {}
   const m = message as Record<string, unknown>
   const name = String(m.name || m.toolName || m.tool_name || '').trim() || undefined
   const status = String(m.status || m.tool_status || '').trim() || undefined
   const call_id = String(m.call_id || m.callId || m.id || '').trim() || undefined
-  const args = m.args || m.arguments || m.input || m.result
-  const path = toolPathFromArgs(args) || undefined
-  return { name, path, status, call_id }
+  const nested =
+    m.toolCall && typeof m.toolCall === 'object'
+      ? (m.toolCall as Record<string, unknown>)
+      : m.tool_call && typeof m.tool_call === 'object'
+        ? (m.tool_call as Record<string, unknown>)
+        : null
+  const args =
+    coerceToolArgs(m.args) ||
+    coerceToolArgs(m.arguments) ||
+    coerceToolArgs(m.input) ||
+    coerceToolArgs(m.argsRaw) ||
+    (nested &&
+      (coerceToolArgs(nested.args) ||
+        coerceToolArgs(nested.arguments) ||
+        coerceToolArgs(nested.input) ||
+        coerceToolArgs(nested.argsRaw))) ||
+    coerceToolArgs(m.result) ||
+    coerceToolArgs(m)
+  const path =
+    toolPathFromArgs(args) ||
+    (nested ? toolPathFromArgs(nested) : '') ||
+    toolPathFromArgs(m) ||
+    undefined
+  const snippet =
+    toolSnippetFromArgs(args, name, path) ||
+    toolSnippetFromArgs(m.result, name, path) ||
+    undefined
+  return { name, path, status, call_id, snippet }
 }
 
 class DialogBus {
@@ -228,6 +290,7 @@ class DialogBus {
     path?: string
     status?: string
     call_id?: string
+    snippet?: string
   }): void {
     this.sealThinking()
     // 工具打断正文段
@@ -245,6 +308,7 @@ class DialogBus {
         path: meta.path,
         tool_status: meta.status || 'running',
         call_id: meta.call_id,
+        snippet: meta.snippet,
       })
       return
     }
@@ -253,6 +317,7 @@ class DialogBus {
       if (meta.name) row.name = meta.name
       if (meta.path) row.path = meta.path
       if (meta.status) row.tool_status = meta.status
+      if (meta.snippet) row.snippet = meta.snippet
       row.at = new Date().toISOString()
     }
   }
@@ -301,18 +366,32 @@ async function runMock(opts: {
     prev +
     `\n## mock run\n- at: ${new Date().toISOString()}\n- requirement: ${opts.requirement.slice(0, 200)}\n`
   writeFileSync(marker, body.trim() + '\n', 'utf8')
+  // 模拟真实 Cursor edit：事件无 new_string/contents，片断由 runJob 沙箱 diff 补齐
   bus.upsertTool({
-    name: 'Write',
+    name: 'edit',
     path: '.cursor-coding-mock.md',
-    status: 'completed',
-    call_id: 'mock-write-1',
+    status: 'running',
+    call_id: 'mock-edit-1',
   })
   opts.onEvent({
     type: 'tool_event',
-    name: 'Write',
+    name: 'edit',
+    path: '.cursor-coding-mock.md',
+    tool_status: 'running',
+    call_id: 'mock-edit-1',
+  })
+  bus.upsertTool({
+    name: 'edit',
+    path: '.cursor-coding-mock.md',
+    status: 'completed',
+    call_id: 'mock-edit-1',
+  })
+  opts.onEvent({
+    type: 'tool_event',
+    name: 'edit',
     path: '.cursor-coding-mock.md',
     tool_status: 'completed',
-    call_id: 'mock-write-1',
+    call_id: 'mock-edit-1',
   })
 
   const parts = [
@@ -466,9 +545,44 @@ export async function runCursorLocal(opts: {
     opts.onEvent({ type: 'status', message: 'Cursor 正在改码，过程见进度卡…' })
     bus.addStatus('Cursor 正在改码，过程见进度卡…')
 
+    const idleMs = 90_000
+    let idleTimedOut = false
+    let idleTimer: ReturnType<typeof setTimeout> | undefined
+    const bumpIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        idleTimedOut = true
+        opts.onEvent({
+          type: 'status',
+          message: '超过 90 秒无进展（常见于空等 Vite），已跳过编译等待并按已改文件收口',
+        })
+        bus.addStatus('超过 90 秒无进展，已跳过空等 Vite')
+        void Promise.resolve()
+          .then(async () => {
+            if (run.supports('cancel')) await run.cancel()
+          })
+          .catch(() => {
+            /* ignore */
+          })
+      }, idleMs)
+    }
+    bumpIdle()
+    const cancelPoll = setInterval(() => {
+      if (opts.isCancel() || idleTimedOut) {
+        void Promise.resolve()
+          .then(async () => {
+            if (run.supports('cancel')) await run.cancel()
+          })
+          .catch(() => {
+            /* ignore */
+          })
+      }
+    }, 800)
+
     try {
       for await (const message of run.stream()) {
-        if (opts.isCancel()) {
+        bumpIdle()
+        if (opts.isCancel() || idleTimedOut) {
           if (run.supports('cancel')) await run.cancel()
           break
         }
@@ -500,6 +614,7 @@ export async function runCursorLocal(opts: {
             path: meta.path,
             status: meta.status || 'running',
             call_id: meta.call_id,
+            snippet: meta.snippet,
           })
           opts.onEvent({
             type: 'tool_event',
@@ -507,6 +622,7 @@ export async function runCursorLocal(opts: {
             path: meta.path,
             tool_status: meta.status || 'running',
             call_id: meta.call_id,
+            snippet: meta.snippet,
             message: shortTool(meta.name || mtype),
           })
           continue
@@ -532,14 +648,20 @@ export async function runCursorLocal(opts: {
       }
     } catch (streamErr) {
       opts.onEvent({ type: 'error', message: `流读取：${String(streamErr)}` })
+    } finally {
+      clearInterval(cancelPoll)
+      if (idleTimer) clearTimeout(idleTimer)
     }
 
     bus.sealThinking()
     bus.sealAssistant()
 
-    const result = await run.wait()
-    const status = String(result.status || '')
-    if (opts.isCancel()) {
+    if (opts.isCancel() && !idleTimedOut) {
+      try {
+        await run.wait()
+      } catch {
+        /* ignore */
+      }
       await disposeAgent(agent)
       return {
         ok: false,
@@ -551,7 +673,29 @@ export async function runCursorLocal(opts: {
         error: '已取消',
       }
     }
-    if (status === 'error') {
+
+    let result: { status?: string; result?: string; error?: unknown } = { status: idleTimedOut ? 'finished' : '' }
+    try {
+      result = (await run.wait()) as { status?: string; result?: string; error?: unknown }
+    } catch (waitErr) {
+      if (!idleTimedOut) {
+        opts.onEvent({ type: 'error', message: `等待结束：${String(waitErr)}` })
+      }
+    }
+    const status = String(result.status || '')
+    if (opts.isCancel() && !idleTimedOut) {
+      await disposeAgent(agent)
+      return {
+        ok: false,
+        text: bus.assistant,
+        thinking: bus.thinking,
+        transcript: bus.transcript,
+        agent_id: agentId,
+        run_id: runId,
+        error: '已取消',
+      }
+    }
+    if (status === 'error' && !idleTimedOut) {
       const errMsg = shortTool((result as { error?: unknown }).error || 'run error', 400)
       opts.onEvent({ type: 'error', message: errMsg })
       await disposeAgent(agent)
@@ -566,7 +710,7 @@ export async function runCursorLocal(opts: {
       }
     }
     const waitText = String((result as { result?: string }).result || '')
-    if (waitText) {
+    if (waitText && !idleTimedOut) {
       const d = bus.mergeAssistant(waitText)
       if (d) opts.onEvent({ type: 'assistant', message: d })
       bus.sealAssistant()
