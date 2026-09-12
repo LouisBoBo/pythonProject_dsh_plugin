@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { applyConfigFromUi, editableConfigView, loadConfig, publicConfigView } from './config.js'
+import { listWikiSpaces } from './feishu-docs.js'
 import { installCommitWebhookHook } from './hook-install.js'
 import { listJobs, loadJob, jobSummary } from './jobs.js'
 import { parseWebhookPayload, verifyWebhookSecret } from './payload.js'
@@ -9,20 +10,58 @@ import { engineStatus } from './review-client.js'
 let server: Server | null = null
 let listenAddr = ''
 
-function corsHeaders(): Record<string, string> {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers':
-      'Content-Type, X-Remote-Review-Secret, X-Gitlab-Token, X-GitHub-Event, X-Gitlab-Event',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS',
+function requestOrigin(req: IncomingMessage): string {
+  return String(req.headers.origin || '').trim()
+}
+
+function isLoopbackBrowserOrigin(origin: string): boolean {
+  if (!origin) return false
+  try {
+    const u = new URL(origin)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+    return u.hostname === '127.0.0.1' || u.hostname === 'localhost'
+  } catch {
+    return false
   }
 }
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+/** 仅对本机 Origin 回显 ACAO；禁止 *，避免恶意页读 loopback 管理接口 */
+function corsHeaders(req?: IncomingMessage): Record<string, string> {
+  const origin = req ? requestOrigin(req) : ''
+  if (origin && isLoopbackBrowserOrigin(origin)) {
+    return {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Headers':
+        'Content-Type, X-Remote-Review-Secret, X-Gitlab-Token, X-GitHub-Event, X-Gitlab-Event',
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS',
+      Vary: 'Origin',
+    }
+  }
+  return {}
+}
+
+/** 管理接口鉴权：已配置 secret 时必须带密钥；未配置时仍拒绝非本机浏览器 Origin */
+function requireAdmin(
+  req: IncomingMessage,
+  cfg: ReturnType<typeof loadConfig>,
+): { ok: boolean; detail?: string } {
+  const origin = requestOrigin(req)
+  if (origin && !isLoopbackBrowserOrigin(origin)) {
+    return { ok: false, detail: '拒绝非本机 Origin 跨域访问管理接口' }
+  }
+  return verifyWebhookSecret({
+    configuredSecret: cfg.secret,
+    headers: req.headers,
+    listenHost: cfg.listen,
+    requireSecret: process.env.REMOTE_REVIEW_REQUIRE_SECRET === '1',
+  })
+}
+
+function send(res: ServerResponse, status: number, body: unknown, req?: IncomingMessage): void {
   const text = JSON.stringify(body, null, 2)
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    ...corsHeaders(),
+    ...corsHeaders(req),
   })
   res.end(text)
 }
@@ -62,7 +101,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const method = (req.method || 'GET').toUpperCase()
 
   if (method === 'OPTIONS') {
-    res.writeHead(204, corsHeaders())
+    res.writeHead(204, corsHeaders(req))
     res.end()
     return
   }
@@ -76,7 +115,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       webhook: `http://${cfg.listen}:${cfg.port}/webhook`,
       config: publicConfigView(cfg),
       engine,
-    })
+    }, req)
     return
   }
 
@@ -89,22 +128,64 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       method_required: 'POST',
       content_type: 'application/json',
       health: '/health',
-    })
+    }, req)
     return
   }
 
   if (method === 'GET' && path === '/api/config') {
-    send(res, 200, { ok: true, config: editableConfigView(cfg), view: publicConfigView(cfg) })
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      const origin = requestOrigin(req)
+      if (origin && !isLoopbackBrowserOrigin(origin)) {
+        send(res, 403, { ok: false, detail: auth.detail || '拒绝非本机 Origin' }, req)
+        return
+      }
+      const sent = Boolean(
+        req.headers['x-remote-review-secret'] ||
+          req.headers['x-gitlab-token'] ||
+          req.headers['x-hub-signature-256'],
+      )
+      if (sent) {
+        send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+        return
+      }
+      // 未带密钥：不返回可编辑配置（含 App ID / wiki token）
+      send(res, 200, {
+        ok: true,
+        config: null,
+        view: publicConfigView(cfg),
+        needSecret: Boolean(cfg.secret.trim()),
+        detail: auth.detail || '管理接口需要 X-Remote-Review-Secret',
+      }, req)
+      return
+    }
+    send(res, 200, { ok: true, config: editableConfigView(cfg), view: publicConfigView(cfg) }, req)
+    return
+  }
+
+  if (method === 'GET' && path === '/api/feishu/wiki-spaces') {
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+      return
+    }
+    const listed = await listWikiSpaces(cfg)
+    send(res, listed.ok ? 200 : 400, listed, req)
     return
   }
 
   if (method === 'PUT' && path === '/api/config') {
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+      return
+    }
     let parsed: Record<string, unknown> = {}
     try {
       const raw = await readBody(req)
       parsed = raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {}
     } catch {
-      send(res, 400, { ok: false, detail: 'JSON 无法解析' })
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
       return
     }
     try {
@@ -121,56 +202,76 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           next.port !== cfg.port || next.listen !== cfg.listen
             ? '端口或监听地址已变更，请重启 Webhook 服务后生效'
             : undefined,
-      })
+      }, req)
     } catch (err) {
-      send(res, 400, { ok: false, detail: String(err) })
+      send(res, 400, { ok: false, detail: String(err) }, req)
     }
     return
   }
 
   if (method === 'POST' && path === '/api/install-hook') {
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+      return
+    }
     let parsed: Record<string, unknown> = {}
     try {
       const raw = await readBody(req)
       parsed = raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {}
     } catch {
-      send(res, 400, { ok: false, detail: 'JSON 无法解析' })
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
       return
     }
     const repoPath = String(parsed.repoPath || parsed.repo_path || '').trim()
     if (!repoPath) {
-      send(res, 400, { ok: false, detail: '请填写业务仓库绝对路径 repoPath' })
+      send(res, 400, { ok: false, detail: '请填写业务仓库绝对路径 repoPath' }, req)
       return
     }
     const out = installCommitWebhookHook(repoPath)
-    send(res, out.ok ? 200 : 400, out)
+    send(res, out.ok ? 200 : 400, out, req)
     return
   }
 
   if (method === 'GET' && path === '/jobs') {
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+      return
+    }
     const jobs = listJobs(30)
-    send(res, 200, { ok: true, count: jobs.length, items: jobs.map(jobSummary), jobs })
+    send(res, 200, { ok: true, count: jobs.length, items: jobs.map(jobSummary), jobs }, req)
     return
   }
 
   if (method === 'GET' && path.startsWith('/jobs/')) {
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+      return
+    }
     const id = decodeURIComponent(path.slice('/jobs/'.length))
     const job = loadJob(id)
     if (!job) {
-      send(res, 404, { ok: false, detail: '任务不存在' })
+      send(res, 404, { ok: false, detail: '任务不存在' }, req)
       return
     }
-    send(res, 200, { ok: true, job })
+    send(res, 200, { ok: true, job }, req)
     return
   }
 
   if (method === 'POST' && path.endsWith('/retry-feishu') && path.startsWith('/jobs/')) {
+    const auth = requireAdmin(req, cfg)
+    if (!auth.ok) {
+      send(res, 401, { ok: false, detail: auth.detail || '未授权' }, req)
+      return
+    }
     const id = decodeURIComponent(path.slice('/jobs/'.length, path.length - '/retry-feishu'.length))
     try {
       const job = await sendJobToFeishu(id)
-      send(res, 200, { ok: job.status === 'feishu_ok', job })
+      send(res, 200, { ok: job.status === 'feishu_ok', job }, req)
     } catch (err) {
-      send(res, 400, { ok: false, detail: String(err) })
+      send(res, 400, { ok: false, detail: String(err) }, req)
     }
     return
   }
@@ -182,7 +283,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       raw = await readBody(req)
       parsed = raw.trim() ? JSON.parse(raw) : {}
     } catch {
-      send(res, 400, { ok: false, detail: 'JSON 无法解析' })
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
       return
     }
     const auth = verifyWebhookSecret({
@@ -193,7 +294,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       rawBody: raw,
     })
     if (!auth.ok) {
-      send(res, 401, { ok: false, detail: auth.detail })
+      send(res, 401, { ok: false, detail: auth.detail }, req)
       return
     }
     if (path === '/simulate' && parsed && typeof parsed === 'object') {
@@ -208,11 +309,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       jobId: job.id,
       status: job.status,
       detail: job.detail || '已入队，后台调用现有审码 API，完成后写飞书文档',
-    })
+    }, req)
     return
   }
 
-  send(res, 404, { ok: false, detail: `未知路径 ${method} ${path}` })
+  send(res, 404, { ok: false, detail: `未知路径 ${method} ${path}` }, req)
 }
 
 export function isServerRunning(): boolean {
@@ -225,7 +326,13 @@ export function getListenAddr(): string {
 
 async function probeConfigApi(base: string): Promise<{ ok: boolean; detail: string }> {
   try {
-    const res = await fetch(`${base.replace(/\/$/, '')}/api/config`, { signal: AbortSignal.timeout(2500) })
+    const cfg = loadConfig()
+    const headers: Record<string, string> = {}
+    if (cfg.secret.trim()) headers['X-Remote-Review-Secret'] = cfg.secret.trim()
+    const res = await fetch(`${base.replace(/\/$/, '')}/api/config`, {
+      headers,
+      signal: AbortSignal.timeout(2500),
+    })
     if (res.status === 404) {
       return {
         ok: false,
@@ -233,7 +340,16 @@ async function probeConfigApi(base: string): Promise<{ ok: boolean; detail: stri
           `端口上的进程是旧版服务（没有设置保存接口）。请关掉终端里旧的 node lib/cli.js / pnpm start，或执行: lsof -nP -iTCP:${base.split(':').pop()} -sTCP:LISTEN 后结束该进程，再重开 WorkBuddy`,
       }
     }
-    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; detail?: string }
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      detail?: string
+      config?: unknown
+      needSecret?: boolean
+    }
+    if (res.status === 401) {
+      return { ok: false, detail: data.detail || '管理接口需要 Webhook 密钥' }
+    }
+    // 无密钥时服务可能返回 ok+无 config；只要不是 404 且进程能应答即视为同端口服务
     if (!res.ok || data.ok === false) {
       return { ok: false, detail: data.detail || `探测 /api/config 失败 HTTP ${res.status}` }
     }
@@ -254,7 +370,7 @@ export async function startServer(): Promise<{ ok: boolean; addr: string; detail
   return new Promise((resolve) => {
     const s = createServer((req, res) => {
       void handle(req, res).catch((err) => {
-        if (!res.headersSent) send(res, 500, { ok: false, detail: String(err) })
+        if (!res.headersSent) send(res, 500, { ok: false, detail: String(err) }, req)
       })
     })
     s.on('error', (err: NodeJS.ErrnoException) => {

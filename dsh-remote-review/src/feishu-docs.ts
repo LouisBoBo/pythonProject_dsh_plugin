@@ -71,43 +71,6 @@ function stripMergeInfo(node: unknown): unknown {
   return next
 }
 
-function simpleTextBlocks(markdown: string): Record<string, unknown>[] {
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
-  const blocks: Record<string, unknown>[] = []
-  const flush = (text: string, type: number, key: string) => {
-    const content = text.slice(0, 8000)
-    if (!content.trim() && type === 2) {
-      blocks.push({
-        block_type: 2,
-        text: { elements: [{ text_run: { content: ' ' } }] },
-      })
-      return
-    }
-    blocks.push({
-      block_type: type,
-      [key]: { elements: [{ text_run: { content: content || ' ' } }] },
-    })
-  }
-  for (const line of lines) {
-    if (line.startsWith('### ')) flush(line.slice(4), 5, 'heading3')
-    else if (line.startsWith('## ')) flush(line.slice(3), 4, 'heading2')
-    else if (line.startsWith('# ')) flush(line.slice(2), 3, 'heading1')
-    else if (/^[-*] /.test(line)) flush(line.replace(/^[-*] /, ''), 12, 'bullet')
-    else flush(line, 2, 'text')
-  }
-  return blocks.length ? blocks : [{ block_type: 2, text: { elements: [{ text_run: { content: markdown.slice(0, 8000) || ' ' } }] } }]
-}
-
-async function insertSimpleBlocks(token: string, documentId: string, markdown: string): Promise<void> {
-  const blocks = simpleTextBlocks(markdown)
-  const url = `https://open.feishu.cn/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/children?document_revision_id=-1`
-  for (let i = 0; i < blocks.length; i += 40) {
-    const chunk = blocks.slice(i, i + 40)
-    const out = await feishuJson(url, token, { method: 'POST', body: { children: chunk, index: -1 } })
-    if (out.code !== 0) throw new Error(`插入文档块失败：${out.msg || out.http}`)
-  }
-}
-
 async function insertConvertedBlocks(token: string, documentId: string, markdown: string): Promise<void> {
   const converted = await feishuJson(
     'https://open.feishu.cn/open-apis/docx/v1/documents/blocks/convert',
@@ -144,6 +107,97 @@ function writeLocalDoc(cfg: RemoteReviewConfig, title: string, markdown: string)
   return path
 }
 
+async function createInWiki(
+  token: string,
+  cfg: RemoteReviewConfig,
+  title: string,
+): Promise<{ documentId: string; url: string }> {
+  const spaceId = cfg.feishu.wikiSpaceId.trim()
+  const body: Record<string, string> = {
+    obj_type: 'docx',
+    node_type: 'origin',
+    title: title.slice(0, 800),
+  }
+  const parent = cfg.feishu.wikiParentNodeToken.trim()
+  if (parent) body.parent_node_token = parent
+
+  const created = await feishuJson(
+    `https://open.feishu.cn/open-apis/wiki/v2/spaces/${encodeURIComponent(spaceId)}/nodes`,
+    token,
+    { method: 'POST', body },
+  )
+  if (created.code !== 0) {
+    throw new Error(
+      `在文档库创建失败：${created.msg || created.http}（请确认：1) 开放平台已开通 wiki 权限 2) 文档库成员里已添加本应用并可编辑）`,
+    )
+  }
+  const node = (created.data.node && typeof created.data.node === 'object'
+    ? created.data.node
+    : created.data) as Record<string, unknown>
+  const documentId = String(node.obj_token || '')
+  const nodeToken = String(node.node_token || '')
+  if (!documentId) throw new Error('文档库创建成功但未返回 obj_token')
+  const url = nodeToken
+    ? `https://www.feishu.cn/wiki/${nodeToken}`
+    : `https://www.feishu.cn/docx/${documentId}`
+  return { documentId, url }
+}
+
+async function createInDrive(
+  token: string,
+  cfg: RemoteReviewConfig,
+  title: string,
+): Promise<{ documentId: string; url: string }> {
+  const created = await feishuJson('https://open.feishu.cn/open-apis/docx/v1/documents', token, {
+    method: 'POST',
+    body: {
+      title: title.slice(0, 800),
+      folder_token: cfg.feishu.folderToken.trim() || undefined,
+    },
+  })
+  if (created.code !== 0) {
+    throw new Error(`创建飞书文档失败：${created.msg || created.http}`)
+  }
+  const document = (created.data.document && typeof created.data.document === 'object'
+    ? created.data.document
+    : created.data) as Record<string, unknown>
+  const documentId = String(document.document_id || document.documentId || '')
+  if (!documentId) throw new Error('创建飞书文档未返回 document_id')
+  const url = String(document.url || `https://www.feishu.cn/docx/${documentId}`)
+  return { documentId, url }
+}
+
+/** 列出应用可见的文档库，便于用户抄 space_id */
+export async function listWikiSpaces(cfg: RemoteReviewConfig): Promise<{
+  ok: boolean
+  detail?: string
+  spaces: Array<{ spaceId: string; name: string; description: string }>
+}> {
+  if (!feishuReady(cfg)) return { ok: false, detail: '飞书未配置', spaces: [] }
+  try {
+    const token = await getTenantToken(cfg)
+    const out = await feishuJson(
+      'https://open.feishu.cn/open-apis/wiki/v2/spaces?page_size=50',
+      token,
+    )
+    if (out.code !== 0) {
+      return { ok: false, detail: out.msg || String(out.http), spaces: [] }
+    }
+    const items = (out.data.items as unknown[]) || []
+    const spaces = items.map((raw) => {
+      const s = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+      return {
+        spaceId: String(s.space_id || ''),
+        name: String(s.name || ''),
+        description: String(s.description || ''),
+      }
+    }).filter((s) => s.spaceId)
+    return { ok: true, spaces }
+  } catch (err) {
+    return { ok: false, detail: String(err), spaces: [] }
+  }
+}
+
 export async function publishReviewToFeishu(opts: {
   cfg: RemoteReviewConfig
   title: string
@@ -161,32 +215,24 @@ export async function publishReviewToFeishu(opts: {
 
   try {
     const token = await getTenantToken(opts.cfg)
-    const created = await feishuJson('https://open.feishu.cn/open-apis/docx/v1/documents', token, {
-      method: 'POST',
-      body: {
-        title: opts.title.slice(0, 800),
-        folder_token: opts.cfg.feishu.folderToken || undefined,
-      },
-    })
-    if (created.code !== 0) {
-      throw new Error(`创建飞书文档失败：${created.msg || created.http}`)
-    }
-    const document = (created.data.document && typeof created.data.document === 'object'
-      ? created.data.document
-      : created.data) as Record<string, unknown>
-    const documentId = String(document.document_id || document.documentId || '')
-    if (!documentId) throw new Error('创建飞书文档未返回 document_id')
-    const url = String(document.url || `https://www.feishu.cn/docx/${documentId}`)
+    const created = opts.cfg.feishu.wikiSpaceId.trim()
+      ? await createInWiki(token, opts.cfg, opts.title)
+      : await createInDrive(token, opts.cfg, opts.title)
+    const { documentId, url } = created
 
+    // 强制按 Markdown 写入飞书新版文档；转换失败则整单失败，不再降级为纯文本块
+    // （降级后飞书里只剩一行行白文，标题/列表/代码块都会丢）
+    const md = String(opts.markdown || '').trim()
+    if (!md) {
+      throw new Error('报告正文为空，拒绝写入飞书（须为 Markdown）')
+    }
     try {
-      await insertConvertedBlocks(token, documentId, opts.markdown)
+      await insertConvertedBlocks(token, documentId, md)
     } catch (convErr) {
-      console.warn('[remote-review] Markdown 转块失败，降级为简单块：', String(convErr))
-      try {
-        await insertSimpleBlocks(token, documentId, opts.markdown)
-      } catch (simpleErr) {
-        throw new Error(`转换失败(${String(convErr)})；简单块写入亦失败(${String(simpleErr)})`)
-      }
+      throw new Error(
+        `飞书要求以 Markdown 写入失败：${String(convErr)}。` +
+          `请在开放平台开通并发布权限 docx:document.block:convert（Markdown 转文档块），勿使用纯文本降级。`,
+      )
     }
 
     return { ok: true, mode: 'feishu', url, documentId, localPath }

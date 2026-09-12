@@ -1,5 +1,8 @@
 # 远端审码：绕开腾讯云与 GitHub 双向不通
 
+> 总册：[remote-review-远端Webhook审码-完整实施方案.md](./remote-review-远端Webhook审码-完整实施方案.md)  
+> 索引：[../README.md](../README.md)
+
 ## 根因（本机实测）
 
 | 方向 | 结果 |

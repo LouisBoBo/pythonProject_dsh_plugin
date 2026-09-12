@@ -1,0 +1,27 @@
+---
+description: Cursor 写码插件主流程已冻结，禁止随意改步骤形态
+globs: dsh-cursor-coding/**/*
+alwaysApply: false
+---
+
+# Cursor 写码插件 · 主流程冻结
+
+权威说明：`docs/04-Cursor-AI-Coding逼真版本/Cursor写码插件-主流程冻结.md`
+
+## 冻结步骤（勿改顺序/职责）
+
+1. **澄清**：大改/新增/删除页菜单 → DSH `ask_user_question`（禁止长文反问、禁止自造问卷）
+2. **确认卡**：`zr_cursor_begin` 阻塞到用户点确认（确认前不写码、不 finish、正文空）
+3. **进度卡**：点确认后才开工；卡内只过程（无说明方案/结论）
+4. **正文结论**：仅 `zr_cursor_finish` 在同步完成后输出「本轮结论」
+
+## 允许
+
+细节优化：文案、滚动、SSE/对账、scope、同步刷新、bugfix。
+
+## 禁止（除非产品改冻结口径）
+
+- 取消确认卡或确认前自动开写  
+- 进度未结束就往聊天正文倒内容  
+- 卡内与正文双份结论  
+- 用 jobs/status/wait 代替主路径  

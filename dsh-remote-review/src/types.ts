@@ -1,7 +1,12 @@
 export type FeishuConfig = {
   appId: string
   appSecret: string
+  /** 可选：个人云盘文件夹（常因权限失败；优先用 wiki） */
   folderToken: string
+  /** 推荐：文档库（知识空间）space_id，报告会出现在「我的文档库」 */
+  wikiSpaceId: string
+  /** 可选：挂到文档库某父节点下；空则在文档库根目录 */
+  wikiParentNodeToken: string
 }
 
 export type RemoteReviewConfig = {

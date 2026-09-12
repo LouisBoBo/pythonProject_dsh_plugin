@@ -170,7 +170,17 @@ export function apply(ctx: Context) {
         port: { type: 'string', required: true, description: 'Webhook 端口，默认 18787；不改则传空' },
         feishuAppId: { type: 'string', required: true, description: '飞书自建应用 App ID；不改则传空' },
         feishuAppSecret: { type: 'string', required: true, description: '飞书 App Secret；不改则传空' },
-        feishuFolderToken: { type: 'string', required: true, description: '飞书云空间文件夹 token，报告会建在该目录；不改则传空' },
+        feishuFolderToken: { type: 'string', required: true, description: '云盘文件夹 token（一般不用）；不改则传空' },
+        feishuWikiSpaceId: {
+          type: 'string',
+          required: true,
+          description: '文档库 space_id（推荐，报告会出现在「我的文档库」）；不改则传空',
+        },
+        feishuWikiParentNodeToken: {
+          type: 'string',
+          required: true,
+          description: '文档库父节点 token（可选）；不改则传空',
+        },
         secret: { type: 'string', required: true, description: 'Webhook 校验密钥；不改则传空。本地测试可空' },
       },
       output: {
@@ -186,7 +196,13 @@ export function apply(ctx: Context) {
           engine?: string
           port?: number
           secret?: string
-          feishu: { appId?: string; appSecret?: string; folderToken?: string }
+          feishu: {
+            appId?: string
+            appSecret?: string
+            folderToken?: string
+            wikiSpaceId?: string
+            wikiParentNodeToken?: string
+          }
         } = { feishu: {} }
         if (String(args.engine || '').trim()) partial.engine = String(args.engine).trim()
         if (String(args.port || '').trim()) partial.port = Number(args.port)
@@ -196,13 +212,19 @@ export function apply(ctx: Context) {
         if (String(args.feishuFolderToken || '').trim()) {
           partial.feishu!.folderToken = String(args.feishuFolderToken).trim()
         }
+        if (String(args.feishuWikiSpaceId || '').trim()) {
+          partial.feishu!.wikiSpaceId = String(args.feishuWikiSpaceId).trim()
+        }
+        if (String(args.feishuWikiParentNodeToken || '').trim()) {
+          partial.feishu!.wikiParentNodeToken = String(args.feishuWikiParentNodeToken).trim()
+        }
         const cfg = saveConfig(partial)
         const view = publicConfigView(cfg)
         return {
           summary:
             `已写入 ${cfg.dataRoot}/config.json\n` +
             `引擎 ${view.engine}  端口 ${view.port}\n` +
-            `飞书 ${view.feishuReady ? '已配置' : '仍未配置'}  文件夹 ${view.feishuFolderToken || '空'}\n` +
+            `飞书 ${view.feishuReady ? '已配置' : '仍未配置'}  文档库 ${view.feishuWikiSpaceId || '空'}  文件夹 ${view.feishuFolderToken || '空'}\n` +
             `改端口后请 remote_review_stop 再 remote_review_start。`,
         }
       },

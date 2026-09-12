@@ -58,6 +58,8 @@ window.__ModuleLoader__.load({
         feishuAppSecret: '',
         feishuAppSecretConfigured: false,
         feishuFolderToken: '',
+        feishuWikiSpaceId: '',
+        feishuWikiParentNodeToken: '',
         webhook: '',
         dataRoot: '',
         feishuReady: false,
@@ -178,8 +180,20 @@ window.__ModuleLoader__.load({
         return Promise.resolve(null)
       }
 
+      function authHeaders(extra) {
+        var h = Object.assign({}, extra || {})
+        var s = secretForSave(draft.secret)
+        if (s) h['X-Remote-Review-Secret'] = s
+        return h
+      }
+
       function fetchJson(url, opts) {
-        return fetch(url, Object.assign({ signal: AbortSignal.timeout(8000) }, opts || {}))
+        opts = opts || {}
+        var headers = authHeaders(opts.headers || {})
+        return fetch(
+          url,
+          Object.assign({}, opts, { headers: headers, signal: opts.signal || AbortSignal.timeout(8000) }),
+        )
           .then(function (r) {
             return r.text().then(function (text) {
               var d = {}
@@ -219,15 +233,24 @@ window.__ModuleLoader__.load({
                   '端口上是旧版服务（无 /api/config）。请结束占用 18787 的旧进程后重开 WorkBuddy，再点「连接并加载」。',
                 )
               }
+              if (x.http === 401) {
+                throw new Error((x.d && x.d.detail) || 'Webhook 密钥不正确')
+              }
               return {
                 ok: x.ok,
                 config: x.d && x.d.config,
+                needSecret: !!(x.d && x.d.needSecret),
                 detail: (x.d && x.d.detail) || (!x.ok ? 'HTTP ' + x.http : ''),
               }
             })
           })
           .then(function (x) {
             if (!x || !x.ok || !x.config) {
+              if (x && x.needSecret) {
+                throw new Error(
+                  '服务已配置 Webhook 密钥：请在下方「Webhook 密钥」填入明文后点「连接并加载」（优先用 WorkBuddy 宿主通道则无需手填）',
+                )
+              }
               throw new Error((x && x.detail) || '无法加载配置：请先安装并启用远端审码插件，然后刷新页面')
             }
             var c = x.config
@@ -241,6 +264,8 @@ window.__ModuleLoader__.load({
               feishuAppSecret: maskIfConfigured(!!c.feishuAppSecretConfigured),
               feishuAppSecretConfigured: !!c.feishuAppSecretConfigured,
               feishuFolderToken: c.feishuFolderToken || '',
+              feishuWikiSpaceId: c.feishuWikiSpaceId || '',
+              feishuWikiParentNodeToken: c.feishuWikiParentNodeToken || '',
               webhook: c.webhook || '',
               dataRoot: c.dataRoot || '',
               feishuReady: !!c.feishuReady,
@@ -270,6 +295,8 @@ window.__ModuleLoader__.load({
           feishuAppId: draft.feishuAppId,
           feishuAppSecret: secretForSave(draft.feishuAppSecret),
           feishuFolderToken: draft.feishuFolderToken,
+          feishuWikiSpaceId: draft.feishuWikiSpaceId,
+          feishuWikiParentNodeToken: draft.feishuWikiParentNodeToken,
         }
         if (!String(payload.feishuAppId || '').trim()) {
           setMsg('保存失败：请填写飞书 App ID')
@@ -283,12 +310,16 @@ window.__ModuleLoader__.load({
           setBusy(false)
           return
         }
-        if (!String(payload.feishuFolderToken || '').trim()) {
-          setMsg('保存失败：请填写云空间文件夹 Token')
+        if (
+          !String(payload.feishuWikiSpaceId || '').trim() &&
+          !String(payload.feishuFolderToken || '').trim()
+        ) {
+          setMsg('保存失败：请填写文档库 space_id（推荐）或云盘文件夹 Token')
           setMsgOk(false)
           setBusy(false)
           return
         }
+        // 填了 wikiSpaceId 会进「我的文档库」；folder 可不填
         callHost('saveConfig', payload)
           .then(function (viaHost) {
             if (viaHost && viaHost.ok) return viaHost
@@ -300,6 +331,12 @@ window.__ModuleLoader__.load({
               if (x.http === 404) {
                 throw new Error(
                   '端口上是旧版服务，无法保存。请结束占用端口的旧 pnpm start / node lib/cli.js，重开 WorkBuddy 后再保存。',
+                )
+              }
+              if (x.http === 401) {
+                throw new Error(
+                  (x.d && x.d.detail) ||
+                    '保存需要 Webhook 密钥：请在设置页填入明文密钥后再保存（或走宿主通道）',
                 )
               }
               return Object.assign({ ok: x.ok }, x.d, {
@@ -321,6 +358,8 @@ window.__ModuleLoader__.load({
                 feishuAppSecret: maskIfConfigured(!!c.feishuAppSecretConfigured),
                 feishuAppSecretConfigured: !!c.feishuAppSecretConfigured,
                 feishuFolderToken: c.feishuFolderToken || '',
+                feishuWikiSpaceId: c.feishuWikiSpaceId || '',
+                feishuWikiParentNodeToken: c.feishuWikiParentNodeToken || '',
                 webhook: c.webhook || prev.webhook,
                 dataRoot: c.dataRoot || prev.dataRoot,
                 feishuReady: !!c.feishuReady,
@@ -380,7 +419,7 @@ window.__ModuleLoader__.load({
             if (viaHost && (viaHost.ok === true || viaHost.ok === false)) return viaHost
             return fetch(base() + '/api/install-hook', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: authHeaders({ 'Content-Type': 'application/json' }),
               body: JSON.stringify({ repoPath: path }),
             }).then(function (r) {
               return r.json().then(function (d) {
@@ -502,13 +541,18 @@ window.__ModuleLoader__.load({
           { className: 'rr-set-card' },
           h('h3', null, '2 · 飞书文档（审核报告发到这里）'),
           h(
+            'p',
+            { className: 'rr-set-hint' },
+            '以下只保存在本机 ~/.zhongruan/remote-review/config.json，不会写进任何 git 项目。每人/每台机器各自填。',
+          ),
+          h(
             'div',
             { className: 'rr-set-grid' },
             field(
               '飞书 App ID',
               {
                 value: draft.feishuAppId,
-                placeholder: 'cli_xxxx',
+                placeholder: 'cli_xxxx（开放平台 → 凭证与基础信息）',
                 onChange: function (e) {
                   setDraft(Object.assign({}, draft, { feishuAppId: e.target.value }))
                 },
@@ -552,22 +596,46 @@ window.__ModuleLoader__.load({
               true,
             ),
             field(
-              '云空间文件夹 Token',
+              '文档库 space_id（推荐）',
+              {
+                value: draft.feishuWikiSpaceId,
+                placeholder: '一串数字的 space_id（不是 URL 里 /wiki/ 后面那串）',
+                onChange: function (e) {
+                  setDraft(Object.assign({}, draft, { feishuWikiSpaceId: e.target.value }))
+                },
+              },
+              true,
+              false,
+            ),
+            field(
+              '文档库父节点（可选）',
+              {
+                value: draft.feishuWikiParentNodeToken,
+                placeholder: 'URL 里 /wiki/ 后面那串；空则落在文档库根',
+                onChange: function (e) {
+                  setDraft(Object.assign({}, draft, { feishuWikiParentNodeToken: e.target.value }))
+                },
+              },
+              true,
+              false,
+            ),
+            field(
+              '云盘文件夹 Token（一般不用）',
               {
                 value: draft.feishuFolderToken,
-                placeholder: '浏览器打开文件夹，复制 /drive/folder/ 后面一串',
+                placeholder: 'fld… 仅备用；个人云盘常无权限',
                 onChange: function (e) {
                   setDraft(Object.assign({}, draft, { feishuFolderToken: e.target.value }))
                 },
               },
               true,
-              true,
+              false,
             ),
           ),
           h(
             'p',
             { className: 'rr-set-hint' },
-            '带 * 为必填。已保存的密钥以密文显示，不会回传明文；要更换时点进输入框重新粘贴。',
+            '要出现在「我的文档库」：文档库「添加应用」选本应用并给可编辑 → 填 space_id。父节点/文件夹留空可清空。开放平台需开通并发布 wiki 权限。',
           ),
         ),
         h(

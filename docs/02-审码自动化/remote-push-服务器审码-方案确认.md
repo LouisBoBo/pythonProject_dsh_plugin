@@ -3,7 +3,7 @@
 > 状态：**已落地 MVP（本地 Webhook 服务可测）**  
 > 形态：公司 DSH 插件 `@zhongruan/dsh-remote-review` + 可独立运行的本地 Webhook 服务。  
 > 与 [ide-commit-hook-自动审码-MVP.md](./ide-commit-hook-自动审码-MVP.md)（第一种：本机 Hook 直调引擎）并列。  
-> 文档索引见 [README.md](./README.md)。
+> 文档索引见 [../README.md](../README.md)。
 
 ---
 
@@ -23,9 +23,11 @@ IDE git commit
     → 插件服务：必要时 clone/pull 到工作区（本地提交直接用 local_path）
     → 原样调用现有审码 API（list → path_ticket → run）
        不修改 WorkBuddy 引擎 / 第一种 Hook 脚本
-    → 把报告 Markdown 写成飞书云文档（docx）
+    → 把报告 **Markdown** 写成飞书云文档（docx）：须权限 `docx:document.block:convert`，按块转换写入；不降级白文
        未配飞书时先落到 ~/.zhongruan/remote-review/feishu-out/，配好后可补发
 ```
+
+**联调状态（2026-09-11）：** 本机 + ngrok ← GitHub push → `:18787` → 引擎审码 → 飞书 wiki（`feishu_ok`，Markdown 转块成功）。文档库配置与踩坑见 [remote-review-飞书文档库联调复盘.md](./remote-review-飞书文档库联调复盘.md)。
 
 GitHub / GitLab **push** Webhook 打到同一 `/webhook` 即可（解析 clone_url 后检出再审）。公司 Git 域名请设环境变量 `REMOTE_REVIEW_ALLOWED_HOSTS`（逗号分隔，默认 `github.com,gitlab.com`）。
 

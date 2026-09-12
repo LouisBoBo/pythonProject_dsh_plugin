@@ -1,7 +1,7 @@
 {
-  "name": "@zhongruan/dsh-remote-review",
-  "version": "0.1.7",
-  "description": "DSH 远端审码插件：IDE 提交触发 Webhook，调用现有审码 API，报告写入飞书文档；设置页可填飞书配置",
+  "name": "@zhongruan/dsh-cursor-coding",
+  "version": "0.6.8",
+  "description": "主流程已冻结：澄清→确认卡→进度卡→正文结论（见 docs 冻结说明）",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -9,14 +9,17 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
-  "bin": {
-    "dsh-remote-review": "./lib/cli.js"
-  },
-  "files": ["lib", "cordis.patch.yml"],
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
   "scripts": {
-    "build": "tsc && cp src/client.js lib/client.js",
-    "start": "node lib/cli.js",
-    "self-test": "node lib/self-test.js"
+    "build": "tsc && cp src/client.js lib/client.js && mkdir -p lib/ui && cp src/ui/console.html lib/ui/console.html",
+    "self-test": "node lib/self-test.js",
+    "verify:wait": "node lib/verify-wait-fast.js",
+    "verify:a": "node lib/verify-real-a.js",
+    "verify:bc": "node lib/verify-real-bc.js",
+    "ui": "node lib/serve-ui.js"
   },
   "publishConfig": {
     "access": "restricted",
@@ -31,6 +34,7 @@
     }
   },
   "dependencies": {
+    "@cursor/sdk": "^1.0.31",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
   },

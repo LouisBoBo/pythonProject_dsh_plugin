@@ -2,7 +2,8 @@
 
 > 给「第二种：Webhook + 飞书文档」用。  
 > 对应插件：`dsh-remote-review`（`@zhongruan/dsh-remote-review`）  
-> 方案全文：[remote-push-服务器审码-方案确认.md](./remote-push-服务器审码-方案确认.md)
+> 方案全文：[remote-push-服务器审码-方案确认.md](./remote-push-服务器审码-方案确认.md)  
+> 飞书文档库联调踩坑：[remote-review-飞书文档库联调复盘.md](./remote-review-飞书文档库联调复盘.md)
 
 ---
 
@@ -31,7 +32,8 @@
 1. 打开 **设置**
 2. 左侧点 **远端审码**（和「WorkBuddy」配置中心同级）
 3. 在页面里填写：
-   - 飞书 App ID / App Secret / 文件夹 Token
+   - 飞书 App ID / App Secret
+   - **文档库 space_id**（推荐）+ 可选父节点 token；文件夹 Token 一般留空
    - （可选）Webhook 密钥、引擎地址
    - （可选）业务仓库路径 → 点「安装提交 Hook」
 4. 点 **保存配置**
@@ -39,20 +41,22 @@
 保存后写到本机 `~/.zhongruan/remote-review/config.json`，**不会写进业务项目**。  
 普通用户只需会点设置页，不必懂改电脑文件。
 
-### 场景 A：开发者本机 + IDE 提交 → 自动审 → 飞书文档
+### 场景 A：开发者本机 + GitHub push → 自动审 → 飞书文档（已联调通）
 
 1. **装插件**  
    WorkBuddy → 设置 → 插件市场 → 安装 `@zhongruan/dsh-remote-review`
 
-2. **在「设置 → 远端审码」填飞书**（见上）
+2. **在「设置 → 远端审码」填飞书**（wikiSpaceId 等，见上）
 
 3. **确认服务在跑**  
-   设置页点「检测服务」，或浏览器打开：`http://127.0.0.1:18787/health`  
-   看飞书是否已配置
+   `cd dsh-remote-review && node lib/cli.js`，或设置页「检测服务」  
+   `http://127.0.0.1:18787/health` 里 `feishuReady: true`
 
-4. **给业务仓装 Hook**（设置页第 4 步，或对话工具）
+4. **GitHub Webhook** 指到本机入口（联调常用 ngrok → `…/webhook`），Secret 与本机一致
 
-5. **正常 `git commit`** → 后台审码 → 飞书文档
+5. **`git push`**（不是只 commit）→ 审码 → 飞书 wiki 出现 **Markdown 转换后的**结构化文档
+
+说明：本机 Hook（post-commit）是旁路；「第二种」主路径是 **远端 push → Webhook**。
 
 ### 场景 B：公司服务器 `175.178.238.31`（GitLab / GitHub push）
 
@@ -98,7 +102,9 @@
   "feishu": {
     "appId": "cli_xxxxxxxx",
     "appSecret": "xxxxxxxxxxxxxxxx",
-    "folderToken": "fldxxxxxxxx"
+    "wikiSpaceId": "7573257760905969668",
+    "wikiParentNodeToken": "Og7IwDu2Fi9VQwkIVnicIJl6n8b",
+    "folderToken": ""
   }
 }
 ```
@@ -114,7 +120,9 @@
 | `workspaceRoot` / `dataRoot` | 本机数据目录 | 保持默认即可 |
 | `feishu.appId` | 飞书自建应用 App ID | 开放平台复制 |
 | `feishu.appSecret` | App Secret | 同上（别进 git、别发群） |
-| `feishu.folderToken` | 报告落到哪个云空间文件夹 | 见下文 |
+| `feishu.wikiSpaceId` | **推荐**：文档库 space_id，报告出现在「我的文档库」 | 接口查，不是 URL 里那串 |
+| `feishu.wikiParentNodeToken` | 可选：挂到某 wiki 页面下 | URL `/wiki/` 后面那串 |
+| `feishu.folderToken` | 备用：个人云盘文件夹（常因权限失败） | 一般留空 |
 
 配好后本机地址：
 
@@ -130,20 +138,28 @@ http://127.0.0.1:18787/health
 
 ---
 
-## 飞书三项从哪来（开放平台，不是项目配置）
+## 飞书从哪来（开放平台 + 本机填写，不是项目配置）
 
 ### App ID、App Secret
 
 1. 打开 [飞书开放平台](https://open.feishu.cn/)  
 2. 企业自建应用 → **凭证与基础信息**  
 3. 复制 App ID、App Secret  
+4. 权限（开通后须 **创建版本并发布**）：  
+   - 创建/编辑新版文档、**wiki 文档库**相关权限  
+   - **必开**：`docx:document.block:convert`（界面名：**转换文本为云文档块**）  
+     审码报告按 Markdown 写入飞书依赖它；缺权限时任务失败，不会再降级成白文。  
 
-权限（大意）：创建/编辑新版文档、Markdown 转文档块；并把应用加入目标云空间文件夹。
+### wikiSpaceId（要出现在「我的文档库」时填）
 
-### folderToken
+- URL 里 `/wiki/xxxx` 的 xxxx 是**节点 token**，不是 space_id。  
+- space_id 是一串数字；可问已配好的同事，或本机 `GET http://127.0.0.1:18787/api/feishu/wiki-spaces`。  
+- 文档库成员里把应用加成**可编辑**。  
+- 可选再填 `wikiParentNodeToken`（节点 token），报告挂到该页下面。  
 
-打开目标文件夹，从地址栏或分享信息里拿到类似 `fldxxxxxxxx` 的 token，写入本机 `config.json` 的 `feishu.folderToken`。  
-实用场景建议必填，否则文档可能建到默认位置或失败。
+### folderToken（一般不用）
+
+个人云盘文件夹 token；应用很难有写权限，优先用文档库。
 
 ---
 
@@ -154,7 +170,9 @@ http://127.0.0.1:18787/health
 ```bash
 export FEISHU_APP_ID='cli_xxxx'
 export FEISHU_APP_SECRET='xxxx'
-export FEISHU_FOLDER_TOKEN='fldxxxx'
+export FEISHU_WIKI_SPACE_ID='7573…'
+export FEISHU_WIKI_PARENT_NODE='Og7I…'
+export FEISHU_FOLDER_TOKEN=''
 export REMOTE_REVIEW_SECRET='你的Webhook暗号'
 export WORKBUDDY_ENGINE='http://127.0.0.1:8000'
 ```
@@ -184,12 +202,13 @@ export WORKBUDDY_ENGINE='http://127.0.0.1:8000'
 ## 配完怎么确认
 
 1. 引擎开着、审码车道就绪  
-2. Webhook 服务开着（插件或 `pnpm start`）  
+2. Webhook 服务开着（`node lib/cli.js` 或插件拉起）  
 3. `health` 里 `feishuReady: true`  
-4. commit 或 simulate 一次  
-5. `/jobs` 里应为 `feishu_ok` 并有飞书链接  
+4. **push** 一次（或对已有任务 `retry-feishu`）  
+5. `/jobs` 里 `feishu_ok`，打开 wiki 链接：标题/列表/代码块正常（说明 Markdown 转块成功）  
 
-未配飞书时：`feishu_pending`，报告在本机 `~/.zhongruan/remote-review/feishu-out/`，配好后可 `remote_review_retry_feishu` 补发。
+未配飞书时：`feishu_pending`，报告在本机 `~/.zhongruan/remote-review/feishu-out/`，配好后可 `remote_review_retry_feishu` 补发。  
+若报错含 `document.block:convert`：回开放平台开通该权限并发布后再补发。
 
 ---
 
@@ -203,6 +222,8 @@ export WORKBUDDY_ENGINE='http://127.0.0.1:8000'
 | 只配飞书、不启动服务 | 没人听 18787 |
 | 只启动服务、引擎没开 | 能接到请求但审码失败 |
 | 改完本机 config 不重启服务 | 可能仍用旧配置 |
+| 飞书文档是白文、像 MD 源码 | 缺「转换文本为云文档块」权限，或未发布版本 |
+| 只 commit 不 push | 第二种 Webhook 收不到；需要 push |
 
 ---
 

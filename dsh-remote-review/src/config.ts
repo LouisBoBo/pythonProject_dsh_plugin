@@ -18,7 +18,7 @@ function emptyConfig(): RemoteReviewConfig {
     secret: '',
     workspaceRoot: join(dataRoot, 'workspaces'),
     dataRoot,
-    feishu: { appId: '', appSecret: '', folderToken: '' },
+    feishu: { appId: '', appSecret: '', folderToken: '', wikiSpaceId: '', wikiParentNodeToken: '' },
   }
 }
 
@@ -41,6 +41,9 @@ function mergeFeishu(base: FeishuConfig, raw: unknown, env: NodeJS.ProcessEnv): 
     appId: env.FEISHU_APP_ID || asString(obj.appId, base.appId),
     appSecret: env.FEISHU_APP_SECRET || asString(obj.appSecret, base.appSecret),
     folderToken: env.FEISHU_FOLDER_TOKEN || asString(obj.folderToken, base.folderToken),
+    wikiSpaceId: env.FEISHU_WIKI_SPACE_ID || asString(obj.wikiSpaceId, base.wikiSpaceId),
+    wikiParentNodeToken:
+      env.FEISHU_WIKI_PARENT_NODE || asString(obj.wikiParentNodeToken, base.wikiParentNodeToken),
   }
 }
 
@@ -132,7 +135,9 @@ export function publicConfigView(cfg: RemoteReviewConfig) {
     feishuAppId: maskSecret(cfg.feishu.appId),
     feishuAppSecret: cfg.feishu.appSecret ? '已配置' : '未配置',
     feishuFolderToken: maskSecret(cfg.feishu.folderToken),
-    feishuReady: Boolean(cfg.feishu.appId && cfg.feishu.appSecret),
+    feishuWikiSpaceId: maskSecret(cfg.feishu.wikiSpaceId),
+    feishuWikiParentNodeToken: maskSecret(cfg.feishu.wikiParentNodeToken),
+    feishuReady: feishuReady(cfg),
   }
 }
 
@@ -148,6 +153,8 @@ export function editableConfigView(cfg: RemoteReviewConfig) {
     feishuAppSecret: '',
     feishuAppSecretConfigured: Boolean(cfg.feishu.appSecret.trim()),
     feishuFolderToken: cfg.feishu.folderToken,
+    feishuWikiSpaceId: cfg.feishu.wikiSpaceId,
+    feishuWikiParentNodeToken: cfg.feishu.wikiParentNodeToken,
     webhook: `http://${cfg.listen}:${cfg.port}/webhook`,
     dataRoot: cfg.dataRoot,
     feishuReady: feishuReady(cfg),
@@ -161,7 +168,17 @@ function keepOrReplace(incoming: unknown, current: string): string {
   return s
 }
 
-/** 设置页保存：空密钥字段表示保持原值 */
+/** 字段出现在 body 时：空串表示清空；缺省则保持原值（密钥类勿用） */
+function applyPlainField(body: Record<string, unknown>, key: string, current: string): string {
+  if (!(key in body)) return current
+  const raw = body[key]
+  if (typeof raw !== 'string') return current
+  const s = raw.trim()
+  if (s === '***' || s === '（已配置，留空则保持不变）' || /^•+$/.test(s)) return current
+  return s
+}
+
+/** 设置页保存：空密钥字段表示保持原值；wiki/folder 空串可清空 */
 export function applyConfigFromUi(body: Record<string, unknown>): RemoteReviewConfig {
   const current = loadConfig()
   const portRaw = body.port
@@ -173,19 +190,36 @@ export function applyConfigFromUi(body: Record<string, unknown>): RemoteReviewCo
     }
     port = n
   }
+  const feishu = {
+    appId: keepOrReplace(body.feishuAppId, current.feishu.appId),
+    appSecret: keepOrReplace(body.feishuAppSecret, current.feishu.appSecret),
+    folderToken: applyPlainField(body, 'feishuFolderToken', current.feishu.folderToken),
+    wikiSpaceId: applyPlainField(body, 'feishuWikiSpaceId', current.feishu.wikiSpaceId),
+    wikiParentNodeToken: applyPlainField(
+      body,
+      'feishuWikiParentNodeToken',
+      current.feishu.wikiParentNodeToken,
+    ),
+  }
+  if (!feishu.appId.trim() || !feishu.appSecret.trim()) {
+    throw new Error('请填写飞书 App ID 与 App Secret')
+  }
+  if (!feishu.wikiSpaceId.trim() && !feishu.folderToken.trim()) {
+    throw new Error('请填写文档库 space_id（推荐）或云盘文件夹 Token（至少一项）')
+  }
   return saveConfig({
     engine: typeof body.engine === 'string' && body.engine.trim() ? body.engine.trim() : current.engine,
     listen: typeof body.listen === 'string' && body.listen.trim() ? body.listen.trim() : current.listen,
     port,
     secret: keepOrReplace(body.secret, current.secret),
-    feishu: {
-      appId: keepOrReplace(body.feishuAppId, current.feishu.appId),
-      appSecret: keepOrReplace(body.feishuAppSecret, current.feishu.appSecret),
-      folderToken: keepOrReplace(body.feishuFolderToken, current.feishu.folderToken),
-    },
+    feishu,
   })
 }
 
 export function feishuReady(cfg: RemoteReviewConfig): boolean {
-  return Boolean(cfg.feishu.appId.trim() && cfg.feishu.appSecret.trim())
+  return Boolean(
+    cfg.feishu.appId.trim() &&
+      cfg.feishu.appSecret.trim() &&
+      (cfg.feishu.wikiSpaceId.trim() || cfg.feishu.folderToken.trim()),
+  )
 }

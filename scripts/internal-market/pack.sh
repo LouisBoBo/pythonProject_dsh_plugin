@@ -44,3 +44,10 @@ else
 fi
 
 "$ROOT/scripts/internal-market/generate-registry.sh"
+
+echo ""
+echo "下一步:"
+echo "  1) 上传市场: ./scripts/internal-market/upload.sh"
+echo "  2) 本机强制装最新（避免 Profile 锁旧版）:"
+echo "       ./scripts/internal-market/install-latest.sh ${1:-}"
+echo "  3) 完全退出并重启 WorkBuddy"

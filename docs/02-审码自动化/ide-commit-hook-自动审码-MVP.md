@@ -194,7 +194,7 @@ MVP 可先 **Hook 直接调 trigger**；压测后再加队列。
 
 提交车道（`code-commit`）与审码车道分开：Hook 触发的是 **审码报告**，不会自动 `git push`。
 
-文档总目录：[README.md](./README.md)。
+文档总目录：[../README.md](../README.md)。
 
 ---
 

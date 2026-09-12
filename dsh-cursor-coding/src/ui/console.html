@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cursor 写码 · 过程查看台</title>
+  <style>
+    :root {
+      --bg: #f6f3ee;
+      --panel: #fffcf7;
+      --ink: #1c1917;
+      --muted: #78716c;
+      --line: #e7e0d6;
+      --accent: #0f766e;
+      --accent-soft: #ccfbf1;
+      --warn: #b45309;
+      --danger: #b91c1c;
+      --tool: #1d4ed8;
+      --think: #6d28d9;
+      --font: "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", serif;
+      --mono: "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #ddf4ef 0%, transparent 55%),
+        radial-gradient(900px 400px at 100% 0%, #f5e6d3 0%, transparent 50%),
+        var(--bg);
+      font-family: var(--font);
+    }
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 20px 64px;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 18px;
+    }
+    @media (max-width: 960px) {
+      .wrap { grid-template-columns: 1fr; }
+    }
+    h1 {
+      grid-column: 1 / -1;
+      margin: 0 0 4px;
+      font-size: 28px;
+      letter-spacing: -0.02em;
+    }
+    .sub {
+      grid-column: 1 / -1;
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: 0 10px 30px rgba(28, 25, 23, 0.04);
+    }
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0 0 4px;
+    }
+    input, textarea, select, button {
+      font: inherit;
+    }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: #fff;
+      color: var(--ink);
+      margin-bottom: 10px;
+    }
+    textarea { min-height: 110px; resize: vertical; font-family: var(--mono); font-size: 12.5px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: transparent;
+      color: #fff;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+    .ok { color: #047857; }
+    .err { color: var(--danger); }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+    }
+    .dialog {
+      height: min(68vh, 720px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: #fff;
+    }
+    .bubble { margin: 0 0 14px; }
+    .bubble .role {
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .bubble.user .body {
+      background: #ecfeff;
+      border: 1px solid #a5f3fc;
+      border-radius: 12px;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      font-family: var(--mono);
+      font-size: 12.5px;
+    }
+    .bubble.thinking details {
+      border: 1px dashed #ddd6fe;
+      background: #f5f3ff;
+      border-radius: 12px;
+      padding: 8px 10px;
+    }
+    .bubble.thinking summary {
+      cursor: pointer;
+      color: var(--think);
+      font-size: 13px;
+    }
+    .bubble.thinking .body {
+      margin-top: 8px;
+      white-space: pre-wrap;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.5;
+      color: #4c1d95;
+    }
+    .bubble.tool {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: var(--tool);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .bubble.assistant .body {
+      white-space: pre-wrap;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .bubble.assistant .body h3 { font-size: 14px; margin: 12px 0 6px; }
+    .bubble.assistant .body code {
+      font-family: var(--mono);
+      font-size: 0.92em;
+      background: #f5f5f4;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .bubble.status {
+      font-size: 12px;
+      color: var(--muted);
+      font-style: italic;
+    }
+    .cursor {
+      display: inline-block;
+      width: 7px;
+      height: 1em;
+      margin-left: 2px;
+      background: currentColor;
+      animation: blink 1s step-end infinite;
+      vertical-align: text-bottom;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    @media (max-width: 960px) {
+      .split { grid-template-columns: 1fr; }
+    }
+    .checks label.item {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin: 0 0 6px;
+      color: var(--ink);
+      font-size: 12.5px;
+    }
+    .checks input { width: auto; margin: 3px 0 0; }
+    pre.raw {
+      max-height: 180px;
+      overflow: auto;
+      background: #1c1917;
+      color: #f5f5f4;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Cursor 写码 · 过程查看台</h1>
+    <p class="sub">完整 UI + 本机 API：实时看 Thinking / 工具 / 正文交错输出。默认连 <code id="baseLabel">http://127.0.0.1:18788</code></p>
+
+    <aside class="panel">
+      <h2>1 · 开工</h2>
+      <label>服务地址</label>
+      <input id="baseUrl" value="http://127.0.0.1:18788" />
+      <label>工程绝对路径</label>
+      <input id="workspace" placeholder="/Users/你/某工程" />
+      <label>写码诉求</label>
+      <textarea id="requirement">只修改仓库根目录文件 _dsh_cursor_coding_bc_probe.txt：把 color=blue 改成 color=red，不要改其他文件。改完写简短说明。</textarea>
+      <label>可写范围（可选，逗号分隔；空=全部）</label>
+      <input id="writeScope" value="_dsh_cursor_coding_bc_probe.txt" />
+      <div class="row">
+        <button class="primary" id="btnStart">确认并用 Cursor 开写</button>
+        <button id="btnHealth">检测服务</button>
+      </div>
+      <p class="hint" id="sideMsg">先检测服务与 Key，再开工。</p>
+
+      <h2 style="margin-top:18px">2 · 已有任务</h2>
+      <label>job_id</label>
+      <input id="jobIdInput" placeholder="ccj-…" />
+      <div class="row">
+        <button id="btnLoad">加载对话</button>
+        <button id="btnRefreshJobs">刷新列表</button>
+      </div>
+      <select id="jobList" size="6" style="height:140px"></select>
+    </aside>
+
+    <main class="panel">
+      <div class="meta">
+        <div>
+          <span class="badge" id="statusBadge">idle</span>
+          <span id="jobMeta">尚未开工</span>
+        </div>
+        <div class="row">
+          <button id="btnCopy">复制对话</button>
+          <button id="btnRaw">原始 JSON</button>
+        </div>
+      </div>
+      <div class="dialog" id="dialog"></div>
+
+      <div class="split">
+        <div>
+          <h2>追问（pending_review）</h2>
+          <textarea id="steerText" placeholder="再说一句，例如：验收步骤再写细一点"></textarea>
+          <button id="btnSteer">发给 Cursor</button>
+        </div>
+        <div>
+          <h2>审后同步</h2>
+          <div class="checks" id="checks"></div>
+          <button class="primary" id="btnApply">同步到本机</button>
+        </div>
+      </div>
+      <p class="hint" id="mainMsg"></p>
+      <pre class="raw" id="rawBox" hidden></pre>
+    </main>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id)
+    let es = null
+    let currentJobId = ''
+    let transcript = []
+    let review = { inScope: [], deleted: [], deferred: [] }
+    let selected = {}
+
+    function base() {
+      return String($('baseUrl').value || '').replace(/\/$/, '')
+    }
+
+    function setMsg(el, text, ok) {
+      el.textContent = text || ''
+      el.className = 'hint ' + (ok === true ? 'ok' : ok === false ? 'err' : '')
+    }
+
+    function escapeHtml(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    }
+
+    function renderMd(text) {
+      let esc = escapeHtml(text)
+      esc = esc.replace(/^##\s+(.+)$/gm, '<h3>$1</h3>')
+      esc = esc.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      esc = esc.replace(/`([^`]+)`/g, '<code>$1</code>')
+      return esc
+    }
+
+    function shortPath(p) {
+      if (!p) return ''
+      const s = String(p)
+      const m = s.replace(/\\/g, '/').match(/\/sandboxes\/[^/]+\/(.+)$/)
+      return m ? m[1] : s
+    }
+
+    function renderDialog() {
+      const root = $('dialog')
+      if (!transcript.length) {
+        root.innerHTML = '<p class="hint">等待 Cursor 过程输出…</p>'
+        return
+      }
+      root.innerHTML = transcript.map((it) => {
+        if (it.kind === 'user') {
+          return `<div class="bubble user"><div class="role">You</div><div class="body">${escapeHtml(it.text || '')}</div></div>`
+        }
+        if (it.kind === 'thinking') {
+          const open = it.streaming ? ' open' : ''
+          return `<div class="bubble thinking"><details${open}><summary>Thinking${it.streaming ? ' …' : ''}</summary><div class="body">${escapeHtml(it.text || '')}</div></details></div>`
+        }
+        if (it.kind === 'tool') {
+          return `<div class="bubble tool"><span>⚙</span><span>${escapeHtml(it.name || 'tool')} · ${escapeHtml(it.tool_status || '')} · ${escapeHtml(shortPath(it.path || ''))}</span></div>`
+        }
+        if (it.kind === 'assistant') {
+          return `<div class="bubble assistant"><div class="role">Cursor</div><div class="body">${renderMd(it.text || '')}${it.streaming ? '<span class="cursor"></span>' : ''}</div></div>`
+        }
+        if (it.kind === 'status') {
+          return `<div class="bubble status">${escapeHtml(it.text || '')}</div>`
+        }
+        return ''
+      }).join('')
+      root.scrollTop = root.scrollHeight
+    }
+
+    function renderChecks() {
+      const box = $('checks')
+      const all = []
+      ;(review.inScope || []).forEach((p) => all.push({ p, tag: '改', def: true }))
+      ;(review.deleted || []).forEach((p) => all.push({ p, tag: '删', def: true }))
+      ;(review.deferred || []).forEach((p) => all.push({ p, tag: '外', def: false }))
+      if (!all.length) {
+        box.innerHTML = '<p class="hint">尚无待审文件</p>'
+        return
+      }
+      box.innerHTML = all.map(({ p, tag, def }) => {
+        if (selected[p] === undefined) selected[p] = def
+        return `<label class="item"><input type="checkbox" data-path="${escapeHtml(p)}" ${selected[p] ? 'checked' : ''}/><span>${escapeHtml(p)} <em>${tag}</em></span></label>`
+      }).join('')
+      box.querySelectorAll('input').forEach((el) => {
+        el.addEventListener('change', () => {
+          selected[el.getAttribute('data-path')] = el.checked
+        })
+      })
+    }
+
+    async function api(path, opts) {
+      const res = await fetch(base() + path, opts)
+      const data = await res.json().catch(() => ({}))
+      return { status: res.status, data }
+    }
+
+    async function issueHitl(action, extra) {
+      const body = Object.assign({ action }, extra || {})
+      const out = await api('/api/hitl/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!out.data || !out.data.ok || !out.data.nonce) {
+        throw new Error((out.data && out.data.detail) || 'HITL 签发失败')
+      }
+      return out.data.nonce
+    }
+
+    function closeEs() {
+      if (es) {
+        try { es.close() } catch (e) {}
+        es = null
+      }
+    }
+
+    function openStream(jobId) {
+      closeEs()
+      currentJobId = jobId
+      $('jobIdInput').value = jobId
+      es = new EventSource(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(jobId) + '/stream')
+      es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data)
+          if (data.type === 'snapshot') {
+            if (Array.isArray(data.transcript)) transcript = data.transcript
+            $('statusBadge').textContent = data.status || '—'
+            $('jobMeta').textContent = `${jobId} · ${data.detail || ''} · 片段 ${transcript.length}`
+            if (data.status === 'pending_review') {
+              review = {
+                inScope: data.review_in_scope || [],
+                deleted: data.review_deleted || [],
+                deferred: data.review_deferred || [],
+              }
+              selected = {}
+              renderChecks()
+            }
+            renderDialog()
+            return
+          }
+          if (data.type === 'review') {
+            try {
+              const parsed = JSON.parse(data.message || '{}')
+              review = {
+                inScope: parsed.in_scope || [],
+                deleted: parsed.deleted || [],
+                deferred: parsed.deferred || [],
+              }
+              selected = {}
+              renderChecks()
+            } catch (e) {}
+          }
+          if (data.type === 'done') {
+            $('statusBadge').textContent = data.status || 'done'
+            setMsg($('mainMsg'), '流结束：' + (data.status || 'done'), true)
+            closeEs()
+          }
+        } catch (e) {}
+      }
+      es.onerror = () => setMsg($('mainMsg'), 'SSE 连接异常（浏览器会重试）', false)
+    }
+
+    async function refreshJobs() {
+      const out = await api('/api/cursor-coding/jobs')
+      const jobs = (out.data && (out.data.jobs || out.data.items)) || []
+      const sel = $('jobList')
+      sel.innerHTML = ''
+      jobs.forEach((j) => {
+        const opt = document.createElement('option')
+        opt.value = j.id
+        opt.textContent = `${j.id} · ${j.status}`
+        sel.appendChild(opt)
+      })
+    }
+
+    async function loadJob(jobId) {
+      const out = await api('/api/cursor-coding/jobs/' + encodeURIComponent(jobId) + '/dialog')
+      if (!out.data || !out.data.ok) throw new Error((out.data && out.data.detail) || '加载失败')
+      const d = out.data
+      transcript = d.transcript || []
+      currentJobId = d.job_id
+      $('statusBadge').textContent = d.status || '—'
+      $('jobMeta').textContent = `${d.job_id} · thinking ${d.thinking_chars} · assistant ${d.assistant_chars}`
+      review = {
+        inScope: d.review_in_scope || [],
+        deleted: d.review_deleted || [],
+        deferred: d.review_deferred || [],
+      }
+      selected = {}
+      renderDialog()
+      renderChecks()
+      $('rawBox').textContent = JSON.stringify(d, null, 2)
+      if (d.status === 'running' || d.status === 'queued' || d.status === 'pending_review') {
+        openStream(jobId)
+      }
+    }
+
+    $('btnHealth').onclick = async () => {
+      try {
+        $('baseLabel').textContent = base()
+        const out = await api('/health')
+        setMsg(
+          $('sideMsg'),
+          (out.data.ok ? 'OK' : 'FAIL') +
+            ' · Key ' +
+            (out.data.cursorKeyReady ? '已配置' : '未配置') +
+            ' · ' +
+            (out.data.detail || ''),
+          !!out.data.ok && !!out.data.cursorKeyReady,
+        )
+        await refreshJobs()
+      } catch (e) {
+        setMsg($('sideMsg'), String(e.message || e), false)
+      }
+    }
+
+    $('btnStart').onclick = async () => {
+      try {
+        setMsg($('sideMsg'), '提交中…')
+        const workspace = $('workspace').value.trim()
+        const requirement = $('requirement').value.trim()
+        if (!workspace || !requirement) throw new Error('请填写工程路径与诉求')
+        const nonce = await issueHitl('cursor-coding.confirm', { workspace, requirement })
+        const scope = $('writeScope').value
+          .split(/[\n,]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+        // 可选：把 write_scope 写入配置
+        if (scope.length) {
+          await api('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ writeScope: scope }),
+          })
+        }
+        const out = await api('/api/cursor-coding/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspace, requirement, nonce }),
+        })
+        if (!out.data || !out.data.ok) throw new Error((out.data && out.data.detail) || 'confirm 失败')
+        transcript = []
+        selected = {}
+        review = { inScope: [], deleted: [], deferred: [] }
+        renderDialog()
+        renderChecks()
+        openStream(out.data.job_id)
+        setMsg($('sideMsg'), '已开工 ' + out.data.job_id, true)
+        await refreshJobs()
+      } catch (e) {
+        setMsg($('sideMsg'), String(e.message || e), false)
+      }
+    }
+
+    $('btnLoad').onclick = async () => {
+      try {
+        const id = $('jobIdInput').value.trim() || $('jobList').value
+        if (!id) throw new Error('请填写或选择 job_id')
+        await loadJob(id)
+        setMsg($('mainMsg'), '已加载 ' + id, true)
+      } catch (e) {
+        setMsg($('mainMsg'), String(e.message || e), false)
+      }
+    }
+
+    $('jobList').ondblclick = () => {
+      if ($('jobList').value) {
+        $('jobIdInput').value = $('jobList').value
+        $('btnLoad').click()
+      }
+    }
+
+    $('btnRefreshJobs').onclick = () => refreshJobs().catch((e) => setMsg($('sideMsg'), String(e), false))
+
+    $('btnSteer').onclick = async () => {
+      try {
+        if (!currentJobId) throw new Error('无 job')
+        const message = $('steerText').value.trim()
+        if (!message) throw new Error('请输入追问')
+        const nonce = await issueHitl('cursor-coding.steer', { job_id: currentJobId })
+        const out = await api('/api/cursor-coding/jobs/' + encodeURIComponent(currentJobId) + '/steer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nonce, message }),
+        })
+        if (!out.data || !out.data.ok) throw new Error((out.data && out.data.detail) || '追问失败')
+        $('steerText').value = ''
+        openStream(currentJobId)
+        setMsg($('mainMsg'), '追问已发送', true)
+      } catch (e) {
+        setMsg($('mainMsg'), String(e.message || e), false)
+      }
+    }
+
+    $('btnApply').onclick = async () => {
+      try {
+        if (!currentJobId) throw new Error('无 job')
+        const accept = Object.keys(selected).filter((p) => selected[p])
+        const nonce = await issueHitl('cursor-coding.apply', { job_id: currentJobId })
+        const out = await api('/api/cursor-coding/jobs/' + encodeURIComponent(currentJobId) + '/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nonce, accept }),
+        })
+        if (!out.data || !out.data.ok) throw new Error((out.data && out.data.detail) || '同步失败')
+        setMsg($('mainMsg'), '已同步：' + ((out.data.synced_files || []).join(', ') || '无文件'), true)
+        openStream(currentJobId)
+      } catch (e) {
+        setMsg($('mainMsg'), String(e.message || e), false)
+      }
+    }
+
+    $('btnCopy').onclick = async () => {
+      const parts = []
+      transcript.forEach((it) => {
+        if (it.kind === 'thinking') parts.push('【Thinking】\n' + (it.text || ''))
+        if (it.kind === 'assistant') parts.push('【Assistant】\n' + (it.text || ''))
+        if (it.kind === 'user') parts.push('【You】\n' + (it.text || ''))
+        if (it.kind === 'tool') parts.push('【Tool】' + (it.name || '') + ' ' + (it.path || ''))
+      })
+      try {
+        await navigator.clipboard.writeText(parts.join('\n\n'))
+        setMsg($('mainMsg'), '已复制对话', true)
+      } catch (e) {
+        setMsg($('mainMsg'), '复制失败', false)
+      }
+    }
+
+    $('btnRaw').onclick = () => {
+      const box = $('rawBox')
+      box.hidden = !box.hidden
+    }
+
+    // 查询参数 ?workspace=&job=
+    const q = new URLSearchParams(location.search)
+    if (q.get('base')) $('baseUrl').value = q.get('base')
+    if (q.get('workspace')) $('workspace').value = q.get('workspace')
+    if (q.get('job')) $('jobIdInput').value = q.get('job')
+    $('baseLabel').textContent = base()
+    $('btnHealth').click()
+    if (q.get('job')) setTimeout(() => $('btnLoad').click(), 400)
+  </script>
+</body>
+</html>

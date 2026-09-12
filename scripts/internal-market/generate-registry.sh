@@ -125,7 +125,7 @@ for item in CATALOG:
         "description": {"zh": item["zh"], "en": item["en"]},
         "npm": name,
         "version": version,
-        "install": f"dsh plugin --profile web add {name}",
+        "install": f"dsh plugin --profile web add {name}@{version}",
         "added": TODAY,
     }
     plugins.append(entry)
