@@ -21,6 +21,7 @@ import { createPendingConfirm, cancelPendingConfirm, loadPendingConfirm } from '
 import { decideCodingGate, extractSessionEvents } from './clarifyFlow.js'
 import { looksLikeFollowUp } from './requirementGate.js'
 import { criticalDeferredFiles, isStuckEmptyPendingReview } from './scopeCompanions.js'
+import { preferredConclusionAssistantText } from './transcript.js'
 import { getListenAddr, isServerRunning, startServer, stopServer } from './server.js'
 
 /** 展开 ~/… 为绝对路径 */
@@ -395,13 +396,12 @@ function buildProgressBody(jobId: string): string {
 function buildChatConclusionBody(jobId: string): string {
   const job = loadJob(jobId)
   if (!job) return `任务不存在：${jobId}`
-  const asst = (job.assistant_text || '').trim()
+  const asst = preferredConclusionAssistantText(job.assistant_text || '')
   const synced = job.synced_files || job.last_synced_files || job.review_in_scope || []
   const deferred = job.review_deferred || job.deferred_files || []
   const lines: string[] = [`## 本轮结论`, ``]
   if (asst) {
-    const clip = asst.length > 3500 ? asst.slice(0, 3500) + '\n\n…[已截断]' : asst
-    lines.push(clip, ``)
+    lines.push(asst, ``)
   } else {
     lines.push(job.detail || '写码流程已结束。', ``)
   }
@@ -921,7 +921,9 @@ export function apply(ctx: Context) {
         const cfg = loadConfig()
         const view = publicConfigView(cfg)
         const lines = [
-          `服务：${isServerRunning() ? '本进程已监听' : '未监听'} ${getListenAddr() || view.base}`,
+          `服务：${isServerRunning() ? '已监听' : '未监听'} ${getListenAddr() || view.base}`,
+          '形态：默认子进程隔离（崩了不拖垮聊天）；CURSOR_CODING_SERVER_MODE=inplace 可回退同进程',
+          '兼容：GET /health → compat（WorkBuddy / 运行时 / 插件 / Cursor SDK）',
           `Cursor API Key：${cursorKeyReady(cfg) ? '已配置' : '未配置（硬性要求，请到设置页填写）'}`,
           `数据目录：${cfg.dataRoot}`,
           `交互：begin 秒回 → zr_cursor_wait 拉进度 → 待审后 zr_cursor_apply`,

@@ -4,6 +4,8 @@
 # 解决问题：市场已是新版本，但 ~/.dsh/profiles/web 里仍锁在旧 ^x.y.z，
 # 「重装」不升级 → 设置页仍是旧界面。
 #
+# 安装安全：先备份旧目录再替换；解压/版本校验失败 → 自动回退旧版（无旧版则保持未装）。
+#
 # 用法:
 #   ./scripts/internal-market/install-latest.sh                 # 全部公司插件
 #   ./scripts/internal-market/install-latest.sh dsh-remote-review
@@ -44,7 +46,7 @@ FILTER="${1:-}"
 export ROOT REG_DIR MARKET_URL FILTER PREFER_LOCAL
 export COMPANY_NPM_REGISTRY="$NPM_REG"
 python3 <<'PY'
-import json, os, sys, urllib.request
+import json, os, re, sys, urllib.request
 from pathlib import Path
 
 reg = Path(os.environ["REG_DIR"])
@@ -127,7 +129,13 @@ out = []
 npm_base = os.environ.get("COMPANY_NPM_REGISTRY", "http://175.178.238.31/dsh-plugins/npm").rstrip("/")
 for name, p in sorted(merged.items()):
     ver = str(p.get("version") or "")
+    if not re.fullmatch(r"@zhongruan/[A-Za-z0-9._-]+", name):
+        print(f"跳过非法包名: {name}", flush=True)
+        continue
     short = name.split("/", 1)[1]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", short) or not re.fullmatch(r"[0-9A-Za-z._+-]+", ver):
+        print(f"跳过非法短名/版本: {name}@{ver}", flush=True)
+        continue
     if not match(name, short, filt):
         continue
     tgz = name.replace("@", "").replace("/", "-") + f"-{ver}.tgz"
@@ -157,54 +165,98 @@ PY
 install_one() {
   local name="$1" version="$2" short="$3" local_tgz="$4" remote_tgz="$5"
   local dest="$WEB/node_modules/@zhongruan/$short"
-  local tmp tgz
+  local tmp tgz backup="" restored=0
 
   echo "==> 强制安装 $name@$version"
   tmp="$(mktemp -d)"
   tgz="$tmp/pkg.tgz"
 
+  rollback() {
+    local reason="$1"
+    echo "错误: $reason" >&2
+    if [[ -n "$backup" && -d "$backup" ]]; then
+      echo "  ==> 安装失败，自动回退旧版：$backup → $dest" >&2
+      rm -rf "$dest"
+      mv "$backup" "$dest"
+      restored=1
+      echo "  ==> 已恢复 $(node -p "require('$dest/package.json').version" 2>/dev/null || echo 旧版)" >&2
+    else
+      echo "  ==> 无旧版可回退（原先未安装或备份失败）" >&2
+    fi
+    rm -rf "$tmp"
+  }
+
   if [[ -n "$local_tgz" && -f "$local_tgz" ]]; then
     echo "  使用本地制品: $local_tgz"
-    cp "$local_tgz" "$tgz"
+    if ! cp "$local_tgz" "$tgz"; then
+      rollback "复制本地 tgz 失败"
+      return 1
+    fi
   else
     echo "  下载: $remote_tgz"
-    curl -fsSL -o "$tgz" "$remote_tgz"
+    if ! curl -fsSL -o "$tgz" "$remote_tgz"; then
+      rollback "下载 tgz 失败"
+      return 1
+    fi
   fi
 
-  # 安全解压：归档内每一路径都必须在 package/ 下（防路径穿越）
+  # 安全解压：必须全在 package/ 下，且相对路径不得含 ..
   if ! tar -tzf "$tgz" | awk '
     BEGIN { ok=0; bad=0 }
     {
-      if ($0 ~ /^\.?\.?\//) { bad=1; exit }
-      if ($0 !~ /^package(\/|$)/) { bad=1; exit }
+      if ($0 ~ /^\// || $0 ~ /^[A-Za-z]:/) { bad=1; exit }
+      if ($0 !~ /^(\.\/)?package(\/|$)/) { bad=1; exit }
+      rest = $0
+      sub(/^(\.\/)?package\/?/, "", rest)
+      if (rest ~ /(^|\/)\.\.(\/|$)/) { bad=1; exit }
       ok=1
     }
     END { exit (bad || !ok) ? 1 : 0 }
   '; then
-    echo "错误: tgz 布局异常（须全部为 package/…，且无路径穿越）" >&2
-    rm -rf "$tmp"
-    exit 1
+    rollback "tgz 布局异常（须全部为 package/…，且无路径穿越）"
+    return 1
   fi
 
-  rm -rf "$dest"
-  mkdir -p "$WEB/node_modules/@zhongruan"
-  tar -xzf "$tgz" -C "$tmp"
-  if [[ -d "$tmp/package" ]]; then
-    mv "$tmp/package" "$dest"
-  else
-    echo "错误: tgz 内无 package/ 目录" >&2
-    rm -rf "$tmp"
-    exit 1
+  # 先备份旧版，再解压到临时目录，校验通过后原子替换（失败则回退）
+  if [[ -d "$dest" ]]; then
+    backup="$(mktemp -d "${TMPDIR:-/tmp}/zr-plugin-bak.XXXXXX")"
+    # mktemp -d 已建空目录；改用 sibling 名承载旧树
+    rmdir "$backup"
+    if ! mv "$dest" "$backup"; then
+      echo "错误: 无法备份旧版 $dest" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    echo "  已备份旧版 → $backup"
   fi
-  rm -rf "$tmp"
+
+  mkdir -p "$WEB/node_modules/@zhongruan"
+  if ! tar -xzf "$tgz" -C "$tmp"; then
+    rollback "解压失败"
+    return 1
+  fi
+  if [[ ! -d "$tmp/package" ]]; then
+    rollback "tgz 内无 package/ 目录"
+    return 1
+  fi
+  if ! mv "$tmp/package" "$dest"; then
+    rollback "无法写入 $dest"
+    return 1
+  fi
 
   local got
-  got="$(node -p "require('$dest/package.json').version")"
+  got="$(node -p "require('$dest/package.json').version" 2>/dev/null || true)"
   if [[ "$got" != "$version" ]]; then
-    echo "错误: 解压后版本为 $got，期望 $version" >&2
-    exit 1
+    rollback "解压后版本为 ${got:-?}，期望 $version"
+    return 1
+  fi
+
+  rm -rf "$tmp"
+  if [[ -n "$backup" && -d "$backup" ]]; then
+    rm -rf "$backup"
   fi
   echo "  OK → $dest ($got)"
+  return 0
 }
 
 # 先全部装完，再写 package.json，避免中途失败导致声明与 node_modules 不一致

@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-09-13",
+  "description": "四套软件兼容声明：WorkBuddy 宿主、DSH 运行时、公司写码插件、Cursor SDK。各方按 ranges 互认；未知组件记 soft。",
+  "components": {
+    "workbuddy": {
+      "id": "workbuddy",
+      "label": "WorkBuddy / DSH 宿主",
+      "detect": ["env:WORKBUDDY_VERSION", "env:DSH_APP_VERSION"]
+    },
+    "dsh_runtime": {
+      "id": "dsh_runtime",
+      "label": "DSH 运行时（cordis + dsh-tools）",
+      "packages": ["@deepseek-ai/cordis", "@deepseek-ai/dsh-tools"]
+    },
+    "plugin_cursor_coding": {
+      "id": "plugin_cursor_coding",
+      "label": "公司写码插件 @zhongruan/dsh-cursor-coding",
+      "package": "@zhongruan/dsh-cursor-coding"
+    },
+    "cursor_sdk": {
+      "id": "cursor_sdk",
+      "label": "Cursor SDK",
+      "package": "@cursor/sdk"
+    }
+  },
+  "declarations": [
+    {
+      "from": "plugin_cursor_coding",
+      "pluginVersionRange": ">=0.6.0 <0.8.0",
+      "requires": {
+        "cursor_sdk": ">=1.0.31 <2.0.0",
+        "dsh_runtime.cordis": ">=4.0.2 <5.0.0",
+        "dsh_runtime.dsh_tools": ">=0.1.1-rc.2 <0.2.0",
+        "workbuddy": ">=0.0.0"
+      },
+      "notes": "插件侧声明；宿主未知版本时 workbuddy 为 soft 通过"
+    },
+    {
+      "from": "cursor_sdk",
+      "sdkVersionRange": ">=1.0.31 <2.0.0",
+      "requires": {
+        "plugin_cursor_coding": ">=0.6.0 <0.8.0"
+      },
+      "notes": "SDK 侧互认区间（本仓镜像声明，非上游官方字段）"
+    },
+    {
+      "from": "dsh_runtime",
+      "requires": {
+        "plugin_cursor_coding": ">=0.6.0 <0.8.0",
+        "workbuddy": ">=0.0.0"
+      },
+      "notes": "运行时互认区间（本仓镜像声明）"
+    },
+    {
+      "from": "workbuddy",
+      "requires": {
+        "plugin_cursor_coding": ">=0.6.0 <0.8.0",
+        "dsh_runtime.cordis": ">=4.0.2 <5.0.0"
+      },
+      "notes": "宿主侧期望；实际以宿主发布清单为准，本仓先挂镜像"
+    }
+  ]
+}

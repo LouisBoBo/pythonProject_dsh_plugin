@@ -74,8 +74,10 @@ export type StreamEvent = {
   path?: string
   tool_status?: string
   call_id?: string
-  /** 写码工具短代码片断（进度卡） */
+  /** 写码片断 / Todo / 读搜壳结果摘要（进度卡） */
   snippet?: string
+  pattern?: string
+  command?: string
   thinking_duration_ms?: number
 }
 

@@ -31,7 +31,10 @@ import {
 import {
   clampText,
   newTranscriptId,
+  normalizeStatusDisplay,
+  refineAssistantSegmentText,
   relativizeToolPath,
+  stripFinalPlanSection,
   trimTranscript,
   type TranscriptItem,
 } from '../transcript.js'
@@ -166,11 +169,17 @@ function bindEmit(jobId: string) {
       if (!merged.delta) return
       sealThinkingSegment()
       patchJob(jobId, { assistant_text: clampAssistantText(merged.full) })
+      // transcript 只存过程增量：相对上一段去复读前缀，并去掉终稿「说明方案」
       upsertTranscript((items) => {
         const sealed = items.map((it) =>
           it.kind === 'thinking' && it.streaming ? { ...it, streaming: false } : it,
         )
         if (!assistantId) {
+          const prevAsst = sealed
+            .filter((it) => it.kind === 'assistant')
+            .map((it) => String(it.text || ''))
+          const refined = refineAssistantSegmentText(merged.delta, prevAsst)
+          if (!refined) return sealed
           assistantId = newTranscriptId('asst')
           return [
             ...sealed,
@@ -178,16 +187,21 @@ function bindEmit(jobId: string) {
               id: assistantId,
               kind: 'assistant',
               at,
-              text: clampAssistantText(merged.full),
+              text: refined,
               streaming: true,
             },
           ]
         }
-        return sealed.map((it) =>
-          it.id === assistantId
-            ? { ...it, text: clampAssistantText(merged.full), streaming: true }
-            : it,
-        )
+        const prevAsst = sealed
+          .filter((it) => it.kind === 'assistant' && it.id !== assistantId)
+          .map((it) => String(it.text || ''))
+        return sealed.map((it) => {
+          if (it.id !== assistantId) return it
+          // 同段续写：追加增量后剥终稿（含粘连标题 / 结论体）；空则清掉，避免结论留在进度卡
+          const next = stripFinalPlanSection(String(it.text || '') + merged.delta)
+          if (!next) return { ...it, text: '', streaming: false }
+          return { ...it, text: next, streaming: true }
+        })
       })
       const stored =
         merged.delta.length > 8000
@@ -205,7 +219,9 @@ function bindEmit(jobId: string) {
       sealThinkingSegment()
       assistantId = null
       const displayPath = relativizeToolPath(ev.path, j.sandbox_path || undefined)
-      const key = ev.call_id || `${ev.name || 'tool'}:${displayPath || ev.path || ''}`
+      const key =
+        ev.call_id ||
+        `${ev.name || 'tool'}:${displayPath || ev.path || ev.pattern || ev.command || ''}`
       const st = String(ev.tool_status || '').toLowerCase()
       let snippet = ev.snippet
       if (
@@ -250,6 +266,8 @@ function bindEmit(jobId: string) {
               at,
               name: ev.name || 'tool',
               path: displayPath,
+              pattern: ev.pattern,
+              command: ev.command,
               tool_status: ev.tool_status || 'running',
               call_id: ev.call_id,
               snippet,
@@ -262,6 +280,8 @@ function bindEmit(jobId: string) {
                 ...it,
                 name: ev.name || it.name,
                 path: displayPath || it.path,
+                pattern: ev.pattern || it.pattern,
+                command: ev.command || it.command,
                 tool_status: ev.tool_status || it.tool_status,
                 snippet: snippet || it.snippet,
                 at,
@@ -274,6 +294,8 @@ function bindEmit(jobId: string) {
         message: ev.message,
         name: ev.name,
         path: displayPath || ev.path,
+        pattern: ev.pattern,
+        command: ev.command,
         tool_status: ev.tool_status,
         call_id: ev.call_id,
         snippet,
@@ -284,9 +306,10 @@ function bindEmit(jobId: string) {
 
     if (ev.type === 'status' || ev.type === 'error') {
       if (ev.type === 'status' && ev.message) {
+        const shown = normalizeStatusDisplay(ev.message)
         upsertTranscript((items) => [
           ...items,
-          { id: newTranscriptId('st'), kind: 'status', at, text: ev.message },
+          { id: newTranscriptId('st'), kind: 'status', at, text: shown || ev.message },
         ])
       }
       appendEvent(loadJob(jobId)!, {

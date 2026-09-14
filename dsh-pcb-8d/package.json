@@ -2,6 +2,10 @@
   "name": "@zhongruan/dsh-pcb-8d",
   "version": "0.1.1",
   "description": "DSH PCB 8D 报告插件（对话建稿、按步骤补全、导出 Markdown）",
+  "dshMarket": {
+    "zh": "PCB 8D 报告：对话建稿、按步补全、导出 Markdown",
+    "en": "PCB 8D report: draft, fill steps, export Markdown"
+  },
   "type": "module",
   "main": "lib/index.js",
   "files": ["lib", "cordis.patch.yml"],

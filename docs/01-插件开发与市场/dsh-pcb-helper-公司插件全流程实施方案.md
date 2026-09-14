@@ -352,14 +352,12 @@ cd /Users/hebo/Desktop/中软项目/pythonProject_dsh_plugin
 
 ### 7.4 多插件时
 
-当前脚本按「单插件工程」生成。多个插件时建议：
+`pack.sh` / `generate-registry.sh` 扫描仓库根 `dsh-*`（`package.json` 含 `dsh.bundle`），市场文案读各包 `dshMarket`。只打其中一个时，其它已有 `artifacts/*.tgz` 仍会写入同一份 `plugins.json`，避免把线上已上架插件冲掉。
 
-1. 每个插件各自 `pack`
-2. 合并进同一份 `plugins.json` 的 `plugins[]`
-3. `count` 改为数组长度
-4. `npm/` 下按 scope/name 并列多个包
-
-（后续可把 `generate-registry.sh` 扩展为扫描多个包目录。）
+```bash
+./scripts/internal-market/pack.sh dsh-cursor-coding
+./scripts/internal-market/upload.sh
+```
 
 ---
 
@@ -558,11 +556,19 @@ dsh plugin --profile web remove @zhongruan/dsh-pcb-helper
 
 ### 11.3 回滚
 
+**自动（本机 install-latest）**
+
+`scripts/internal-market/install-latest.sh` 安装单个插件时会先备份旧目录；解压失败、布局异常、版本不符时 **自动 mv 回旧版**，避免「删了装不上」。
+
+**人工（市场 / 服务器）**
+
 1. 把旧版 tgz / packument / plugins.json 的 version 指回旧版后重新 upload
 2. 或保留 `artifacts/` 历史包，手动改 packument 的 `dist-tags.latest`
 3. 用户卸旧装新 / 点更新
 
 建议在服务器或制品库保留最近 N 个版本的 tgz。
+
+> 说明：WorkBuddy 市场 UI 自带安装器若未走本脚本，仍依赖人工回滚；开发机强制覆盖请用本脚本。
 
 ---
 

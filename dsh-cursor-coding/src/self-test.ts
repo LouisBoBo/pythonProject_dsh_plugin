@@ -21,7 +21,20 @@ import {
   requirementsConflict,
 } from './cardBootstrap.js'
 import { buildLiveEditSnippet, previewFileSnippet } from './editSnippet.js'
-import { relativizeToolPath, toolSnippetFromArgs, snippetFromTextDiff } from './transcript.js'
+import {
+  isProcessAssistantText,
+  preferredConclusionAssistantText,
+  refineAssistantSegmentText,
+  relativizeToolPath,
+  toolCommandFromArgs,
+  toolPathFromArgs,
+  toolPatternFromArgs,
+  toolResultPreview,
+  toolSnippetFromArgs,
+  toolTodoSnippetFromArgs,
+  snippetFromTextDiff,
+  normalizeStatusDisplay,
+} from './transcript.js'
 import { createJob, findLatestJobForSession, loadJob, patchJob, setStatus } from './jobs.js'
 import {
   hasClarifyEvidence,
@@ -35,6 +48,7 @@ import {
 } from './scopeCompanions.js'
 import { compactParentHandoff } from './sessionMemory.js'
 import { startServer, stopServer, getListenAddr } from './server.js'
+import { checkCompat, satisfiesRange } from './compat.js'
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg)
@@ -248,7 +262,66 @@ async function main() {
     )
     assert(sn && sn.includes('+ const x = 2'), 'StrReplace 应抽 +new_string 片断')
     assert(!toolSnippetFromArgs({ path: '.env', contents: 'SECRET=1' }, 'Write', '.env'), '.env 不得抽片断')
-    assert(!toolSnippetFromArgs({ path: 'a.ts', pattern: 'foo' }, 'Grep', 'a.ts'), 'Grep 不抽片断')
+    assert(!toolSnippetFromArgs({ path: 'a.ts', pattern: 'foo' }, 'Grep', 'a.ts'), 'Grep 不抽写码片断')
+    assert(toolPathFromArgs({ path: 'a.ts', pattern: 'foo' }) === 'a.ts', 'path 不得被 pattern 污染')
+    assert(toolPatternFromArgs({ path: 'a.ts', pattern: 'foo' }) === 'foo', '应抽出 pattern')
+    assert(toolCommandFromArgs({ command: 'pytest -q' }) === 'pytest -q', '应抽出 command')
+    assert(
+      toolCommandFromArgs({ command: 'curl -H "Authorization: Bearer secret123"' }) ===
+        '[已隐藏敏感命令]',
+      '含 token 的命令不得进进度卡',
+    )
+    assert(!toolResultPreview({ content: 'api_key=abcd' }, 'Read', 'a.ts'), '结果含密钥不得预览')
+    assert(
+      toolResultPreview({ content: 'line1\nline2\n' }, 'Read', 'a.ts')?.includes('line1'),
+      'Read 应有结果摘要',
+    )
+    assert(
+      toolTodoSnippetFromArgs(
+        {
+          todos: [
+            { content: 'A', status: 'completed' },
+            { content: 'B', status: 'in_progress' },
+          ],
+        },
+        'TodoWrite',
+      )?.includes('[x] A'),
+      'TodoWrite 应有清单摘要',
+    )
+    assert(isProcessAssistantText('接下来补前端菜单。'), '过程话应展示')
+    assert(!isProcessAssistantText('## 说明方案\n**结论**\n完成'), '终稿不得进进度卡')
+    assert(
+      refineAssistantSegmentText(
+        '先摸清仓库。\n后端已有 API。',
+        ['先摸清仓库。'],
+      ) === '后端已有 API。',
+      '助手段应去掉复读前缀',
+    )
+    assert(
+      refineAssistantSegmentText('## 说明方案\n**结论**\nok', ['过程']) === '',
+      '纯终稿段应为空',
+    )
+    assert(
+      refineAssistantSegmentText(
+        '其余报表菜单与页面正常## 说明方案\n**结论：**\n已删除\n\n**验收步骤：**\n1. 刷新',
+        [],
+      ) === '其余报表菜单与页面正常',
+      '粘在行尾的说明方案标题应剥掉',
+    )
+    assert(refineAssistantSegmentText('##\n\n**结论：**\n已删除', []) === '', '孤立##+结论体应丢弃')
+    assert(
+      refineAssistantSegmentText(
+        '**结论：**\n已删除\n\n**改动文件：**\na.js\n\n**验收步骤：**\n1. x',
+        [],
+      ) === '',
+      '无标题终稿体不得进进度卡',
+    )
+    assert(normalizeStatusDisplay('RUNNING') === 'Cursor 运行中，请稍候…', 'RUNNING 应中文化')
+    const pref = preferredConclusionAssistantText(
+      '先摸底…\n\n## 说明方案\n**菜单**\nok\n\n## 说明方案\n**菜单**\nok\n',
+    )
+    assert(pref.startsWith('## 说明方案'), '结论应优先取说明方案段')
+    assert(pref.split('## 说明方案').length === 2, '终稿双份应去重')
     const live = snippetFromTextDiff('const a = 1\n', 'const a = 2\nconst b = 3\n')
     assert(live && live.includes('- const a = 1') && live.includes('+ const a = 2'), '沙箱 diff 片断应含 +/-')
     console.log('ok: progress tool snippets')
@@ -386,6 +459,22 @@ async function main() {
     assert(boot.ok, '服务启动失败: ' + boot.detail)
     const base = getListenAddr()
     assert(base, '无 listen addr')
+
+    {
+      assert(satisfiesRange('1.0.40', '>=1.0.31 <2.0.0'), 'semver range 应通过')
+      assert(!satisfiesRange('2.0.0', '>=1.0.31 <2.0.0'), 'semver range 应拒绝大版本')
+      const compat = checkCompat()
+      assert(compat.ok, '兼容自检应通过: ' + compat.detail)
+      const health = await fetch(base + '/health')
+      const hj = (await health.json()) as {
+        compat?: { ok?: boolean }
+        serverMode?: string
+        pluginVersion?: string
+      }
+      assert(hj.compat && hj.compat.ok === true, 'health.compat.ok 应为 true')
+      assert(hj.pluginVersion, 'health 应含 pluginVersion')
+      console.log('ok: compat + health', hj.serverMode || '?', hj.pluginVersion)
+    }
 
     // 会话隔离：同一工作区两张卡不得互相抢 pending / 已开工 job
     {
@@ -695,7 +784,11 @@ async function main() {
 
     // 关闭自动同步时仍走 pending_review → 手工 apply
     {
+      // 子进程隔离时 env 在 spawn 时固定，改 AUTO_APPLY 需重启服务
+      await stopServer()
       process.env.CURSOR_CODING_AUTO_APPLY = '0'
+      const reboot = await startServer()
+      assert(reboot.ok, '重启服务失败: ' + reboot.detail)
       _resetHitlStoreForTests()
       const issued = issue({
         action: 'cursor-coding.confirm',
@@ -725,7 +818,10 @@ async function main() {
       })
       const applyData = (await applyRes.json()) as { ok?: boolean }
       assert(applyRes.ok && applyData.ok, '手工 apply 应成功')
+      await stopServer()
       delete process.env.CURSOR_CODING_AUTO_APPLY
+      const back = await startServer()
+      assert(back.ok, '恢复 AUTO_APPLY 后重启失败: ' + back.detail)
     }
 
     console.log('[self-test] 阶段 B+C 全部通过（Mock Cursor + 自动同步 + 手工回退）')

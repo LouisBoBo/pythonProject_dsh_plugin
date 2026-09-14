@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawn, type ChildProcess } from 'node:child_process'
 import {
   applyConfigFromUi,
   cursorKeyReady,
@@ -14,6 +15,7 @@ import {
   publicConfigView,
   SERVICE_NAME,
 } from './config.js'
+import { checkCompat, readPluginVersion } from './compat.js'
 import { consume, issue } from './hitl.js'
 import {
   createJob,
@@ -68,6 +70,9 @@ function sendHtml(res: ServerResponse, html: string, req?: IncomingMessage): voi
 
 let server: Server | null = null
 let listenAddr = ''
+/** 当前对外服务形态：inplace=宿主同进程；child=独立子进程 */
+let serverMode: 'inplace' | 'child' = 'inplace'
+let childProc: ChildProcess | null = null
 
 /** 仅对本机 Origin 回显 ACAO；禁止 *，避免恶意页读 loopback 响应 */
 function corsHeaders(req?: IncomingMessage): Record<string, string> {
@@ -173,15 +178,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (method === 'GET' && path === '/health') {
     const sampleDelete = '报表中心菜单删除设备维修、设备保养、设备点检报表'
-    let pluginVersion = '0.6.30'
-    try {
-      const pkg = JSON.parse(
-        readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
-      ) as { version?: string }
-      if (pkg.version) pluginVersion = pkg.version
-    } catch {
-      /* ignore */
-    }
+    const pluginVersion = readPluginVersion()
+    const compat = checkCompat()
     send(
       res,
       200,
@@ -193,10 +191,18 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         view: publicConfigView(cfg),
         cursorKeyReady: cursorKeyReady(cfg),
         ui: '/ui',
+        serverMode: process.env.CURSOR_CODING_SERVER_ROLE === 'child' ? 'child' : serverMode,
         gate: {
           sample: sampleDelete,
           mustClarify: needsRequirementClarify(sampleDelete),
           fakeClarifiedBlocked: needsRequirementClarify(sampleDelete, true),
+        },
+        compat: {
+          ok: compat.ok,
+          softOnly: compat.softOnly,
+          matrixVersion: compat.matrixVersion,
+          detail: compat.detail,
+          checks: compat.checks,
         },
         detail: cursorKeyReady(cfg)
           ? '服务就绪；写码前已配置 Cursor API Key'
@@ -915,6 +921,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 }
 
 export function isServerRunning(): boolean {
+  if (childProc && !childProc.killed && childProc.exitCode == null) return true
   return Boolean(server?.listening)
 }
 
@@ -922,7 +929,25 @@ export function getListenAddr(): string {
   return listenAddr
 }
 
-export async function startServer(): Promise<{
+function preferredServerMode(): 'auto' | 'child' | 'inplace' {
+  const raw = String(process.env.CURSOR_CODING_SERVER_MODE || 'auto')
+    .trim()
+    .toLowerCase()
+  if (raw === 'child' || raw === 'inplace' || raw === 'auto') return raw
+  return 'auto'
+}
+
+async function probeOurHealth(addr: string): Promise<boolean> {
+  try {
+    const res = await fetch(addr + '/health', { signal: AbortSignal.timeout(2000) })
+    const body = (await res.json()) as { service?: string }
+    return Boolean(body && body.service === SERVICE_NAME)
+  } catch {
+    return false
+  }
+}
+
+export async function startServerInProcess(): Promise<{
   ok: boolean
   addr: string
   detail: string
@@ -971,8 +996,9 @@ export async function startServer(): Promise<{
     })
     s.listen(cfg.port, cfg.listen, () => {
       server = s
+      serverMode = 'inplace'
       listenAddr = `http://${cfg.listen}:${cfg.port}`
-      console.log(`[cursor-coding] 本机服务已监听 ${listenAddr}`)
+      console.log(`[cursor-coding] 本机服务已监听 ${listenAddr}（inplace）`)
       void recoverOrphanRunningJobs()
         .then((n) => {
           if (n) console.log(`[cursor-coding] 已收口 ${n} 个中断中的写码任务`)
@@ -983,7 +1009,7 @@ export async function startServer(): Promise<{
   })
 }
 
-export async function stopServer(): Promise<{ ok: boolean; detail: string }> {
+export async function stopServerInProcess(): Promise<{ ok: boolean; detail: string }> {
   if (!server) return { ok: true, detail: '服务未运行' }
   const s = server
   server = null
@@ -991,4 +1017,144 @@ export async function stopServer(): Promise<{ ok: boolean; detail: string }> {
   return new Promise((resolvePromise) => {
     s.close(() => resolvePromise({ ok: true, detail: '服务已停止' }))
   })
+}
+
+async function startServerChild(): Promise<{
+  ok: boolean
+  addr: string
+  detail: string
+  already?: boolean
+}> {
+  const cfg = loadConfig()
+  const addr = `http://${cfg.listen}:${cfg.port}`
+  if (await probeOurHealth(addr)) {
+    listenAddr = addr
+    serverMode = 'child'
+    return { ok: true, addr, already: true, detail: `端口已有本插件服务：${addr}` }
+  }
+  if (childProc && childProc.exitCode == null) {
+    for (let i = 0; i < 40; i += 1) {
+      if (await probeOurHealth(addr)) {
+        listenAddr = addr
+        serverMode = 'child'
+        return { ok: true, addr, detail: `子进程服务就绪：${addr}` }
+      }
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  }
+
+  const entry = join(dirname(fileURLToPath(import.meta.url)), 'serverMain.js')
+  if (!existsSync(entry)) {
+    return { ok: false, addr: '', detail: `找不到子进程入口 ${entry}（请先 pnpm build）` }
+  }
+
+  const child = spawn(process.execPath, [entry], {
+    env: {
+      ...process.env,
+      CURSOR_CODING_SERVER_ROLE: 'child',
+      CURSOR_CODING_SERVER_MODE: 'inplace',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+  })
+  childProc = child
+  child.stdout?.on('data', (buf) => {
+    const t = String(buf || '').trim()
+    if (t) console.log('[cursor-coding:child]', t)
+  })
+  child.stderr?.on('data', (buf) => {
+    const t = String(buf || '').trim()
+    if (t) console.warn('[cursor-coding:child]', t)
+  })
+  child.on('exit', (code, signal) => {
+    if (childProc === child) childProc = null
+    console.warn(`[cursor-coding] 子进程退出 code=${code} signal=${signal || ''}`)
+  })
+
+  for (let i = 0; i < 50; i += 1) {
+    if (child.exitCode != null) {
+      return {
+        ok: false,
+        addr: '',
+        detail: `子进程启动失败（exit ${child.exitCode}）`,
+      }
+    }
+    if (await probeOurHealth(addr)) {
+      listenAddr = addr
+      serverMode = 'child'
+      return { ok: true, addr, detail: `服务(子进程隔离): ${addr}` }
+    }
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  try {
+    child.kill('SIGTERM')
+  } catch {
+    /* ignore */
+  }
+  childProc = null
+  return { ok: false, addr: '', detail: '子进程启动超时（未通过 /health）' }
+}
+
+/**
+ * 启动本机写码 HTTP。
+ * - CURSOR_CODING_SERVER_MODE=auto（默认）：优先子进程，失败回退同进程
+ * - child：强制子进程
+ * - inplace：强制同进程（旧行为）
+ * 子进程崩溃不拖垮宿主；HITL/pending 已落盘可跨进程共享。
+ */
+export async function startServer(): Promise<{
+  ok: boolean
+  addr: string
+  detail: string
+  already?: boolean
+}> {
+  if (process.env.CURSOR_CODING_SERVER_ROLE === 'child') {
+    return startServerInProcess()
+  }
+
+  const prefer = preferredServerMode()
+  const cfg = loadConfig()
+  const addr = `http://${cfg.listen}:${cfg.port}`
+
+  if (await probeOurHealth(addr)) {
+    listenAddr = addr
+    return {
+      ok: true,
+      addr,
+      already: true,
+      detail: `Cursor 写码服务已在运行：${addr}`,
+    }
+  }
+
+  if (prefer === 'inplace') {
+    return startServerInProcess()
+  }
+
+  const childOut = await startServerChild()
+  if (childOut.ok) return childOut
+  if (prefer === 'child') return childOut
+
+  console.warn(`[cursor-coding] 子进程不可用，回退同进程：${childOut.detail}`)
+  return startServerInProcess()
+}
+
+export async function stopServer(): Promise<{ ok: boolean; detail: string }> {
+  if (childProc) {
+    const child = childProc
+    childProc = null
+    listenAddr = ''
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      /* ignore */
+    }
+    await new Promise((r) => setTimeout(r, 200))
+    try {
+      if (child.exitCode == null) child.kill('SIGKILL')
+    } catch {
+      /* ignore */
+    }
+    return { ok: true, detail: '子进程服务已停止' }
+  }
+  return stopServerInProcess()
 }

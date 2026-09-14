@@ -2,6 +2,10 @@
   "name": "@zhongruan/dsh-remote-review",
   "version": "0.1.7",
   "description": "DSH 远端审码插件：IDE 提交触发 Webhook，调用现有审码 API，报告写入飞书文档；设置页可填飞书配置",
+  "dshMarket": {
+    "zh": "远端/本地 Webhook 审码：提交触发、共用现有审码 API、报告写入飞书文档",
+    "en": "Webhook code review: commit trigger, existing review API, Feishu Docs"
+  },
   "type": "module",
   "main": "lib/index.js",
   "exports": {

@@ -205,14 +205,23 @@ const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_
 
 /**
  * 用户取消：立刻终态。封住思考流，通知 SSE。
- * 进行中的任务改为 cancelled；已结束的只封流，不改写业务结果。
+ * - 进行中（queued/running/pending_review/syncing）：cancelled=true + status=cancelled + done
+ * - 已终态（succeeded/failed/cancelled/blocked）：只封流并推 done 停转，**不得**再写 cancelled=true
+ *   （否则成功任务被标成取消，续改/编排会误判）
  */
 export function forceCancelJob(id: string): CursorCodingJob | null {
   const job = loadJob(String(id || '').trim())
   if (!job) return null
+
+  if (JOB_ENDED.includes(job.status)) {
+    patchJob(job.id, { transcript: sealedTranscript(job) })
+    const cur = loadJob(job.id)!
+    appendEvent(cur, { type: 'done', status: cur.status, message: '用户取消（封口）' })
+    return loadJob(job.id)
+  }
+
   patchJob(job.id, { cancelled: true, transcript: sealedTranscript(job) })
   const cur = loadJob(job.id)!
-  if (JOB_ENDED.includes(cur.status)) return cur
   setStatus(cur, 'cancelled', '用户取消')
   appendEvent(loadJob(job.id)!, { type: 'done', status: 'cancelled', message: '用户取消' })
   return loadJob(job.id)

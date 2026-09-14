@@ -36,7 +36,7 @@
 4. **重启**聊天壳（或按公司脚本 `link` / `restart-web` 后硬刷新页面）。  
 5. **设置**左侧应出现 **`Cursor 写码`**。
 
-开发机也可用：`dsh plugin --profile web add ./dsh-cursor-coding`（以你们环境为准）。
+开发机联调可用：`dsh plugin --profile web add ./dsh-cursor-coding`（只会出现在「已安装 / 本地开发」，不会进「发现」）。正式给别人用必须 `./scripts/internal-market/pack.sh dsh-cursor-coding` 再 `upload.sh`。
 
 ### 1.2 必填：Cursor API Key
 

@@ -2,6 +2,10 @@
   "name": "@zhongruan/dsh-pcb-helper",
   "version": "0.1.0",
   "description": "DSH PCB 辅助工具插件（尺寸解析、BOM 统计）",
+  "dshMarket": {
+    "zh": "PCB 尺寸解析、BOM 清单统计",
+    "en": "PCB dimension parsing and BOM counting"
+  },
   "type": "module",
   "main": "lib/index.js",
   "files": ["lib", "cordis.patch.yml"],

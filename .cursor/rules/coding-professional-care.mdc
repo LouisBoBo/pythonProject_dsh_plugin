@@ -1,0 +1,40 @@
+---
+description: 写码强制专业谨慎：先对齐契约再改，禁止启发式乱加、禁止污染终态
+alwaysApply: true
+---
+
+# 写码强制约束 · 专业谨慎（禁止随意）
+
+凡改本仓库代码（尤其 `dsh-cursor-coding/`），**必须**专业、谨慎、可证明正确；禁止「好像能用」的随意补丁。
+
+## 硬要求
+
+1. **先读调用链再改**：改判断/状态位前，弄清谁写、谁读、生命周期（开卡 → 确认 → 进度 → 终态 → 下一轮重置）。
+2. **契约优先，禁止正文猜意图**：取消、错误、澄清等只认明确字段（如 DSH `error.code`、Job `status`）；**禁止**用用户原话/结论/正文正则匹配「取消|cancel|abort」等当控制信号。
+3. **终态不可污染**：已 `succeeded` / `failed` 等业务终态，禁止再写 `cancelled=true` 或改写业务结果；封口只允许封流/推 SSE，不得误伤账本。
+4. **状态位有开必有清**：`cancelOnceRef` 一类「点过一次」标志，在 `hardResetToConfirm`、确认开工、新 `callId` 时必须重置；禁止只 set 不清。
+5. **条件宁窄勿宽**：禁止 `有 kind 就算 settled`、扫整段 body 等过宽启发式；多写一行死代码不如漏判后补精确条件。
+6. **最小必要改动**：不为停转、好看、顺手而加旁路；改完自问：成功卡会被误杀吗？下一轮会被锁死吗？续改会读到脏 flag 吗？
+
+## 反例（已发生，禁止重演）
+
+```text
+❌ toolBlockCancelled：用正文匹配「取消/cancel」→ 结论里出现「取消」把成功卡打成已取消
+✅ 只认 error.code ∈ interrupted | cancelled | aborted
+
+❌ forceCancelJob：已 succeeded 仍 patch cancelled=true
+✅ 已终态只封 transcript + 推 done；进行中才 cancelled + status=cancelled
+
+❌ cancelOnceRef 点取消后不清 → hardReset 后新任务仍锁「已取消」
+✅ hardReset / onConfirm 开工时 cancelOnceRef = false
+
+❌ toolBlockSettled：'kind' in block && block.kind → 进行中也算 settled
+✅ 只认 tool-result / isError / 明确 result
+```
+
+## 自检（改完必过）
+
+- [ ] 控制流是否只依赖权威字段，不扫用户可见正文？
+- [ ] 成功/失败 Job 的业务字段是否仍干净？
+- [ ] 开下一轮（新 call / hardReset / 再确认）状态是否全部复位？
+- [ ] 条件是否可能误伤正常成功路径？

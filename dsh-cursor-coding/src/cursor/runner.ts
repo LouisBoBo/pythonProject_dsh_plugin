@@ -8,8 +8,12 @@ import { clampAssistantText, mergeAssistantDelta } from '../assistantText.js'
 import {
   clampText,
   newTranscriptId,
+  toolCommandFromArgs,
   toolPathFromArgs,
+  toolPatternFromArgs,
+  toolResultPreview,
   toolSnippetFromArgs,
+  toolTodoSnippetFromArgs,
   type TranscriptItem,
 } from '../transcript.js'
 
@@ -18,9 +22,11 @@ export type CursorRunEvent = {
   message?: string
   name?: string
   path?: string
+  pattern?: string
+  command?: string
   tool_status?: string
   call_id?: string
-  /** 写码工具短代码片断（仅进度卡） */
+  /** 写码片断 / Todo / 结果短摘要（仅进度卡） */
   snippet?: string
   thinking_duration_ms?: number
   /** 完整思考正文（快照） */
@@ -152,6 +158,8 @@ function coerceToolArgs(raw: unknown, depth = 0): Record<string, unknown> | null
 function extractToolMeta(message: unknown): {
   name?: string
   path?: string
+  pattern?: string
+  command?: string
   status?: string
   call_id?: string
   snippet?: string
@@ -177,18 +185,40 @@ function extractToolMeta(message: unknown): {
         coerceToolArgs(nested.arguments) ||
         coerceToolArgs(nested.input) ||
         coerceToolArgs(nested.argsRaw))) ||
-    coerceToolArgs(m.result) ||
     coerceToolArgs(m)
   const path =
     toolPathFromArgs(args) ||
     (nested ? toolPathFromArgs(nested) : '') ||
     toolPathFromArgs(m) ||
     undefined
-  const snippet =
+  const pattern =
+    toolPatternFromArgs(args) ||
+    (nested ? toolPatternFromArgs(nested) : '') ||
+    undefined
+  const command =
+    toolCommandFromArgs(args) ||
+    (nested ? toolCommandFromArgs(nested) : '') ||
+    undefined
+  const writeSnip =
     toolSnippetFromArgs(args, name, path) ||
     toolSnippetFromArgs(m.result, name, path) ||
     undefined
-  return { name, path, status, call_id, snippet }
+  const todoSnip = toolTodoSnippetFromArgs(args, name)
+  const resultSnip =
+    toolResultPreview(m.result, name, path) ||
+    toolResultPreview(m.output, name, path) ||
+    (nested ? toolResultPreview(nested.result, name, path) : undefined) ||
+    undefined
+  const snippet = writeSnip || todoSnip || resultSnip || undefined
+  return {
+    name,
+    path: path || undefined,
+    pattern: pattern || undefined,
+    command: command || undefined,
+    status,
+    call_id,
+    snippet,
+  }
 }
 
 class DialogBus {
@@ -288,6 +318,8 @@ class DialogBus {
   upsertTool(meta: {
     name?: string
     path?: string
+    pattern?: string
+    command?: string
     status?: string
     call_id?: string
     snippet?: string
@@ -295,7 +327,7 @@ class DialogBus {
     this.sealThinking()
     // 工具打断正文段
     this.sealAssistant()
-    const key = meta.call_id || `${meta.name || 'tool'}:${meta.path || ''}`
+    const key = meta.call_id || `${meta.name || 'tool'}:${meta.path || meta.pattern || meta.command || ''}`
     let id = this.toolIds.get(key)
     if (!id) {
       id = newTranscriptId('tool')
@@ -306,6 +338,8 @@ class DialogBus {
         at: new Date().toISOString(),
         name: meta.name || 'tool',
         path: meta.path,
+        pattern: meta.pattern,
+        command: meta.command,
         tool_status: meta.status || 'running',
         call_id: meta.call_id,
         snippet: meta.snippet,
@@ -316,6 +350,8 @@ class DialogBus {
     if (row) {
       if (meta.name) row.name = meta.name
       if (meta.path) row.path = meta.path
+      if (meta.pattern) row.pattern = meta.pattern
+      if (meta.command) row.command = meta.command
       if (meta.status) row.tool_status = meta.status
       if (meta.snippet) row.snippet = meta.snippet
       row.at = new Date().toISOString()
@@ -360,6 +396,20 @@ async function runMock(opts: {
   }
   bus.sealThinking()
 
+  opts.onEvent({
+    type: 'assistant',
+    message: '先核对工程里与工时/报表相关的现有实现。\n',
+  })
+  opts.onEvent({
+    type: 'tool_event',
+    name: 'Grep',
+    path: 'frontend/src',
+    pattern: 'employee-work-hours|员工工时',
+    tool_status: 'completed',
+    call_id: 'mock-grep-1',
+    snippet: 'frontend/src/config/reportFeatures.js',
+  })
+
   const marker = join(opts.sandbox, '.cursor-coding-mock.md')
   const prev = existsSync(marker) ? readFileSync(marker, 'utf8') : ''
   const body =
@@ -395,8 +445,7 @@ async function runMock(opts: {
   })
 
   const parts = [
-    '正在查看工作区…\n',
-    `已写入 \`.cursor-coding-mock.md\`（诉求：${opts.requirement.slice(0, 80)}）。\n\n`,
+    '已写入标记文件，准备收口。\n\n',
     '## 说明方案\n**结论**\nMock 已完成改码（自检/无真实 Key）。\n',
   ]
   for (const piece of parts) {
@@ -612,6 +661,8 @@ export async function runCursorLocal(opts: {
           bus.upsertTool({
             name: meta.name || mtype,
             path: meta.path,
+            pattern: meta.pattern,
+            command: meta.command,
             status: meta.status || 'running',
             call_id: meta.call_id,
             snippet: meta.snippet,
@@ -620,6 +671,8 @@ export async function runCursorLocal(opts: {
             type: 'tool_event',
             name: meta.name || mtype,
             path: meta.path,
+            pattern: meta.pattern,
+            command: meta.command,
             tool_status: meta.status || 'running',
             call_id: meta.call_id,
             snippet: meta.snippet,

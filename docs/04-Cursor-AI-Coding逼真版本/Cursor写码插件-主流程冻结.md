@@ -1,8 +1,9 @@
 # Cursor 写码插件 · 主流程冻结（0.6.7）
 
-> **状态：已冻结**  
+> **状态：已冻结**（2026-09-13 起：主流程 + 过程输出加厚均暂停）  
 > 包：`@zhongruan/dsh-cursor-coding`（主流程形态冻结；会话分层见 [DSH会话与记忆分层.md](../架构与选型/DSH会话与记忆分层.md)）  
-> 口径：整体流程已对齐产品验收，**禁止再改主流程形态**；仅允许在不改变步骤顺序与职责边界的前提下做细节优化（文案、滚动、性能、边界 bug）。
+> 口径：整体流程已对齐产品验收，**禁止再改主流程形态**；仅允许在不改变步骤顺序与职责边界的前提下做细节优化（文案、滚动、性能、边界 bug）。  
+> **过程逼近**：进度卡信息密度告一段落；**不再**为 pattern/command 等做预期无效的字段映射。对照见 [写码插件输出-VS-Cursor原生输出-对比报告.md](./写码插件输出-VS-Cursor原生输出-对比报告.md)。
 >
 > **会话**：聊天/压缩交给 DSH；插件只维护本机 Job 执行账本（`dsh_session_id`/`dsh_call_id` 对账），`sessionStorage` 仅加速。
 
@@ -72,5 +73,6 @@
 ## 相关入口
 
 - 插件：`dsh-cursor-coding/`  
+- 输出对照：[写码插件输出-VS-Cursor原生输出-对比报告.md](./写码插件输出-VS-Cursor原生输出-对比报告.md)  
 - 路由提示：`mes-bridge` → `buildCodeDevPrompt`（DSH Cursor 分支）  
 - Skills：`zr-workbuddy-code-dev` / `zr-workbuddy-routing`  

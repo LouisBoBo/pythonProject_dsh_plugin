@@ -13,6 +13,8 @@
 
 因此：`upload.sh` 更新服务器上的 `plugins.json` + `npm/` 后，市场里就会多 / 少 / 变更插件；**没进这份 JSON，市场里就看不到**。
 
+新插件正式交付必须走：`pack.sh` → `upload.sh`。`dsh plugin add ./` 只出现在「已安装 / 本地开发」，不会进「发现」。`package.json` 需含 `dsh.bundle` 与发现页文案 `dshMarket`；`pack.sh` 会扫描仓库根下全部此类 `dsh-*` 目录。
+
 安装时：点安装 → 按条目里的 `npm`（如 `@zhongruan/dsh-weather`）从私有 registry 下 tgz → 装进当前 profile（例如 `~/.dsh/profiles/web`）。
 
 ### 相关路径（本仓库 / 服务器）

@@ -1,0 +1,25 @@
+---
+description: 公司 DSH 插件必须走市场安装；禁止只本地 link 上架
+alwaysApply: true
+---
+
+# 公司插件必须走市场安装
+
+用户在「设置 → 插件市场 → 发现」里能装到的，才算交付。本地 `dsh plugin add ./` 只用于开发机联调，**不会**出现在发现列表。
+
+## 新插件 / 发版（必做）
+
+1. 仓库根目录：`dsh-<name>/`，`package.json` 含 `dsh.bundle` 与 **`dshMarket.zh` / `dshMarket.en`**（发现页文案）。
+2. 升 `version` 后：`./scripts/internal-market/pack.sh dsh-<name>`
+3. `./scripts/internal-market/upload.sh`（会核对线上目录；缺包会拒绝上传）
+4. `curl -sS http://175.178.238.31/dsh-plugins/plugins.json` 确认新包在清单里
+
+`pack.sh` 会扫描所有 `dsh-*` Bundle，不必再改脚本白名单。只打一个包时，其它已有 tgz 仍会写进 `plugins.json`，避免把线上插件冲掉。
+
+## 禁止
+
+- 只 `dsh plugin --profile web add ./dsh-xxx` 然后当正式安装
+- 手工改服务器 `plugins.json` 却不打 npm tgz
+- `FORCE=1` 上传来「少几个插件也没关系」（除非产品明确要下架）
+
+开发联调可以继续用本地 link；对用户说「去插件市场安装」。

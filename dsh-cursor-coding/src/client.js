@@ -40,6 +40,150 @@ window.__ModuleLoader__.load({
       return 'http://' + host + ':' + port
     }
 
+    /** 剪贴板写入：API 失败时用 textarea+execCommand 兜底（DSH 内嵌页常见） */
+    function copyTextViaTextarea(text) {
+      var t = String(text || '')
+      if (!t) return false
+      var ta = document.createElement('textarea')
+      ta.value = t
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.top = '0'
+      ta.style.left = '-9999px'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      var ok = false
+      try {
+        ta.focus()
+        ta.select()
+        ta.setSelectionRange(0, t.length)
+        ok = document.execCommand('copy')
+      } catch (e) {
+        ok = false
+      }
+      try {
+        document.body.removeChild(ta)
+      } catch (e2) {}
+      return ok
+    }
+
+    function copyTextToClipboard(text) {
+      var t = String(text || '')
+      if (!t) return Promise.resolve(false)
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+          return navigator.clipboard.writeText(t).then(
+            function () {
+              return true
+            },
+            function () {
+              return copyTextViaTextarea(t)
+            },
+          )
+        } catch (e) {
+          return Promise.resolve(copyTextViaTextarea(t))
+        }
+      }
+      return Promise.resolve(copyTextViaTextarea(t))
+    }
+
+    function buildDialogTextFromTranscript(items) {
+      var parts = []
+      var prevAsst = []
+      ;(items || []).forEach(function (it) {
+        if (!it) return
+        if (it.kind === 'thinking') parts.push('【Thinking】\n' + (it.text || ''))
+        else if (it.kind === 'assistant') {
+          var shown = refineAssistantSegmentTextClient(it.text || '', prevAsst)
+          if (!shown) return
+          prevAsst.push(String(it.text || ''))
+          parts.push('【Assistant】\n' + shown)
+        } else if (it.kind === 'user') parts.push('【You】\n' + (it.text || ''))
+        else if (it.kind === 'status') {
+          var sm = normalizeStatusDisplayClient(it.text || '')
+          if (sm) parts.push('【状态】' + sm)
+        } else if (it.kind === 'tool') {
+          var line =
+            '【Tool】' +
+            (it.name || '') +
+            ' ' +
+            (it.tool_status || '') +
+            (it.path ? ' path=' + it.path : '') +
+            (it.pattern ? ' pattern=' + it.pattern : '') +
+            (it.command ? ' cmd=' + it.command : '')
+          if (it.snippet) line += '\n' + String(it.snippet)
+          parts.push(line)
+        }
+      })
+      return parts.join('\n\n').trim()
+    }
+
+    function looksLikeFinalPlanBodyClient(text) {
+      var s = String(text || '').trim()
+      if (!s) return false
+      if (/^\*\*结论[：:]?\*\*/.test(s)) return true
+      if (/^结论[：:]/.test(s)) return true
+      var hits = 0
+      if (/\*\*结论[：:]?\*\*/.test(s)) hits++
+      if (/\*\*改动文件/.test(s)) hits++
+      if (/\*\*说明[：:]?\*\*/.test(s)) hits++
+      if (/\*\*验收步骤[：:]?\*\*/.test(s)) hits++
+      if (/验收步骤[：:]/.test(s)) hits++
+      return hits >= 2
+    }
+
+    function stripFinalPlanSectionClient(text) {
+      var t = String(text || '')
+      var markers = [/##\s*说明方案/, /##\s*本轮结论/, /【本轮结论】/]
+      var cut = -1
+      for (var i = 0; i < markers.length; i++) {
+        var m = t.match(markers[i])
+        if (m && m.index != null && (cut < 0 || m.index < cut)) cut = m.index
+      }
+      if (cut === 0) return ''
+      if (cut > 0) t = t.slice(0, cut)
+      t = t.trim()
+      t = t.replace(/^#{1,6}\s*(?:\n+|$)/, '').trim()
+      if (!t || /^#{1,6}\s*$/.test(t)) return ''
+      if (looksLikeFinalPlanBodyClient(t)) return ''
+      return t
+    }
+
+    function stripRepeatedAssistantPrefixClient(previous, current) {
+      var prev = String(previous || '').trim()
+      var curr = String(current || '').trim()
+      if (!curr) return ''
+      if (!prev) return curr
+      if (curr === prev) return ''
+      if (curr.indexOf(prev) === 0) return curr.slice(prev.length).replace(/^\s+/, '')
+      return curr
+    }
+
+    function refineAssistantSegmentTextClient(incoming, previousTexts) {
+      var t = stripFinalPlanSectionClient(incoming)
+      if (!t) return ''
+      var list = previousTexts || []
+      for (var i = list.length - 1; i >= 0; i--) {
+        var next = stripRepeatedAssistantPrefixClient(list[i] || '', t)
+        if (next !== t) {
+          t = next
+          break
+        }
+      }
+      t = stripFinalPlanSectionClient(t)
+      if (!t) return ''
+      if (looksLikeFinalPlanBodyClient(t)) return ''
+      if (/##\s*说明方案/.test(t) || /##\s*本轮结论/.test(t) || /【本轮结论】/.test(t)) return ''
+      return t
+    }
+
+    function normalizeStatusDisplayClient(message) {
+      var msg = String(message || '').trim()
+      if (!msg) return ''
+      if (/^RUNNING$/i.test(msg)) return 'Cursor 运行中，请稍候…'
+      return String(message || '')
+    }
+
     var TERMINAL_JOB = {
       succeeded: 1,
       failed: 1,
@@ -54,19 +198,19 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** 仅认 DSH tool block 的 error.code；禁止扫正文（用户原话/结论含「取消」会误杀） */
     function toolBlockCancelled(block) {
       if (!block) return false
       var err = block.error || {}
       var code = String(err.code || '')
-      var name = String(err.name || '')
-      var msg = String(err.message || err.detail || '')
-      if (code === 'interrupted' || code === 'cancelled' || code === 'aborted') return true
-      if (/interrupt|cancel|abort/i.test(code + ' ' + name + ' ' + msg)) return true
-      return false
+        .trim()
+        .toLowerCase()
+      return code === 'interrupted' || code === 'cancelled' || code === 'aborted'
     }
 
     function toolBlockSettled(block) {
       if (!block) return false
+      // 仅认明确终态；禁止「有 kind 就算 settled」（进行中的 tool-call 也会带 kind）
       if (block.kind === 'tool-result') return true
       if (block.isError === true) return true
       if (block.result || block.value) return true
@@ -446,14 +590,10 @@ window.__ModuleLoader__.load({
       function copyJobBody() {
         var t = String(jobBody || '')
         if (!t) return
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(t).then(
-            function () {
-              setJobMeta((jobMeta || '') + ' · 已复制')
-            },
-            function () {},
-          )
-        }
+        copyTextToClipboard(t).then(function (ok) {
+          if (ok) setJobMeta((jobMeta || '') + ' · 已复制')
+          else setJobMeta((jobMeta || '') + ' · 复制失败')
+        })
       }
 
       useEffect(function () {
@@ -803,6 +943,9 @@ window.__ModuleLoader__.load({
       var errState = useState('')
       var err = errState[0]
       var setErr = errState[1]
+      var copyFlashState = useState('')
+      var copyFlash = copyFlashState[0]
+      var setCopyFlash = copyFlashState[1]
       var jobState = useState(jobIdInit)
       var jobId = jobState[0]
       var setJobId = jobState[1]
@@ -855,10 +998,12 @@ window.__ModuleLoader__.load({
         liveChatScrollRef.current = false
         dialogPinRef.current = false
         stickBottomRef.current = false
+        cancelOnceRef.current = false
         setJobId('')
         setPhase('form')
         setBusy(false)
         setErr('')
+        setCopyFlash('')
         setStreamText('')
         setTranscript([])
         setStatusLabel('')
@@ -1120,6 +1265,19 @@ window.__ModuleLoader__.load({
 
       function applyJobSnapshot(job) {
         if (!job) return
+        if (cancelOnceRef.current) {
+          setTranscript(function (prev) {
+            var src = Array.isArray(job.transcript) && job.transcript.length ? job.transcript : prev
+            return sealTranscriptItems(src)
+          })
+          setPhase('done')
+          setStatusLabel(function (prev) {
+            return prev && prev !== '写码中' && prev !== '自动同步中' ? prev : '已取消'
+          })
+          dialogPinRef.current = false
+          stickBottomRef.current = false
+          return
+        }
         var st = String(job.status || '')
         var detail = String(job.detail || '')
         var inScopeLen = Array.isArray(job.review_in_scope) ? job.review_in_scope.length : -1
@@ -1357,18 +1515,51 @@ window.__ModuleLoader__.load({
       }
 
       function copyDialog() {
-        var parts = []
-        ;(transcript || []).forEach(function (it) {
-          if (it.kind === 'thinking') parts.push('【Thinking】\n' + (it.text || ''))
-          else if (it.kind === 'assistant') parts.push('【Assistant】\n' + (it.text || ''))
-          else if (it.kind === 'user') parts.push('【You】\n' + (it.text || ''))
-          else if (it.kind === 'tool')
-            parts.push('【Tool】' + (it.name || '') + ' ' + (it.tool_status || '') + ' ' + (it.path || ''))
-        })
-        var t = parts.join('\n\n')
-        if (t && navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(t).catch(function () {})
+        setCopyFlash('')
+        var local = buildDialogTextFromTranscript(transcript)
+        function finishCopy(text) {
+          var t = String(text || '').trim()
+          if (!t) {
+            setCopyFlash('无可复制内容')
+            return
+          }
+          // 同步优先走 textarea 兜底，保住点击手势；API 成功则覆盖写入
+          var synced = copyTextViaTextarea(t)
+          if (synced) {
+            setCopyFlash('已复制')
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+              navigator.clipboard.writeText(t).catch(function () {})
+            }
+            return
+          }
+          copyTextToClipboard(t).then(function (ok) {
+            setCopyFlash(ok ? '已复制' : '复制失败，请手动选择进度区内容')
+          })
         }
+        if (local) {
+          finishCopy(local)
+          return
+        }
+        var jid = String(jobId || (ui && ui.job_id) || '').trim()
+        if (!jid) {
+          setCopyFlash('无可复制内容')
+          return
+        }
+        fetch(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(jid) + '/dialog')
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (d) {
+            var md = d && d.ok ? String(d.markdown || '').trim() : ''
+            if (md) {
+              finishCopy(md)
+              return
+            }
+            setCopyFlash('无可复制内容')
+          })
+          .catch(function () {
+            setCopyFlash('拉取对话失败')
+          })
       }
 
       function renderMd(text) {
@@ -1552,6 +1743,7 @@ window.__ModuleLoader__.load({
               throw new Error((out.data && out.data.detail) || '确认失败 HTTP ' + out.status)
             }
             var jid = out.data.job_id
+            cancelOnceRef.current = false
             setJobId(jid)
             setPhase('running')
             setStreamText('')
@@ -1694,6 +1886,7 @@ window.__ModuleLoader__.load({
           why = done ? '已修改/写入代码' : '正在修改/写入代码'
         else if (n === 'shell' || n === 'bash' || n === 'terminal')
           why = done ? '已执行终端命令' : '正在执行终端命令'
+        else if (n.indexOf('todo') >= 0) why = done ? '已更新任务清单' : '正在更新任务清单'
         else if (n === 'task' || n.indexOf('task') >= 0)
           why = done ? '已完成子任务摸底' : '正在拆分子任务，并行摸清结构'
         else if (n === 'ls' || n === 'list' || n.indexOf('dir') >= 0)
@@ -1701,6 +1894,19 @@ window.__ModuleLoader__.load({
         else if (n.indexOf('delete') >= 0 || n === 'rm') why = done ? '已删除文件' : '正在删除文件'
         var stZh = done ? '已完成' : st === 'running' || st === 'in_progress' ? '进行中' : st === 'error' || st === 'failed' ? '失败' : st || ''
         return { why: why, path: p, statusZh: stZh, done: done }
+      }
+
+      function toolMetaLine(it) {
+        var bits = []
+        if (it.name) bits.push(String(it.name))
+        if (it.path) bits.push(shortPath(it.path))
+        if (it.pattern) bits.push('pattern=' + String(it.pattern))
+        if (it.command) {
+          var cmd = String(it.command)
+          if (cmd.length > 120) cmd = cmd.slice(0, 117) + '…'
+          bits.push('cmd=' + cmd)
+        }
+        return bits.join(' · ')
       }
 
       function renderTranscript() {
@@ -1721,33 +1927,49 @@ window.__ModuleLoader__.load({
             h('span', null, '正在连接 Cursor 并准备写码，请稍候…'),
           )
         }
-        return transcript.map(function (it) {
+        var prevAsst = []
+        var nodes = []
+        ;(transcript || []).forEach(function (it) {
+          if (!it) return
           if (it.kind === 'user') {
-            return h(
-              'div',
-              { key: it.id, className: 'cc-bubble user' },
-              h('div', { className: 'role' }, '你'),
-              h('div', { className: 'body' }, it.text || ''),
-            )
-          }
-          if (it.kind === 'thinking') {
-            var streaming = !!it.streaming && phase !== 'done'
-            return h(
-              'div',
-              { key: it.id, className: 'cc-bubble thinking' + (streaming ? ' is-stream' : '') },
+            nodes.push(
               h(
-                'details',
-                { open: streaming },
-                h(
-                  'summary',
-                  null,
-                  (streaming ? '思考中…' : '思考过程') +
-                    (it.thinking_duration_ms ? ' · ' + Math.round(it.thinking_duration_ms / 1000) + '秒' : '') +
-                    (streaming ? '' : '（点击展开）'),
-                ),
+                'div',
+                { key: it.id, className: 'cc-bubble user' },
+                h('div', { className: 'role' }, '你'),
                 h('div', { className: 'body' }, it.text || ''),
               ),
             )
+            return
+          }
+          if (it.kind === 'thinking') {
+            var streaming =
+              !!it.streaming &&
+              phase !== 'done' &&
+              !cancelOnceRef.current &&
+              !toolBlockCancelled(props && props.block) &&
+              !toolBlockSettled(props && props.block)
+            nodes.push(
+              h(
+                'div',
+                { key: it.id, className: 'cc-bubble thinking' + (streaming ? ' is-stream' : '') },
+                h(
+                  'details',
+                  { open: streaming },
+                  h(
+                    'summary',
+                    null,
+                    (streaming ? '思考中…' : '思考过程') +
+                      (it.thinking_duration_ms
+                        ? ' · ' + Math.round(it.thinking_duration_ms / 1000) + '秒'
+                        : '') +
+                      (streaming ? '' : '（点击展开）'),
+                  ),
+                  h('div', { className: 'body' }, it.text || ''),
+                ),
+              ),
+            )
+            return
           }
           if (it.kind === 'tool') {
             var info = toolExplain(it.name, it.path, it.tool_status)
@@ -1768,41 +1990,64 @@ window.__ModuleLoader__.load({
               })
               snipNode = h('pre', { className: 'cc-snippet', 'aria-label': '代码片断' }, snipLines)
             }
-            return h(
-              'div',
-              { key: it.id, className: 'cc-bubble tool' },
-              live ? h('span', { className: 'cc-spin', 'aria-hidden': 'true' }) : h('span', { className: 'ico' }, '⚙'),
+            var meta = toolMetaLine(it)
+            nodes.push(
               h(
-                'span',
-                { className: 'cc-tool-desc' },
-                h('span', { className: 'why' }, info.why + (info.statusZh ? ' · ' + info.statusZh : '')),
-                info.path || it.name
-                  ? h('div', { className: 'meta' }, (it.name || 'tool') + (info.path ? ' · ' + info.path : ''))
-                  : null,
-                snipNode,
+                'div',
+                { key: it.id, className: 'cc-bubble tool' },
+                live
+                  ? h('span', { className: 'cc-spin', 'aria-hidden': 'true' })
+                  : h('span', { className: 'ico' }, '⚙'),
+                h(
+                  'span',
+                  { className: 'cc-tool-desc' },
+                  h(
+                    'span',
+                    { className: 'why' },
+                    info.why + (info.statusZh ? ' · ' + info.statusZh : ''),
+                  ),
+                  meta ? h('div', { className: 'meta' }, meta) : null,
+                  snipNode,
+                ),
               ),
             )
+            return
           }
           if (it.kind === 'assistant') {
-            // 卡片只保留过程；说明方案/结论只在聊天正文（finish）输出
-            return null
+            var shown = refineAssistantSegmentTextClient(it.text || '', prevAsst)
+            prevAsst.push(String(it.text || ''))
+            if (!shown) return
+            nodes.push(
+              h(
+                'div',
+                { key: it.id, className: 'cc-bubble assistant' },
+                h('div', { className: 'role' }, 'Cursor'),
+                h('div', {
+                  className: 'body',
+                  dangerouslySetInnerHTML: { __html: renderMd(shown) },
+                }),
+              ),
+            )
+            return
           }
           if (it.kind === 'status') {
-            var msg = String(it.text || '')
-            if (/【本轮结论】|^##\s*本轮结论|说明方案/.test(msg)) return null
-            if (/^RUNNING$/i.test(msg.trim())) msg = 'Cursor 运行中，请稍候…'
+            var msg = normalizeStatusDisplayClient(it.text || '')
+            if (/【本轮结论】|^##\s*本轮结论|说明方案/.test(msg)) return
+            if (!msg) return
             var busy =
               /启动|改码|准备|沙箱|RUNNING|running|同步|Cursor|请稍候/i.test(msg) &&
               phase !== 'done'
-            return h(
-              'div',
-              { key: it.id, className: 'cc-bubble status' + (busy ? ' is-live' : '') },
-              busy ? h('span', { className: 'cc-spin', 'aria-hidden': 'true' }) : null,
-              h('span', null, msg),
+            nodes.push(
+              h(
+                'div',
+                { key: it.id, className: 'cc-bubble status' + (busy ? ' is-live' : '') },
+                busy ? h('span', { className: 'cc-spin', 'aria-hidden': 'true' }) : null,
+                h('span', null, msg),
+              ),
             )
           }
-          return null
         })
+        return nodes
       }
 
       return h(
@@ -1933,6 +2178,18 @@ window.__ModuleLoader__.load({
                     { type: 'button', className: 'cc-set-btn', onClick: copyDialog },
                     '复制对话',
                   ),
+                  copyFlash
+                    ? h(
+                        'span',
+                        {
+                          className:
+                            'cc-set-msg' +
+                            (copyFlash === '已复制' ? ' ok' : ' err'),
+                          style: { alignSelf: 'center', margin: 0 },
+                        },
+                        copyFlash,
+                      )
+                    : null,
                 ),
               ),
               h('div', {

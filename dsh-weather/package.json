@@ -2,6 +2,10 @@
   "name": "@zhongruan/dsh-weather",
   "version": "0.1.0",
   "description": "DSH 天气查询插件（城市实况、简易预报）",
+  "dshMarket": {
+    "zh": "城市天气实况与未来几天预报",
+    "en": "City weather nowcast and short-term forecast"
+  },
   "type": "module",
   "main": "lib/index.js",
   "files": ["lib", "cordis.patch.yml"],
