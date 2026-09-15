@@ -35,16 +35,51 @@ export type ClarifyDecision =
       via: 'not_entry' | 'ask_user_answered' | 'message_evidence'
     }
 
+function asEventList(raw: unknown): SessionEventLike[] {
+  if (Array.isArray(raw)) return raw as SessionEventLike[]
+  if (raw && typeof raw === 'object' && Array.isArray((raw as { items?: unknown }).items)) {
+    return (raw as { items: SessionEventLike[] }).items
+  }
+  return []
+}
+
 /** 从 DSH execute(exec) 取出会话事件（session.events 是 getter）。 */
 export function extractSessionEvents(exec: unknown): SessionEventLike[] {
   if (!exec || typeof exec !== 'object') return []
   const e = exec as {
-    agent?: { session?: { events?: unknown } }
+    agent?: { session?: { events?: unknown }; events?: unknown }
     session?: { events?: unknown }
     events?: unknown
+    context?: { session?: { events?: unknown } }
   }
-  const raw = e.agent?.session?.events ?? e.session?.events ?? e.events
-  return Array.isArray(raw) ? (raw as SessionEventLike[]) : []
+  const candidates = [
+    e.agent?.session?.events,
+    e.session?.events,
+    e.events,
+    e.agent?.events,
+    e.context?.session?.events,
+  ]
+  for (const raw of candidates) {
+    const list = asEventList(raw)
+    if (list.length) return list
+  }
+  return []
+}
+
+function eventType(ev: SessionEventLike | undefined): string {
+  return String(ev?.type || '')
+}
+
+function isUserMessageType(t: string): boolean {
+  return t === 'user/message' || t === 'user.message' || t === 'user_message'
+}
+
+function isToolCallType(t: string): boolean {
+  return t === 'tool/call' || t === 'tool.call' || t === 'tool_call'
+}
+
+function isToolResultType(t: string): boolean {
+  return t === 'tool/result' || t === 'tool.result' || t === 'tool_result'
 }
 
 function isAskUserName(name: string): boolean {
@@ -114,47 +149,99 @@ function formatAskUserSummary(answers: AskUserAnswer[]): string {
   return parts.join('；')
 }
 
-/**
- * 本轮用户原话之后，是否已有成功的 ask_user_question 结果。
- * DSH 权威形状：tool/call.data.name + tool/result.data.message.source.callId 配对；
- * result 上没有 name。
- */
-export function readAskUserAfterLastUser(events: SessionEventLike[]): {
-  answered: boolean
-  answers: AskUserAnswer[]
-  summary: string
-} {
-  if (!Array.isArray(events) || !events.length) {
-    return { answered: false, answers: [], summary: '' }
-  }
-  let lastUserAt = -1
-  for (let i = 0; i < events.length; i++) {
-    if (events[i]?.type === 'user/message') lastUserAt = i
-  }
-  const start = lastUserAt >= 0 ? lastUserAt : 0
+function scanAskUser(
+  events: SessionEventLike[],
+  start: number,
+  end = events.length,
+): { answered: boolean; answers: AskUserAnswer[]; summary: string } {
   const askCallIds = new Set<string>()
   const answers: AskUserAnswer[] = []
   let answered = false
-
-  for (let i = start; i < events.length; i++) {
+  const lo = Math.max(0, start)
+  const hi = Math.min(events.length, end)
+  for (let i = lo; i < hi; i++) {
     const ev = events[i]
-    const data = ev?.data && typeof ev.data === 'object' ? ev.data : {}
-    if (ev?.type === 'tool/call') {
-      const name = String(data.name || '')
-      const callId = String(data.callId || '').trim()
+    const data = ev?.data && typeof ev.data === 'object' ? (ev.data as Record<string, unknown>) : {}
+    const t = eventType(ev)
+    if (isToolCallType(t)) {
+      const name = String(data.name || data.toolName || '')
+      const callId = String(data.callId || data.id || '').trim()
       if (callId && isAskUserName(name)) askCallIds.add(callId)
       continue
     }
-    if (ev?.type !== 'tool/result') continue
-    const callId = callIdFromResultData(data)
+    if (!isToolResultType(t)) continue
+    const callId = callIdFromResultData(data) || String(data.callId || '').trim()
     if (!callId || !askCallIds.has(callId)) continue
     if (data.error) continue
     answered = true
     const parsed = answersFromResultData(data)
     if (parsed.length) answers.push(...parsed)
   }
-
   return { answered, answers, summary: formatAskUserSummary(answers) }
+}
+
+function isIgnorableBeforeEcho(t: string): boolean {
+  if (isUserMessageType(t) || isToolCallType(t) || isToolResultType(t)) return false
+  return true
+}
+
+/**
+ * 仅当最后一条 user/message 紧挨着（中间只有思考等非 tool/user 事件）一次已成功的 ask_user 结果时，
+ * 才把它当成答题回声。禁止扫「上一条用户原话 → 本条」整段，否则续改会被上一轮选择题误放行。
+ */
+function readAskUserEchoJustBeforeLastUser(
+  events: SessionEventLike[],
+  lastUserAt: number,
+): { answered: boolean; answers: AskUserAnswer[]; summary: string } {
+  const empty = { answered: false, answers: [] as AskUserAnswer[], summary: '' }
+  if (lastUserAt <= 0) return empty
+  let i = lastUserAt - 1
+  while (i >= 0 && isIgnorableBeforeEcho(eventType(events[i]))) i--
+  if (i < 0 || !isToolResultType(eventType(events[i]))) return empty
+  const data =
+    events[i]?.data && typeof events[i].data === 'object'
+      ? (events[i].data as Record<string, unknown>)
+      : {}
+  if (data.error) return empty
+  const callId = callIdFromResultData(data)
+  if (!callId) return empty
+  for (let j = i - 1; j >= 0; j--) {
+    if (isUserMessageType(eventType(events[j]))) return empty
+    if (!isToolCallType(eventType(events[j]))) continue
+    const cd =
+      events[j]?.data && typeof events[j].data === 'object'
+        ? (events[j].data as Record<string, unknown>)
+        : {}
+    const id = String(cd.callId || cd.id || '').trim()
+    const name = String(cd.name || cd.toolName || '')
+    if (id === callId && isAskUserName(name)) return scanAskUser(events, j, i + 1)
+  }
+  return empty
+}
+
+/**
+ * 本轮用户原话之后，是否已有成功的 ask_user_question 结果。
+ * DSH 权威形状：tool/call.data.name + tool/result.data.message.source.callId 配对；
+ * result 上没有 name。
+ * 答完后宿主可能再插一条 user/message：只认「紧挨结果」的回声，不扫整段历史。
+ */
+export function readAskUserAfterLastUser(events: SessionEventLike[]): {
+  answered: boolean
+  answers: AskUserAnswer[]
+  summary: string
+} {
+  const empty = { answered: false, answers: [] as AskUserAnswer[], summary: '' }
+  if (!Array.isArray(events) || !events.length) return empty
+
+  let lastUserAt = -1
+  for (let i = 0; i < events.length; i++) {
+    if (isUserMessageType(eventType(events[i]))) lastUserAt = i
+  }
+  const start = lastUserAt >= 0 ? lastUserAt : 0
+  const found = scanAskUser(events, start)
+  if (found.answered) return found
+  if (lastUserAt > 0) return readAskUserEchoJustBeforeLastUser(events, lastUserAt)
+  return empty
 }
 
 export function mergeRequirementWithAskUser(message: string, summary: string): string {

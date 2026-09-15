@@ -28,7 +28,7 @@ export TODAY
 TODAY="$(date +%Y-%m-%d)"
 
 python3 <<'PY'
-import base64, hashlib, json, os, tarfile
+import base64, hashlib, json, os, re, tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +52,12 @@ def semver_key(v: str):
         except ValueError:
             parts.append(0)
     return tuple(parts)
+
+def is_artifact_version(ver: str) -> bool:
+    s = str(ver or "")
+    if ".." in s or "/" in s or "\\" in s:
+        return False
+    return bool(re.fullmatch(r"[0-9][0-9A-Za-z._+-]*", s))
 
 def find_artifact(name, prefer_version):
     if prefer_version:
@@ -141,36 +147,86 @@ for plugin_dir, src_meta in discover_plugin_dirs():
     else:
         scope, short = "", name
 
-    npm_pkg_dir = REG_DIR / "npm" / f"@{scope}" / short / "-"
-    npm_pkg_dir.mkdir(parents=True, exist_ok=True)
-    tgz_name = f"{short}-{version}.tgz"
-    dest = npm_pkg_dir / tgz_name
-    dest.write_bytes(artifact.read_bytes())
+    def publish_one(tgz_path, ver):
+        npm_pkg_dir = REG_DIR / "npm" / f"@{scope}" / short / "-"
+        npm_pkg_dir.mkdir(parents=True, exist_ok=True)
+        tgz_name = f"{short}-{ver}.tgz"
+        dest = (npm_pkg_dir / tgz_name).resolve()
+        if dest.parent != npm_pkg_dir.resolve():
+            raise RuntimeError(f"非法版本写入路径: {ver}")
+        dest.write_bytes(tgz_path.read_bytes())
+        blob = dest.read_bytes()
+        pkg = read_pkg_from_tgz(dest)
+        if str(pkg.get("name")) != name or str(pkg.get("version")) != ver:
+            raise RuntimeError(f"{dest.name} 内包名/版本与文件名不一致")
+        tarball_url = f"{NPM_BASE}/@{scope}/{short}/-/{tgz_name}"
+        ver_meta = dict(pkg)
+        ver_meta["dist"] = {
+            "tarball": tarball_url,
+            "shasum": hashlib.sha1(blob).hexdigest(),
+            "integrity": "sha512-"
+            + base64.b64encode(hashlib.sha512(blob).digest()).decode(),
+        }
+        ver_meta.pop("scripts", None)
+        ver_meta.pop("devDependencies", None)
+        return ver_meta, tarball_url
 
-    tgz = dest.read_bytes()
-    sha1 = hashlib.sha1(tgz).hexdigest()
-    integrity = "sha512-" + base64.b64encode(hashlib.sha512(tgz).digest()).decode()
-    tarball_url = f"{NPM_BASE}/@{scope}/{short}/-/{tgz_name}"
+    # Profile 常钉死旧版；packument 只留 latest 会 ERR_PNPM_NO_MATCHING_VERSION
+    by_ver = {version: artifact}
+    art_prefix = name.replace("@", "").replace("/", "-") + "-"
+    if ARTIFACTS.is_dir():
+        for p in ARTIFACTS.glob("*.tgz"):
+            if p.name.startswith(art_prefix) and p.name.endswith(".tgz"):
+                ver = p.name[len(art_prefix) : -4]
+                if is_artifact_version(ver):
+                    by_ver.setdefault(ver, p)
+    npm_hist = REG_DIR / "npm" / f"@{scope}" / short / "-"
+    if npm_hist.is_dir():
+        for p in npm_hist.glob(f"{short}-*.tgz"):
+            hist_ver = p.name[len(short) + 1 : -4]
+            if is_artifact_version(hist_ver):
+                by_ver.setdefault(hist_ver, p)
 
-    ver_meta = dict(meta)
-    ver_meta["dist"] = {
-        "tarball": tarball_url,
-        "shasum": sha1,
-        "integrity": integrity,
+    idx_path = REG_DIR / "npm" / f"@{scope}" / short / "index.json"
+    prev_pack = {}
+    if idx_path.is_file():
+        try:
+            prev_pack = json.loads(idx_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            prev_pack = {}
+    prev_time = prev_pack.get("time") if isinstance(prev_pack.get("time"), dict) else {}
+
+    versions = {}
+    time_map = {
+        "created": prev_time.get("created") or now_iso,
+        "modified": now_iso,
     }
-    ver_meta.pop("scripts", None)
-    ver_meta.pop("devDependencies", None)
+    tarball_url = ""
+    for ver in sorted(by_ver, key=semver_key):
+        try:
+            meta_v, url_v = publish_one(by_ver[ver], ver)
+        except Exception as e:
+            if ver == version:
+                raise
+            print(f"  跳过损坏历史包 {short}@{ver}: {e}", flush=True)
+            continue
+        versions[ver] = meta_v
+        time_map[ver] = prev_time.get(ver) or now_iso
+        if ver == version:
+            tarball_url = url_v
 
     packument = {
         "name": name,
         "dist-tags": {"latest": version},
-        "versions": {version: ver_meta},
-        "time": {"created": now_iso, "modified": now_iso, version: now_iso},
+        "versions": versions,
+        "time": time_map,
     }
-    (REG_DIR / "npm" / f"@{scope}" / short / "index.json").write_text(
+    idx_path.write_text(
         json.dumps(packument, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    if len(versions) > 1:
+        print(f"  保留历史版本: {', '.join(versions)}", flush=True)
 
     prev = prev_by_name.get(name) or {}
     entry = {

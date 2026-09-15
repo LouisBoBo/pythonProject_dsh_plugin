@@ -4,6 +4,8 @@ import { randomBytes } from 'node:crypto'
 import { loadConfig } from './config.js'
 import type { CursorCodingJob, JobStatus, StreamEvent } from './types.js'
 
+const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
+
 function jobsDir(): string {
   const cfg = loadConfig()
   const dir = join(cfg.dataRoot, 'jobs')
@@ -87,6 +89,10 @@ export function appendEvent(
 }
 
 export function setStatus(job: CursorCodingJob, status: JobStatus, detail?: string): CursorCodingJob {
+  // 终态不可改写：succeeded/failed 后再写 running 会把进度卡钉死在「写码中」
+  if (JOB_ENDED.includes(job.status) && job.status !== status) {
+    return loadJob(job.id) || job
+  }
   job.status = status
   if (detail !== undefined) job.detail = detail
   appendEvent(job, { type: 'status', status, message: detail || status })
@@ -200,8 +206,6 @@ export function patchJob(id: string, patch: Partial<CursorCodingJob>): CursorCod
 function sealedTranscript(job: CursorCodingJob): CursorCodingJob['transcript'] {
   return (job.transcript || []).map((it) => (it.streaming ? { ...it, streaming: false } : it))
 }
-
-const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
 
 /**
  * 用户取消：立刻终态。封住思考流，通知 SSE。

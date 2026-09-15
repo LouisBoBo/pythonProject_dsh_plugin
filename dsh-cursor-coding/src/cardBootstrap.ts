@@ -22,6 +22,40 @@ export function requirementsConflict(a: string, b: string): boolean {
   return na.slice(0, head) !== nb.slice(0, head)
 }
 
+/** 与 client.js TERMINAL_JOB 一致：业务终态 */
+export const TERMINAL_JOB_STATUS: Record<string, 1> = {
+  succeeded: 1,
+  failed: 1,
+  cancelled: 1,
+  blocked_no_runner: 1,
+}
+
+/**
+ * 卡片相位用的 Job 状态：工具结果终态优先于 session 缓存的 running。
+ * 禁止用 statusLabel 文案当 status。
+ */
+export function preferJobStatus(cacheStatus: string, uiStatus: string): string {
+  const cache = String(cacheStatus || '').trim()
+  const ui = String(uiStatus || '').trim()
+  if (TERMINAL_JOB_STATUS[ui]) return ui
+  if (TERMINAL_JOB_STATUS[cache]) return cache
+  if (ui === 'pending_review') return ui
+  if (cache === 'pending_review') return cache
+  return cache || ui
+}
+
+/**
+ * 本卡已对当前 job 封口后，运行中快照不得把相位打回「写码中」。
+ * 仍允许终态快照刷新过程区。
+ */
+export function shouldApplyJobSnapshot(opts: { sealedStatus?: string; incomingStatus: string }): boolean {
+  const sealed = String(opts.sealedStatus || '').trim()
+  const incoming = String(opts.incomingStatus || '').trim()
+  if (!TERMINAL_JOB_STATUS[sealed]) return true
+  if (TERMINAL_JOB_STATUS[incoming]) return true
+  return false
+}
+
 export function cardIdentity(opts: {
   callId?: string
   blockId?: string

@@ -809,8 +809,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           return
         }
         while (cursor < job.events.length) {
-          writeEv(job.events[cursor])
+          const ev = job.events[cursor]
           cursor += 1
+          // 账本 type=done 是同步完成记录，不是 SSE 封口。回放它会让前端在 snapshot 前关流，过程区变空。
+          if (ev && ev.type === 'done') continue
+          writeEv(ev)
         }
         writeEv({
           type: 'snapshot',

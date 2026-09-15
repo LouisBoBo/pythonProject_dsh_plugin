@@ -191,6 +191,25 @@ window.__ModuleLoader__.load({
       blocked_no_runner: 1,
     }
 
+    /** 与 cardBootstrap.preferJobStatus 一致：工具终态优先于缓存 running */
+    function preferJobStatus(cacheStatus, uiStatus) {
+      var cache = String(cacheStatus || '').trim()
+      var uiSt = String(uiStatus || '').trim()
+      if (TERMINAL_JOB[uiSt]) return uiSt
+      if (TERMINAL_JOB[cache]) return cache
+      if (uiSt === 'pending_review') return uiSt
+      if (cache === 'pending_review') return cache
+      return cache || uiSt
+    }
+
+    function shouldApplyJobSnapshot(sealedStatus, incomingStatus) {
+      var sealed = String(sealedStatus || '').trim()
+      var incoming = String(incomingStatus || '').trim()
+      if (!TERMINAL_JOB[sealed]) return true
+      if (TERMINAL_JOB[incoming]) return true
+      return false
+    }
+
     function sealTranscriptItems(items) {
       if (!Array.isArray(items)) return items
       return items.map(function (it) {
@@ -210,8 +229,10 @@ window.__ModuleLoader__.load({
 
     function toolBlockSettled(block) {
       if (!block) return false
-      // 仅认明确终态；禁止「有 kind 就算 settled」（进行中的 tool-call 也会带 kind）
-      if (block.kind === 'tool-result') return true
+      var kind = String(block.kind || '')
+      // 进行中的 tool-call 即使残留旧 result 也不算本跳终态
+      if (kind === 'tool-call' || kind === 'tool.call') return false
+      if (kind === 'tool-result' || kind === 'tool.result') return true
       if (block.isError === true) return true
       if (block.result || block.value) return true
       return false
@@ -810,9 +831,11 @@ window.__ModuleLoader__.load({
 
     function readAwaitAskUser(props) {
       try {
+        var block = props && props.block
+        // 本跳仍在执行（阻塞确认卡）：禁止用上一跳 need_clarify 把确认卡藏掉
+        if (block && !toolBlockSettled(block)) return false
         var ui0 = readUiFromProps(props) || {}
         if (ui0.kind === 'await_ask_user' || ui0.kind === 'clarify') return true
-        var block = props && props.block
         var value = block && (block.result || block.value || block.output)
         if (value && (value.need_clarify === true || value.need_clarify === 'true')) return true
         if (props && props.result && props.result.need_clarify) return true
@@ -905,8 +928,8 @@ window.__ModuleLoader__.load({
       var detached = detachStaleJobUi(uiRaw, argsMsg, lastUser)
       var ui = detached.ui
       var staleReuse = detached.stale
-      // 须澄清：只认服务端 need_clarify / await_ask_user。禁止靠文案猜，否则会把已阻塞的确认卡藏掉。
-      if (readAwaitAskUser(props) || ui.kind === 'await_ask_user' || ui.kind === 'clarify') {
+      // 须澄清：只认「本跳已终态」的 need_clarify / await_ask_user。进行中的 begin 必须出确认卡。
+      if (readAwaitAskUser(props)) {
         return null
       }
       var initialWs = resolveDshCwd(props) || String(ui.workspace || '').trim()
@@ -926,10 +949,9 @@ window.__ModuleLoader__.load({
       var setConfirmToken = tokenState[1]
       var jobIdInit = staleReuse ? '' : String(ui.job_id || '').trim()
       var cache0 = jobIdInit ? loadSessionCache(jobIdInit) : null
-      // 相位：优先缓存/服务终态；禁止刷新时用陈旧 ui.status=queued 误判成「刚开跑」
-      var statusInit = String(
-        (cache0 && cache0.status) || ui.status || (cache0 && cache0.statusLabel) || '',
-      ).trim()
+      // 相位：工具结果终态优先于缓存 running。禁止用 statusLabel 文案当 status。
+      var statusInit = preferJobStatus((cache0 && cache0.status) || '', (ui && ui.status) || '')
+      if (!statusInit && cache0 && cache0.phase === 'done') statusInit = 'succeeded'
       var detailInit = String((cache0 && cache0.detail) || ui.detail || '').trim()
       var phaseInit = jobIdInit
         ? phaseFromJobStatus(statusInit || (cache0 && cache0.phase) || 'running', detailInit, -1)
@@ -988,6 +1010,11 @@ window.__ModuleLoader__.load({
       var identityRef = useRef('')
       var identity = cardIdentity(props, argsMsg, ui.confirm_token)
       var cancelOnceRef = useRef(false)
+      // 当前 job 已封口的权威 status；禁止晚到的 running 快照把卡打回「写码中」
+      var sealedStatusRef = useRef(
+        jobIdInit && TERMINAL_JOB[statusInit] ? statusInit : '',
+      )
+      var emptyDonePullRef = useRef('')
 
       function hardResetToConfirm(nextReq) {
         try {
@@ -999,6 +1026,8 @@ window.__ModuleLoader__.load({
         dialogPinRef.current = false
         stickBottomRef.current = false
         cancelOnceRef.current = false
+        sealedStatusRef.current = ''
+        emptyDonePullRef.current = ''
         setJobId('')
         setPhase('form')
         setBusy(false)
@@ -1256,15 +1285,62 @@ window.__ModuleLoader__.load({
             if (!cancelOnceRef.current) onCancelTask()
             return
           }
+          if (cancelOnceRef.current) return
+          if (phase === 'done' && sealedStatusRef.current) return
+          var value =
+            (block && (block.result || block.value || block.output)) || (props && props.result) || null
+          var vJob = String(
+            (value && (value.job_id || (value.cursor_coding_ui && value.cursor_coding_ui.job_id))) || '',
+          ).trim()
+          var vSt = String(
+            (value && (value.status || (value.cursor_coding_ui && value.cursor_coding_ui.status))) || '',
+          ).trim()
+          var uiJid = String((ui && ui.job_id) || '').trim()
+          var uiSt = String((ui && ui.status) || '').trim()
+          var sameJob = function (id) {
+            return jobId && id && String(id) === String(jobId)
+          }
+          // 只认工具结果/presentationMeta 的 status 字段。进行中 leftover 无 done=true，不会误封。
+          if (jobId && value && value.done === true && sameJob(vJob) && (TERMINAL_JOB[vSt] || vSt === 'pending_review')) {
+            applyJobSnapshot({
+              id: jobId,
+              status: vSt,
+              detail: String((value && value.detail) || ''),
+              review_in_scope: value.cursor_coding_ui && value.cursor_coding_ui.review_in_scope,
+              review_deleted: value.cursor_coding_ui && value.cursor_coding_ui.review_deleted,
+              review_deferred: value.cursor_coding_ui && value.cursor_coding_ui.review_deferred,
+            })
+            reconcileJob(jobId)
+            return
+          }
+          if (sameJob(uiJid) && (TERMINAL_JOB[uiSt] || uiSt === 'pending_review')) {
+            applyJobSnapshot({
+              id: jobId,
+              status: uiSt,
+              detail: String((ui && ui.detail) || ''),
+              review_in_scope: ui.review_in_scope,
+              review_deleted: ui.review_deleted,
+              review_deferred: ui.review_deferred,
+            })
+            reconcileJob(jobId)
+            return
+          }
           if (toolBlockSettled(block) && phase === 'running' && jobId) {
             reconcileJob(jobId)
           }
         },
-        [props && props.block, phase, jobId],
+        [props && props.block, props && props.result, ui && ui.status, ui && ui.job_id, phase, jobId],
       )
 
       function applyJobSnapshot(job) {
         if (!job) return
+        var incomingId = String(job.id || '').trim()
+        var liveId = String(jobId || '').trim()
+        if (incomingId && liveId && incomingId !== liveId) return
+        var st = String(job.status || '')
+        if (!shouldApplyJobSnapshot(sealedStatusRef.current, st)) {
+          return
+        }
         if (cancelOnceRef.current) {
           setTranscript(function (prev) {
             var src = Array.isArray(job.transcript) && job.transcript.length ? job.transcript : prev
@@ -1278,11 +1354,11 @@ window.__ModuleLoader__.load({
           stickBottomRef.current = false
           return
         }
-        var st = String(job.status || '')
         var detail = String(job.detail || '')
         var inScopeLen = Array.isArray(job.review_in_scope) ? job.review_in_scope.length : -1
         var nextPhase = phaseFromJobStatus(st, detail, inScopeLen)
         var nextLabel = labelFromJobStatus(st, detail, inScopeLen)
+        if (TERMINAL_JOB[st]) sealedStatusRef.current = st
         if (nextPhase === 'done') {
           setPhase('done')
           setStatusLabel(nextLabel || '已完成')
@@ -1465,19 +1541,25 @@ window.__ModuleLoader__.load({
             }
             if (data.type === 'done') {
               var dst = String(data.status || 'done')
+              // 只认 SSE 封口（带 job_id）。账本回放的 done 只有 message，提前关流会丢掉 snapshot 过程片段。
+              if (!String(data.job_id || '').trim() || String(data.job_id) !== String(jid)) {
+                if (data.message) appendStream(String(data.message))
+                return
+              }
               appendStream('— 流结束：' + dst)
               setTranscript(function (prev) {
                 return sealTranscriptItems(prev)
               })
               if (dst === 'succeeded' || dst === 'failed' || dst === 'cancelled') {
+                sealedStatusRef.current = dst
                 setPhase('done')
                 setStatusLabel(dst === 'succeeded' ? '已完成' : dst === 'failed' ? '失败' : '已取消')
-              } else {
-                reconcileJob(jid)
               }
+              reconcileJob(jid)
               try {
                 es.close()
               } catch (e2) {}
+              if (esRef.current === es) esRef.current = null
               return
             }
             if (data.type === 'error') appendStream('错误：' + (data.message || ''))
@@ -1504,6 +1586,38 @@ window.__ModuleLoader__.load({
           }
         },
         [phase, jobId],
+      )
+
+      // 已完成但过程区为空：回拉账本 transcript（刷新/SSE 误关流时必补）
+      useEffect(
+        function () {
+          if (phase !== 'done' || !jobId) return
+          if (transcript && transcript.length) {
+            emptyDonePullRef.current = jobId
+            return
+          }
+          if (emptyDonePullRef.current === jobId) return
+          emptyDonePullRef.current = jobId
+          var n = 0
+          var timer = 0
+          var stopped = false
+          var expectId = String(jobId)
+          function pull() {
+            if (stopped) return
+            n += 1
+            reconcileJob(expectId).then(function (job) {
+              if (stopped) return
+              if (job && Array.isArray(job.transcript) && job.transcript.length) return
+              if (n < 5) timer = setTimeout(pull, 700)
+            })
+          }
+          pull()
+          return function () {
+            stopped = true
+            if (timer) clearTimeout(timer)
+          }
+        },
+        [phase, jobId, transcript && transcript.length],
       )
 
       function togglePath(path) {

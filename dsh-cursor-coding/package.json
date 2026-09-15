@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-cursor-coding",
-  "version": "0.6.44",
+  "version": "0.6.48",
   "description": "主流程冻结；会话认 DSH、执行认本机 Job（见 docs/架构与选型/DSH会话与记忆分层.md）",
   "dshMarket": {
     "zh": "Cursor 写码：澄清需求、确认后沙箱改代码、同步回工程、正文结论",

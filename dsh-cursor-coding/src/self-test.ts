@@ -18,7 +18,9 @@ import { inferSparseBeforeAfter, diffSnapshots, prepareSandboxForJob, prepareSan
 import {
   cardIdentity,
   detachStaleJobUi,
+  preferJobStatus,
   requirementsConflict,
+  shouldApplyJobSnapshot,
 } from './cardBootstrap.js'
 import { buildLiveEditSnippet, previewFileSnippet } from './editSnippet.js'
 import {
@@ -35,7 +37,7 @@ import {
   snippetFromTextDiff,
   normalizeStatusDisplay,
 } from './transcript.js'
-import { createJob, findLatestJobForSession, loadJob, patchJob, setStatus } from './jobs.js'
+import { appendEvent, createJob, findLatestJobForSession, loadJob, patchJob, setStatus } from './jobs.js'
 import {
   hasClarifyEvidence,
   looksLikeFollowUp,
@@ -221,6 +223,54 @@ async function main() {
         }).action === 'block',
         '只出题未作答仍须拦',
       )
+      const echoEvents = events.concat([
+        { type: 'user/message', data: { message: { content: '菜单入口 + 对应页面文件/路由' } } },
+      ])
+      assert(readAskUserAfterLastUser(echoEvents).answered === true, '紧挨结果的答题回声仍算已答完')
+      assert(
+        decideCodingGate({ message: orig, clarified: true, events: echoEvents }).action === 'pass',
+        '答题回声后须出确认卡',
+      )
+      const followUpEvents = echoEvents.concat([
+        { type: 'tool/call', data: { callId: 'begin1', name: 'zr_cursor_begin', arguments: '{}' } },
+        {
+          type: 'tool/result',
+          data: { message: { source: { kind: 'tool', callId: 'begin1' }, content: [] } },
+        },
+        { type: 'user/message', data: { message: { content: '报表中心再新增一个考勤汇总页' } } },
+      ])
+      assert(
+        readAskUserAfterLastUser(followUpEvents).answered === false,
+        '续改新原话不得沿用上一轮选择题',
+      )
+      assert(
+        decideCodingGate({
+          message: '报表中心再新增一个考勤汇总页',
+          clarified: true,
+          events: followUpEvents,
+        }).action === 'block',
+        '入口级续改仍须重新澄清',
+      )
+      const aliasEvents = [
+        { type: 'user.message', data: {} },
+        { type: 'tool.call', data: { callId: 'c2', name: 'ask_user_question', arguments: '{}' } },
+        {
+          type: 'tool.result',
+          data: {
+            callId: 'c2',
+            message: {
+              source: { callId: 'c2' },
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ answers: [{ id: 'scope', selected: ['仅菜单'] }] }),
+                },
+              ],
+            },
+          },
+        },
+      ]
+      assert(readAskUserAfterLastUser(aliasEvents).answered === true, 'tool.call 别名应配对')
     }
     assert(
       !needsRequirementClarify(
@@ -397,6 +447,19 @@ async function main() {
     )
     console.log('ok: card bootstrap anti-stale')
     {
+      assert(preferJobStatus('running', 'succeeded') === 'succeeded', '工具终态须压过缓存 running')
+      assert(preferJobStatus('succeeded', 'queued') === 'succeeded', '缓存终态须压过陈旧 queued')
+      assert(preferJobStatus('running', '') === 'running', '仅缓存时保持 running')
+      assert(preferJobStatus('pending_review', 'running') === 'pending_review', 'pending_review 优先于 running')
+      assert(shouldApplyJobSnapshot({ sealedStatus: 'succeeded', incomingStatus: 'running' }) === false, '封口后忽略 running 快照')
+      assert(shouldApplyJobSnapshot({ sealedStatus: 'succeeded', incomingStatus: 'succeeded' }) === true, '终态快照仍可刷新')
+      assert(shouldApplyJobSnapshot({ sealedStatus: '', incomingStatus: 'running' }) === true, '未封口须吃 running')
+      const ended = createJob({ workspace, requirement: '终态不可回写' })
+      setStatus(ended, 'succeeded', 'ok')
+      setStatus(loadJob(ended.id)!, 'running', '不得打回写码中')
+      assert(loadJob(ended.id)?.status === 'succeeded', 'succeeded 后禁止再写 running')
+    }
+    {
       const dir = mkdtempSync(join(tmpdir(), 'cc-sparse-'))
       const ws = join(dir, 'ws')
       const sb = join(dir, 'sb')
@@ -474,6 +537,50 @@ async function main() {
       assert(hj.compat && hj.compat.ok === true, 'health.compat.ok 应为 true')
       assert(hj.pluginVersion, 'health 应含 pluginVersion')
       console.log('ok: compat + health', hj.serverMode || '?', hj.pluginVersion)
+    }
+
+    {
+      const j = createJob({ workspace, requirement: 'sse-replay-done' })
+      patchJob(j.id, {
+        transcript: [
+          {
+            id: 'tr-1',
+            kind: 'assistant',
+            at: new Date().toISOString(),
+            text: '过程片段',
+          },
+        ],
+      })
+      setStatus(loadJob(j.id)!, 'succeeded', 'ok')
+      appendEvent(loadJob(j.id)!, { type: 'done', status: 'succeeded', message: '已同步 1 个文件' })
+      const ac = new AbortController()
+      const killer = setTimeout(() => ac.abort(), 4000)
+      const streamRes = await fetch(base + '/api/cursor-coding/jobs/' + encodeURIComponent(j.id) + '/stream', {
+        signal: ac.signal,
+      })
+      const raw = await streamRes.text()
+      clearTimeout(killer)
+      const payloads: { type?: string; job_id?: string; transcript?: unknown[] }[] = []
+      for (const block of raw.split('\n\n')) {
+        const line = block.trim()
+        if (!line.startsWith('data:')) continue
+        try {
+          payloads.push(JSON.parse(line.slice(5).trim()) as (typeof payloads)[number])
+        } catch {
+          /* skip */
+        }
+      }
+      const dones = payloads.filter((p) => p.type === 'done')
+      assert(
+        dones.length >= 1 && dones.every((d) => d.job_id === j.id),
+        'SSE 不得回放无 job_id 的账本 done，实际=' + JSON.stringify(dones),
+      )
+      const snap = payloads.find((p) => p.type === 'snapshot')
+      assert(snap && Array.isArray(snap.transcript) && snap.transcript.length === 1, 'snapshot 须带回过程片段')
+      const snapAt = payloads.findIndex((p) => p.type === 'snapshot')
+      const termAt = payloads.findIndex((p) => p.type === 'done' && p.job_id === j.id)
+      assert(snapAt >= 0 && termAt > snapAt, '封口 done 必须在 snapshot 之后')
+      console.log('ok: sse replay skips ledger done')
     }
 
     // 会话隔离：同一工作区两张卡不得互相抢 pending / 已开工 job
