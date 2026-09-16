@@ -1,0 +1,93 @@
+{
+  "name": "@zhongruan/dsh-knowledge",
+  "version": "1.0.4",
+  "description": "中软知识库：导入 Markdown / 纯文本 / PDF / Word 为可检索知识文档",
+  "dshMarket": {
+    "zh": "知识库：挂载召回、文档管理，支持导入 md/txt/pdf/docx",
+    "en": "Knowledge base with recall, plus md/txt/pdf/docx import into searchable entries"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "knowledge-base",
+    "memory",
+    "rag",
+    "sqlite",
+    "web-ui"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "lib/**/*.map",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "web/**/*",
+    "docs/**/*.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "node --check web/app.js && node --check web/knowledge-import.js && node --check web/api-client.js && node --check lib/knowledge-file-extract.js && node --check lib/knowledge-originals.js && node --check lib/docx-preview-page.js",
+    "test": "node --test test/*.test.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "mammoth": "^1.12.3",
+    "marked": "^18.0.10",
+    "pdfjs-dist": "^6.3.289",
+    "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "http://175.178.238.31/dsh-plugins/npm/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LouisBoBo/pythonProject_dsh_plugin.git"
+  },
+  "homepage": "https://github.com/LouisBoBo/pythonProject_dsh_plugin#readme"
+}

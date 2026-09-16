@@ -1,0 +1,125 @@
+import { type NoteExcerptRequest } from './note-excerpt.js';
+import { type CandidateProposal, type CandidateBatchReviewResult, type ApiTokenRecord, type ExtractionJobCompletion, type ExtractionJobRecord, type KnowledgeCandidate, type KnowledgeBase, type KnowledgeBaseDraft, type KnowledgeBasePatch, type KnowledgeDraft, type KnowledgeEntry, type KnowledgeDocument, type KnowledgeDocumentIndexRequest, type KnowledgeDocumentIndexResult, type KnowledgeStats, type KnowledgeVersion, type KnowledgeMount, type KnowledgeMountBatch, type KnowledgeMountBatchResult, type KnowledgeMountDraft, type KnowledgeMountTargetKind, type KnowledgeSettings, type KnowledgeSettingsPatch, type ResolvedKnowledgeMount, type DirectWriteResult, type ListRequest, type ListResult, type ReviewDecision, type SearchHit, type SearchRequest, type TokenPermission } from './domain.js';
+import type { KnowledgeProvider } from './provider.js';
+import { NoteStore } from './notes/store.js';
+import { type KnowledgeNoteReference, type KnowledgeNoteReferenceSource, type NoteListRequest, type NoteNode, type NoteReference, type NoteVersion } from './notes/domain.js';
+export declare class LocalKnowledgeProvider implements KnowledgeProvider {
+    readonly mode: "local";
+    readonly notes: NoteStore;
+    private readonly db;
+    private readonly documentStore;
+    private readonly documentsReady;
+    private batchReviewTail;
+    private closed;
+    constructor(path: string);
+    private assertOpen;
+    writebackProtocol(): Promise<{
+        idempotentDirectWrites: boolean;
+    }>;
+    getSettings(): Promise<KnowledgeSettings>;
+    updateSettings(input: KnowledgeSettingsPatch): Promise<KnowledgeSettings>;
+    listKnowledgeBases(): Promise<KnowledgeBase[]>;
+    getKnowledgeBase(id: string): Promise<KnowledgeBase | undefined>;
+    createKnowledgeBase(input: KnowledgeBaseDraft): Promise<KnowledgeBase>;
+    updateKnowledgeBase(id: string, input: KnowledgeBaseDraft): Promise<KnowledgeBase>;
+    patchKnowledgeBase(id: string, patch: KnowledgeBasePatch): Promise<KnowledgeBase>;
+    assignKnowledgeBaseGroup(ids: string[], value: string): Promise<KnowledgeBase[]>;
+    archiveKnowledgeBase(id: string): Promise<KnowledgeBase>;
+    restoreKnowledgeBase(id: string): Promise<KnowledgeBase>;
+    deleteKnowledgeBase(id: string): Promise<void>;
+    listDocuments(knowledgeBaseId?: string, query?: string): Promise<KnowledgeDocument[]>;
+    listDocumentIndex(request: KnowledgeDocumentIndexRequest): Promise<KnowledgeDocumentIndexResult>;
+    getDocument(id: string): Promise<KnowledgeDocument | undefined>;
+    listMounts(targetKind?: KnowledgeMountTargetKind, targetId?: string): Promise<KnowledgeMount[]>;
+    upsertMount(input: KnowledgeMountDraft): Promise<KnowledgeMount>;
+    applyMountBatch(batch: KnowledgeMountBatch): Promise<KnowledgeMountBatchResult>;
+    private upsertMountRow;
+    deleteMount(id: string): Promise<void>;
+    resolveMounts(sessionId: string, projectId?: string): Promise<ResolvedKnowledgeMount[]>;
+    stats(): Promise<KnowledgeStats>;
+    private transaction;
+    search(request: SearchRequest): Promise<SearchHit[]>;
+    private searchByTerms;
+    list(request: ListRequest): Promise<ListResult<KnowledgeEntry>>;
+    get(id: string): Promise<KnowledgeEntry | undefined>;
+    /** Management-only bulk lookup used to avoid one HTTP/SQL round trip per review target. */
+    entriesByIds(ids: string[]): KnowledgeEntry[];
+    versions(id: string): Promise<KnowledgeVersion[]>;
+    create(draft: KnowledgeDraft): Promise<KnowledgeEntry>;
+    /** Content, reference, and retry receipt share one SQLite transaction. */
+    excerptNote(input: NoteExcerptRequest): Promise<KnowledgeEntry>;
+    private insertEntry;
+    update(id: string, draft: KnowledgeDraft, _signal?: AbortSignal, expectedVersion?: number): Promise<KnowledgeEntry>;
+    finalize(id: string, state: 'resolved' | 'complete', note?: string): Promise<KnowledgeEntry>;
+    private finalizeEntry;
+    reopen(id: string): Promise<KnowledgeEntry>;
+    moveDocument(id: string, knowledgeBaseId: string): Promise<KnowledgeEntry>;
+    private updateEntry;
+    archive(id: string): Promise<KnowledgeEntry>;
+    delete(id: string): Promise<void>;
+    listNotes(request?: NoteListRequest): Promise<NoteNode[]>;
+    getNote(id: string): Promise<NoteNode | undefined>;
+    readNote(id: string): Promise<{
+        node: NoteNode;
+        content: Uint8Array;
+    }>;
+    listNoteVersions(id: string, limit?: number): Promise<NoteVersion[]>;
+    readNoteVersion(id: string, version: number): Promise<{
+        node: NoteNode;
+        version: NoteVersion;
+        content: Uint8Array;
+    }>;
+    restoreNoteVersion(id: string, version: number, expectedVersion?: number): Promise<NoteNode>;
+    createNoteFolder(name: string, parentId?: string | null): Promise<NoteNode>;
+    createNoteDocument(name: string, parentId?: string | null, content?: string): Promise<NoteNode>;
+    updateNoteContent(id: string, content: Uint8Array, _signal?: AbortSignal, expectedVersion?: number): Promise<NoteNode>;
+    renameNote(id: string, name: string): Promise<NoteNode>;
+    moveNote(id: string, parentId: string | null): Promise<NoteNode>;
+    deleteNote(id: string): Promise<void>;
+    searchNotes(query: string, limit: number): Promise<NoteNode[]>;
+    listKnowledgeNoteReferences(knowledgeId: string): Promise<KnowledgeNoteReference[]>;
+    addKnowledgeNoteReference(knowledgeId: string, noteId: string, source: KnowledgeNoteReferenceSource, sourceSessionId?: string): Promise<KnowledgeNoteReference>;
+    deleteKnowledgeNoteReference(knowledgeId: string, noteId: string): Promise<void>;
+    noteReferencesForNotes(noteIds: string[]): NoteReference[];
+    /** Compatibility path for manually embedded legacy note:// markers. */
+    legacyNoteReferencesForNotes(noteIds: string[]): NoteReference[];
+    deleteNoteReferences(noteIds: string[]): void;
+    propose(input: CandidateProposal, sourceKey?: string): Promise<KnowledgeCandidate>;
+    writeDirect(input: CandidateProposal, sourceKey?: string): Promise<DirectWriteResult>;
+    private insertCandidate;
+    private resolveDirectProposal;
+    private finalizedMatch;
+    private activeEntry;
+    private activeEntriesForDraft;
+    listCandidates(status: 'pending' | 'approved' | 'rejected', limit: number): Promise<KnowledgeCandidate[]>;
+    review(id: string, decision: ReviewDecision): Promise<KnowledgeCandidate>;
+    approvePendingBatch(limit: number, excludeIds?: string[]): Promise<CandidateBatchReviewResult>;
+    claimExtraction(sourceKey: string): Promise<boolean>;
+    completeExtraction(sourceKey: string, value: ExtractionJobCompletion | number): Promise<void>;
+    failExtraction(sourceKey: string, error: string): Promise<void>;
+    resetExtraction(sourceKey: string): Promise<void>;
+    extractionJob(sourceKey: string): Promise<ExtractionJobRecord | undefined>;
+    ensureBootstrapToken(token: string): void;
+    authenticate(token: string): ApiTokenRecord | undefined;
+    createApiToken(name: string, permissions: TokenPermission[]): {
+        record: ApiTokenRecord;
+        token: string;
+    };
+    listApiTokens(): ApiTokenRecord[];
+    revokeApiToken(id: string): void;
+    deleteApiToken(id: string): void;
+    close(): Promise<void>;
+    private writeVersion;
+    private upsertFts;
+    private syncAllDocuments;
+    private enqueueDocumentSync;
+    private syncKnowledgeDocumentsQueued;
+    private syncKnowledgeBaseManifestQueued;
+    private syncKnowledgeEntryQueued;
+    /** Keep the derived Markdown projection proportional to one changed entry. */
+    private syncKnowledgeEntry;
+    private removeProjectedDocument;
+    private upsertProjectedDocument;
+    private syncKnowledgeDocuments;
+}
+//# sourceMappingURL=local-provider.d.ts.map

@@ -1,0 +1,1 @@
+{"version":3,"file":"activity-control.d.ts","sourceRoot":"","sources":["../src/activity-control.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,iBAAiB,EAAE,MAAM,eAAe,CAAA;AACtD,OAAO,KAAK,EAAE,kBAAkB,EAAE,MAAM,cAAc,CAAA;AAGtD,eAAO,MAAM,uBAAuB,mCAAmC,CAAA;AAGvE,yEAAyE;AACzE,wBAAgB,gCAAgC,CAC9C,GAAG,EAAE,kBAAkB,EACvB,QAAQ,EAAE,iBAAiB,GAC1B,MAAM,IAAI,CAUZ"}

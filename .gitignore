@@ -11,6 +11,9 @@ dist/
 .DS_Store
 *.swp
 
+# plugin test scratch
+.test-tmp/
+
 # local env / secrets
 .plugin_env/
 .env

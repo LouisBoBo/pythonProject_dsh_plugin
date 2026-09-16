@@ -1,0 +1,1 @@
+{"version":3,"file":"control.d.ts","sourceRoot":"","sources":["../../src/writeback/control.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,kBAAkB,EAAE,MAAM,eAAe,CAAA;AACvD,OAAO,KAAK,EAAE,cAAc,EAAE,MAAM,YAAY,CAAA;AAEhD,oFAAoF;AACpF,wBAAgB,wBAAwB,CAAC,GAAG,EAAE,kBAAkB,EAAE,KAAK,EAAE,cAAc,GAAG,SAAS,GAAG,CAAC,MAAM,IAAI,CAAC,GAAG,SAAS,CA4B7H"}
