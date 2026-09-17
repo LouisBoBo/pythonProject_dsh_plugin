@@ -1,0 +1,9 @@
+# 只做 llm/stream 计量，无 UI、不改其它插件。
+# eventsPath 给 WorkBuddy ingest 只读；卸载本插件不影响聊天/知识库/记忆。
+- insert:
+    - id: llm-meter
+      name: '@zhongruan/dsh-llm-meter'
+      config:
+        enabled: true
+        eventsPath: !!js dshHomePath('llm-meter/events.jsonl')
+        maxFileBytes: 52428800

@@ -12,6 +12,8 @@ docs/
 ├── 05-功能使用手册说明/       ← 使用向手册归档（可与各主题手册交叉引用）
 ├── 06-复盘总结/               ← 联调收口后的复盘（弯路、定稿、排障）
 ├── 07-周报/                   ← 面向领导的周报归档
+├── 08-知识库/                 ← 知识库插件开发指导
+├── 09-自动化任务/             ← 定时模板 + 自定义任务独立插件
 └── 架构与选型/                ← 宿主会话/记忆分层等跨仓定稿（与 WorkBuddy 对齐）
 ```
 
@@ -29,7 +31,7 @@ docs/
 | [dsh-pcb-helper-上线安装设计.md](./01-插件开发与市场/dsh-pcb-helper-上线安装设计.md) | 预装/清单型方案（与市场方案互补） |
 | [workbuddy-插件安装卡在gh-proxy.md](./01-插件开发与市场/workbuddy-插件安装卡在gh-proxy.md) | 市场安装卡在 gh-proxy 的原因与修复 |
 
-**仓库内示例插件：** `dsh-pcb-helper`、`dsh-weather`、`dsh-pcb-8d`、`dsh-remote-review`、`dsh-cursor-coding`  
+**仓库内示例插件：** `dsh-pcb-8d`、`dsh-remote-review`、`dsh-cursor-coding`、`dsh-knowledge`、`dsh-llm-meter`（`dsh-pcb-helper` / `dsh-weather` 已下架删除）  
 **发布脚本：** `scripts/internal-market/`（`pack.sh` / `upload.sh` / …）
 
 ---
@@ -102,7 +104,18 @@ docs/
 
 ---
 
-## 7. 架构与选型 → [`架构与选型/`](./架构与选型/)
+## 7. 自动化任务 → [`09-自动化任务/`](./09-自动化任务/)
+
+> 独立 DSH 插件（建议 `@zhongruan/dsh-automations`），**零改** WorkBuddy。  
+> 对照：腾讯 WorkBuddy Automations + simplified-workbuddy 功能 11（模板墙 / RRULE / 企微）。
+
+| 文档 | 说明 | 状态 |
+| --- | --- | --- |
+| [自动化任务插件-完整实施方案.md](./09-自动化任务/自动化任务插件-完整实施方案.md) | **主方案**：模板 + 自定义、调度执行、面板与对话工具、分期验收 | 方案定稿待开发 |
+
+---
+
+## 8. 架构与选型 → [`架构与选型/`](./架构与选型/)
 
 | 文档 | 说明 |
 | --- | --- |
@@ -110,7 +123,7 @@ docs/
 
 ---
 
-## 8. 相关脚本（仓库根，非 docs）
+## 9. 相关脚本（仓库根，非 docs）
 
 | 路径 | 用途 |
 | --- | --- |

@@ -1,0 +1,44 @@
+---
+description: 【LOCKED】LLM 用量计量口径硬冻结——无用户明确允许禁止改公式/入库/双计
+alwaysApply: true
+---
+
+# LLM 用量计量口径硬冻结（LOCKED）
+
+> **冻结日**：2026-09-17。本机用量页已与 DeepSeek 控制台对齐验收。  
+> **破窗**：**仅当用户在本对话明确允许**改计量规则；改代码前须先改本文件。  
+> **展示/汇总权威**：WorkBuddy `engine/app/usage/`（同口径规则：`DSH-ZR-WorkBuddy/.cursor/rules/workbuddy-usage-metering-locked.mdc`）。
+
+擅自改 = 事故。官网刷新延迟 **不是**改公式的理由。
+
+## 禁止改（无允许一律拒绝）
+
+- `dsh-llm-meter/src/usage.ts` 的分项与合计算法  
+- 插件 schema `v:1` 字段名、`source` 枚举、jsonl 路径  
+- waterfall：禁止改写请求、禁止因记账失败打断 `llm/stream`  
+- 引擎 `_event_parts` / `ingest_llm_meter._tokens_from_row` / session 补采 cutoff  
+- 为「再贴近官网」二次削数、加权缓存、或并行另一套合计  
+- 删本规则、改 `alwaysApply: false`
+
+## 写死口径（与控制台 Tokens 对齐）
+
+| 项 | 规则 |
+|---|---|
+| `prompt_tokens` 与 `cache_read` | **互斥分列**（未命中≈input，命中≈cacheRead） |
+| 展示「输出」 | **仅** `completion` / `outputTokens` |
+| `reasoning` | **只明细**；**不加** `total`；**不并进**「输出」 |
+| 卡片 Token | 有供应商 `totalTokens` 用原样；否则 `input + output + cacheRead + cacheWrite`；须 = 命中 + 未命中 + 输出 |
+
+引擎 ingest 若发现插件 `total = 分项 + reasoning`，按上式纠正。禁止再把 reasoning 加回合计。
+
+## 入库 / 双计（引擎）
+
+1. 账本只有一本：`engine/data/usage/events.jsonl`。  
+2. 宿主 `llm/stream` → meter jsonl → 只读 ingest（`job_id=meter id`，归当前登录账号）。  
+3. 引擎直连（PCB/审码等）自己 `append_event`，不走 meter。  
+4. meter 启用后：只补采 **首条 meter 同一秒之前** 的 session/memory/title；禁止叠记。  
+5. 自然日 = **Asia/Shanghai**（禁止 UTC `ts[:10]` 错日）。
+
+## 允许（无需破窗）
+
+排障只读、修崩溃/安全、补测试且**不改口径**、UI 注明「官网可能延迟」。
