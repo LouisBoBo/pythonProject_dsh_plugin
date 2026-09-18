@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-automations",
-  "version": "0.1.1",
-  "description": "DSH 自动化任务：模板或自定义指令定时执行只读汇总，可选推企微",
+  "version": "0.1.30",
+  "description": "DSH 自动化任务：模板或自定义指令定时执行只读汇总，可选推企微、写入飞书/语雀文档",
   "dshMarket": {
-    "zh": "自动化任务：模板一键建或自定义指令，定时执行只读汇总并可选推企微",
-    "en": "Scheduled automations: templates or custom prompts, read-only summaries, optional WeCom push"
+    "zh": "自动化任务：模板一键建或自定义指令，定时执行只读汇总，可选推企微、每天新建飞书或语雀文档",
+    "en": "Scheduled automations: templates or custom prompts, read-only summaries, optional WeCom push and daily Feishu/Yuque docs"
   },
   "type": "module",
   "main": "lib/index.js",
@@ -18,7 +18,7 @@
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsc && cp src/client.js lib/client.js",
+    "build": "tsc && cp src/client.js lib/client.js && cp src/chart_render.py lib/chart_render.py",
     "self-test": "node lib/self-test.js"
   },
   "publishConfig": {

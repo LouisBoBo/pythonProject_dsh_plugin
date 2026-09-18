@@ -1,10 +1,22 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { AutomationsConfig } from './types.js'
 import { asBool, asNumber, asString } from './util.js'
+import { readWorkbuddyCreds } from './workbuddy_config.js'
+import { yuqueAuthView } from './yuque_docs.js'
 
 export const DEFAULT_PORT = 18789
+
+export function pluginVersion(): string {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+    return String((JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string }).version || '')
+  } catch {
+    return ''
+  }
+}
 
 export function defaultDataRoot(): string {
   return join(homedir(), '.zhongruan', 'automations')
@@ -20,6 +32,8 @@ function emptyConfig(): AutomationsConfig {
     llmBaseUrl: '',
     llmApiKey: '',
     llmModel: 'deepseek-chat',
+    zhipuApiKey: '',
+    zhipuBaseUrl: '',
     wecomPushEnabled: false,
     wecomWebhookKey: '',
     wecomDryRun: true,
@@ -64,6 +78,8 @@ export function loadConfig(overrideRoot?: string): AutomationsConfig {
     llmBaseUrl: env.DSH_AUTOMATIONS_LLM_BASE_URL || asString(disk.llmBaseUrl, base.llmBaseUrl),
     llmApiKey: env.DSH_AUTOMATIONS_LLM_API_KEY || asString(disk.llmApiKey, base.llmApiKey),
     llmModel: env.DSH_AUTOMATIONS_LLM_MODEL || asString(disk.llmModel, base.llmModel),
+    zhipuApiKey: env.ZHIPU_API_KEY || env.BIGMODEL_API_KEY || asString(disk.zhipuApiKey, base.zhipuApiKey),
+    zhipuBaseUrl: env.ZHIPU_BASE_URL || env.VISION_BASE_URL || asString(disk.zhipuBaseUrl, base.zhipuBaseUrl),
     wecomPushEnabled: asBool(env.WECOM_PUSH_ENABLED ?? disk.wecomPushEnabled, base.wecomPushEnabled),
     wecomWebhookKey: env.WECOM_WEBHOOK_KEY || asString(disk.wecomWebhookKey, base.wecomWebhookKey),
     wecomDryRun: asBool(env.WECOM_PUSH_DRY_RUN ?? disk.wecomDryRun, base.wecomDryRun),
@@ -104,40 +120,102 @@ export function maskSecret(value: string): string {
   return `${v.slice(0, 3)}***${v.slice(-2)}`
 }
 
+export type MesSettings = {
+  baseUrl: string
+  fromWorkbuddy: boolean
+  authType: string
+  username: string
+  password: string
+  token: string
+  enterpriseCode: string
+  timeoutMs: number
+}
+
+/** MES / LLM / 企微等业务连接只认 WorkBuddy 系统配置；插件磁盘仅作空缺兜底。 */
+export function resolveMesSettings(): MesSettings {
+  const cfg = loadConfig()
+  const wb = readWorkbuddyCreds()
+  const env = (process.env.MES_BASE_URL || '').trim()
+  const plugin = cfg.mesBaseUrl.trim()
+  const baseUrl = (wb.mesBaseUrl || env || plugin).replace(/\/+$/, '')
+  return {
+    baseUrl,
+    fromWorkbuddy: Boolean(wb.mesBaseUrl),
+    authType: wb.mesAuthType || 'password',
+    username: wb.mesUsername,
+    password: wb.mesPassword,
+    token: wb.mesToken,
+    enterpriseCode: wb.mesEnterpriseCode || '江西中软',
+    timeoutMs: Math.max(5, wb.mesTimeoutSec || 30) * 1000,
+  }
+}
+
 export function publicConfigView(cfg: AutomationsConfig) {
+  const wb = readWorkbuddyCreds()
+  const mes = resolveMesSettings()
+  const yuque = yuqueAuthView(cfg.dataRoot)
+  const llmKey = cfg.llmApiKey.trim() || wb.llmApiKey
+  const llmBase = cfg.llmBaseUrl.trim() || wb.llmBaseUrl
+  const zhipuKey =
+    cfg.zhipuApiKey.trim() ||
+    (process.env.ZHIPU_API_KEY || '').trim() ||
+    (process.env.BIGMODEL_API_KEY || '').trim() ||
+    (process.env.VISION_API_KEY || '').trim() ||
+    wb.visionApiKey
   return {
     listen: cfg.listen,
     port: cfg.port,
+    pluginVersion: pluginVersion(),
     addr: `http://${cfg.listen}:${cfg.port}`,
     dataRoot: cfg.dataRoot,
     schedulerEnabled: cfg.schedulerEnabled,
     tickSec: cfg.tickSec,
-    llmBaseUrl: cfg.llmBaseUrl,
-    llmModel: cfg.llmModel,
-    llmConfigured: Boolean(cfg.llmApiKey.trim() && cfg.llmBaseUrl.trim()),
-    wecomPushEnabled: cfg.wecomPushEnabled,
-    wecomConfigured: Boolean(cfg.wecomWebhookKey.trim()),
-    wecomDryRun: cfg.wecomDryRun,
-    mesBaseUrl: cfg.mesBaseUrl,
-    mesConfigured: Boolean(cfg.mesBaseUrl.trim()),
+    llmBaseUrl: llmBase,
+    llmModel: cfg.llmModel.trim() || wb.llmModel,
+    llmConfigured: Boolean(llmKey && llmBase),
+    llmFromWorkbuddy: !cfg.llmApiKey.trim() && Boolean(wb.llmApiKey),
+    zhipuBaseUrl: cfg.zhipuBaseUrl.trim() || wb.visionBaseUrl,
+    webSearchConfigured: Boolean(zhipuKey),
+    webSearchFromWorkbuddy: !cfg.zhipuApiKey.trim() && Boolean(wb.visionApiKey),
+    wecomPushEnabled: cfg.wecomWebhookKey.trim() ? cfg.wecomPushEnabled : Boolean(cfg.wecomPushEnabled || wb.wecomPushEnabled),
+    wecomConfigured: Boolean(cfg.wecomWebhookKey.trim() || wb.wecomWebhookKey),
+    wecomDryRun: cfg.wecomWebhookKey.trim() ? cfg.wecomDryRun : wb.wecomDryRun,
+    wecomFromWorkbuddy: !cfg.wecomWebhookKey.trim() && Boolean(wb.wecomWebhookKey),
+    feishuConfigured: Boolean(wb.feishuAppId && wb.feishuAppSecret),
+    feishuFromWorkbuddy: Boolean(wb.feishuAppId && wb.feishuAppSecret),
+    yuqueConfigured: yuque.configured,
+    yuqueAuthMode: yuque.mode,
+    yuqueAuthSource: yuque.source,
+    yuqueHost: yuque.host,
+    yuqueCookieFile: yuque.cookieFilePath,
+    mesBaseUrl: mes.baseUrl,
+    mesConfigured: Boolean(mes.baseUrl),
+    mesFromWorkbuddy: mes.fromWorkbuddy,
   }
 }
 
 export function editableConfigView(cfg: AutomationsConfig) {
+  const wb = readWorkbuddyCreds()
+  const mes = resolveMesSettings()
   return {
     listen: cfg.listen,
     port: cfg.port,
     schedulerEnabled: cfg.schedulerEnabled,
     tickSec: cfg.tickSec,
-    llmBaseUrl: cfg.llmBaseUrl,
+    llmBaseUrl: cfg.llmBaseUrl.trim() || wb.llmBaseUrl,
     llmApiKey: '',
-    llmApiKeyConfigured: Boolean(cfg.llmApiKey.trim()),
-    llmModel: cfg.llmModel,
-    wecomPushEnabled: cfg.wecomPushEnabled,
+    llmApiKeyConfigured: Boolean(cfg.llmApiKey.trim() || wb.llmApiKey),
+    llmModel: cfg.llmModel.trim() || wb.llmModel || cfg.llmModel,
+    zhipuApiKey: '',
+    zhipuApiKeyConfigured: Boolean(cfg.zhipuApiKey.trim() || wb.visionApiKey),
+    zhipuBaseUrl: cfg.zhipuBaseUrl.trim() || wb.visionBaseUrl,
+    wecomPushEnabled: cfg.wecomWebhookKey.trim() ? cfg.wecomPushEnabled : Boolean(cfg.wecomPushEnabled || wb.wecomPushEnabled),
     wecomWebhookKey: '',
-    wecomWebhookKeyConfigured: Boolean(cfg.wecomWebhookKey.trim()),
-    wecomDryRun: cfg.wecomDryRun,
-    mesBaseUrl: cfg.mesBaseUrl,
+    wecomWebhookKeyConfigured: Boolean(cfg.wecomWebhookKey.trim() || wb.wecomWebhookKey),
+    wecomDryRun: cfg.wecomWebhookKey.trim() ? cfg.wecomDryRun : wb.wecomDryRun,
+    mesBaseUrl: mes.baseUrl,
+    mesConfigured: Boolean(mes.baseUrl),
+    mesFromWorkbuddy: mes.fromWorkbuddy,
     dataRoot: cfg.dataRoot,
   }
 }
@@ -162,7 +240,10 @@ function normalizeHttpBaseUrl(raw: string, label: string): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`${label} 只允许 http/https`)
   }
-  return s.replace(/\/+$/, '')
+  if (url.username || url.password) {
+    throw new Error(`${label} 不能带用户名或密码`)
+  }
+  return `${url.origin}${url.pathname}`.replace(/\/+$/, '') || `${url.origin}`
 }
 
 function applyPlain(body: Record<string, unknown>, key: string, current: string): string {
@@ -190,7 +271,7 @@ export function applyConfigFromUi(body: Record<string, unknown>, overrideRoot?: 
     tickSec = Math.max(5, Math.min(3600, Math.floor(n)))
   }
   const llmBaseRaw = applyPlain(body, 'llmBaseUrl', current.llmBaseUrl)
-  const mesBaseRaw = applyPlain(body, 'mesBaseUrl', current.mesBaseUrl)
+  const zhipuBaseRaw = applyPlain(body, 'zhipuBaseUrl', current.zhipuBaseUrl)
   return saveConfig(
     {
       listen: '127.0.0.1',
@@ -200,10 +281,12 @@ export function applyConfigFromUi(body: Record<string, unknown>, overrideRoot?: 
       llmBaseUrl: llmBaseRaw ? normalizeHttpBaseUrl(llmBaseRaw, 'LLM Base URL') : '',
       llmApiKey: keepOrReplace(body.llmApiKey, current.llmApiKey),
       llmModel: applyPlain(body, 'llmModel', current.llmModel) || current.llmModel,
+      zhipuApiKey: keepOrReplace(body.zhipuApiKey, current.zhipuApiKey),
+      zhipuBaseUrl: zhipuBaseRaw ? normalizeHttpBaseUrl(zhipuBaseRaw, '智谱 Base URL') : '',
       wecomPushEnabled: asBool(body.wecomPushEnabled, current.wecomPushEnabled),
       wecomWebhookKey: keepOrReplace(body.wecomWebhookKey, current.wecomWebhookKey),
       wecomDryRun: asBool(body.wecomDryRun, current.wecomDryRun),
-      mesBaseUrl: mesBaseRaw ? normalizeHttpBaseUrl(mesBaseRaw, 'MES Base URL') : '',
+      mesBaseUrl: current.mesBaseUrl,
     },
     overrideRoot,
   )

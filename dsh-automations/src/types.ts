@@ -4,6 +4,32 @@ export type AutomationSource = 'template' | 'custom'
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled'
 export type DeliveryStatus = 'pending' | 'sent' | 'failed' | 'skipped' | 'dry_run'
 
+export type ReportChartItem = { label: string; value: number }
+export type ReportChart = {
+  id: string
+  title: string
+  type: 'bar' | 'pie' | 'line'
+  unit: '单' | '%' | ''
+  items: ReportChartItem[]
+}
+
+export type BitableSync = {
+  enabled: boolean
+  app_token: string
+  table_id: string
+  mode: 'append' | 'upsert'
+}
+
+export type FeishuDocSync = {
+  enabled: boolean
+  parent_token: string
+}
+
+export type YuqueDocSync = {
+  enabled: boolean
+  book: string
+}
+
 export type Automation = {
   id: string
   name: string
@@ -19,6 +45,9 @@ export type Automation = {
   valid_until: string | null
   cwds: string[]
   push_to_wecom: boolean
+  bitable_sync?: BitableSync
+  feishu_doc?: FeishuDocSync
+  yuque_doc?: YuqueDocSync
   next_run_at: number | null
   last_run_at: number | null
   created_at: number
@@ -37,6 +66,15 @@ export type AutomationRun = {
   finished_at: number | null
   delivery_status?: DeliveryStatus
   delivery_error?: string
+  bitable_status?: DeliveryStatus
+  bitable_error?: string
+  feishu_status?: DeliveryStatus
+  feishu_error?: string
+  feishu_url?: string
+  yuque_status?: DeliveryStatus
+  yuque_error?: string
+  yuque_url?: string
+  charts?: ReportChart[]
   cwd?: string | null
 }
 
@@ -60,6 +98,8 @@ export type AutomationsConfig = {
   llmBaseUrl: string
   llmApiKey: string
   llmModel: string
+  zhipuApiKey: string
+  zhipuBaseUrl: string
   wecomPushEnabled: boolean
   wecomWebhookKey: string
   wecomDryRun: boolean

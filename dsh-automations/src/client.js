@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
     var RUNS_PAGE_SIZE = 10
     var SECRET_MASK = '••••••••••••'
     var CUSTOM_SCHEDULE_VALUE = 'custom'
+    var EMPTY_EDIT_INITIAL = {}
     var WEEKDAYS = [
       { value: 'MO', label: '一' },
       { value: 'TU', label: '二' },
@@ -46,7 +47,7 @@ window.__ModuleLoader__.load({
           '检索并整理今日 PCB+AI 领域重要新闻，聚焦 PCB+AI；输出 3–5 条中文摘要，每条含标题、要点与来源链接（如有）。',
         prompt:
           '检索并整理今日 PCB+AI 领域重要新闻，聚焦 PCB+AI；输出 3–5 条中文摘要，每条含标题、要点与来源链接（如有）。',
-        push_to_wecom: true,
+        push_to_wecom: false,
         schedule_type: 'recurring',
         rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
         scheduleLabel: '每天 09:00',
@@ -70,8 +71,34 @@ window.__ModuleLoader__.load({
         description:
           '每天早上汇总昨日 MES 真实生产数据：工单、设备稼动率、产量、工序良率；早报式排版，面向领导阅读。',
         prompt:
-          '生成【昨日生产运营日报】，面向领导阅读；必须真实查询当前 MES，禁止编造任何数字。',
-        push_to_wecom: true,
+          '生成【昨日生产运营日报】，面向领导阅读；必须真实查询当前 MES，禁止编造任何数字。\n\n' +
+          '【查数步骤】（后台执行，结果写入「要点/细分」，不要把工具名写进正文）\n' +
+          '1. inspect_mes_profile(user_intent="昨日生产运营日报")\n' +
+          '2. list_query_metrics()\n' +
+          '3. 工单：analyze_platform_brief 或 summarize_platform_data(group_by="状态")；query_metric("在制")；query_metric("未完工")；query_metric("紧急未完工")；昨日完工用 analyze_time_trend 或 query_platform_data（有日期筛参时）\n' +
+          '4. 设备稼动率（优先）：\n' +
+          '   - 先 describe_entity 确认是否存在 device-utilization（设备利用率趋势）\n' +
+          '   - 有则 query_platform_data(entity="device-utilization", filters={"period": "day"})\n' +
+          '   - 返回 labels + values 时：在要点写平均利用率、最高/最低及对应时点；禁止口算 OEE\n' +
+          '   - 若 device-oee 有数据，可在细分补充综合 OEE；device-oee 为 0 条则整段不写 OEE\n' +
+          '5. 设备产出：query_metric("日产出") — 有数据才输出「设备产出」条\n' +
+          '6. 品质：query_metric("工序良率") — 有数据才输出「工序良率」条\n' +
+          '7. 内部可用 run_ops_scene("plant-exception-daily") 交叉核对，不要把核对过程写进正文\n\n' +
+          '【正文格式】与 PCB 早报完全一致，仅输出查到的条目（编号连续，无数据条目不占号）：\n' +
+          '**1. 工单概况**\n' +
+          '要点：（一行核心数字，含昨日日期）\n' +
+          '细分：（可选，状态分布）\n\n' +
+          '**2. 设备稼动率**\n' +
+          '要点：（device-utilization 有数据才写；平均/峰值/低谷利用率 %）\n' +
+          '细分：（可选，device-oee 有数据才写）\n\n' +
+          '**3. 设备产出**\n' +
+          '要点：（有产量才写本条）\n\n' +
+          '**4. 工序良率**\n' +
+          '要点：（有良率才写本条）\n\n' +
+          '**5. 需关注**\n' +
+          '要点：（1～2 条业务提醒）\n\n' +
+          '禁止：Markdown 表格、## 标题、> 引用、工具名/entity id/caveat/数据缺口/数据说明/「无接口」「0 条」类说明、标题外引言。',
+        push_to_wecom: false,
         schedule_type: 'recurring',
         rrule: 'FREQ=DAILY;BYHOUR=8;BYMINUTE=0',
         scheduleLabel: '每天 08:00',
@@ -214,10 +241,130 @@ window.__ModuleLoader__.load({
     function deliveryStatusLabel(status) {
       return ({ sent: '已推送', failed: '失败', skipped: '未推送', dry_run: '干跑', pending: '待推送' }[status] || status || '—')
     }
+    function findAutomation(id, automations) {
+      if (!id) return null
+      var list = automations || []
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === id) return list[i]
+      }
+      return null
+    }
+    function runPushed(row) {
+      return Boolean(row && row.delivery_status === 'sent')
+    }
+    function runWritten(row) {
+      var fs = row && (row.feishu_status || row.bitable_status)
+      if (fs === 'sent' || fs === 'synced' || fs === 'written') return true
+      return Boolean(row && row.yuque_status === 'sent')
+    }
+    function runTypeParts(row) {
+      return [runPushed(row) ? '已推送' : '未推送', runWritten(row) ? '已写入' : '未写入']
+    }
+    function runTypeTone(parts) {
+      if (!parts.length) return ''
+      if (parts.every(function (x) { return x.indexOf('已') === 0 })) return 'sent'
+      if (parts.every(function (x) { return x.indexOf('未') === 0 })) return 'skipped'
+      return 'mixed'
+    }
     function summaryPreview(text) {
       var s = String(text || '').replace(/\s+/g, ' ').trim()
-      if (!s) return '—'
-      return s.length > 80 ? s.slice(0, 80) + '…' : s
+      return s || '—'
+    }
+    var CHART_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#0891b2', '#7c3aed']
+    function formatChartVal(v, unit) {
+      if (unit === '%') return (Math.round(Number(v) * 100) / 100).toFixed(2) + '%'
+      return String(Math.round(Number(v))) + (unit ? unit : '')
+    }
+    function pieGradient(items) {
+      var total = 0
+      ;(items || []).forEach(function (x) { total += Number(x.value) || 0 })
+      if (!total) return 'conic-gradient(#e2e8f0 0 100%)'
+      var acc = 0
+      var parts = []
+      items.forEach(function (it, i) {
+        var start = (acc / total) * 100
+        acc += Number(it.value) || 0
+        var end = (acc / total) * 100
+        parts.push(CHART_COLORS[i % CHART_COLORS.length] + ' ' + start.toFixed(2) + '% ' + end.toFixed(2) + '%')
+      })
+      return 'conic-gradient(' + parts.join(',') + ')'
+    }
+    function renderBarChart(chart) {
+      var max = 0
+      ;(chart.items || []).forEach(function (x) { if (x.value > max) max = x.value })
+      if (chart.unit === '%') max = Math.max(max, 100)
+      if (max <= 0) max = 1
+      return h(
+        'div',
+        { className: 'za-chart' },
+        [
+          h('p', { className: 'za-chart-title' }, chart.title),
+          (chart.items || []).map(function (it, i) {
+            var pct = Math.max(2, (it.value / max) * 100)
+            return h('div', { className: 'za-bar-row' }, [
+              h('span', { className: 'za-bar-label', title: it.label }, it.label),
+              h('div', { className: 'za-bar-track' }, h('div', {
+                className: 'za-bar-fill',
+                style: { width: pct + '%', background: CHART_COLORS[i % CHART_COLORS.length] },
+              })),
+              h('span', { className: 'za-bar-val' }, formatChartVal(it.value, chart.unit)),
+            ])
+          }),
+        ],
+      )
+    }
+    function renderPieChart(chart) {
+      return h('div', { className: 'za-chart' }, [
+        h('p', { className: 'za-chart-title' }, chart.title),
+        h('div', { className: 'za-pie-wrap' }, [
+          h('div', { className: 'za-pie', style: { background: pieGradient(chart.items || []) } }),
+          h(
+            'div',
+            { className: 'za-pie-legend' },
+            (chart.items || []).map(function (it, i) {
+              return h('div', null, [
+                h('span', { className: 'za-pie-dot', style: { background: CHART_COLORS[i % CHART_COLORS.length] } }),
+                it.label + ' ' + formatChartVal(it.value, chart.unit),
+              ])
+            }),
+          ),
+        ]),
+      ])
+    }
+    function renderLineChart(chart) {
+      var W = 320
+      var H = 110
+      var pad = 10
+      var items = chart.items || []
+      var max = 0
+      items.forEach(function (x) { if (x.value > max) max = x.value })
+      if (chart.unit === '%') max = Math.max(max, 100)
+      if (max <= 0) max = 1
+      var n = items.length
+      var pts = items.map(function (it, i) {
+        var x = pad + (n <= 1 ? 0 : i / (n - 1)) * (W - 2 * pad)
+        var y = H - pad - (it.value / max) * (H - 2 * pad)
+        return x + ',' + y
+      }).join(' ')
+      return h('div', { className: 'za-chart' }, [
+        h('p', { className: 'za-chart-title' }, chart.title),
+        svgEl(
+          { viewBox: '0 0 ' + W + ' ' + H, className: 'za-line-svg', width: '100%', height: 110, preserveAspectRatio: 'none' },
+          [h('polyline', { fill: 'none', stroke: '#4f46e5', strokeWidth: '2', points: pts, strokeLinejoin: 'round', strokeLinecap: 'round' })],
+        ),
+      ])
+    }
+    function renderRunCharts(charts) {
+      if (!charts || !charts.length) return null
+      return h(
+        'div',
+        { className: 'za-charts' },
+        charts.map(function (c) {
+          if (c.type === 'pie') return renderPieChart(c)
+          if (c.type === 'line') return renderLineChart(c)
+          return renderBarChart(c)
+        }),
+      )
     }
     function runErrorText(row) {
       if (!row) return ''
@@ -354,16 +501,24 @@ window.__ModuleLoader__.load({
       '.za-runs-hint{margin-top:8px;font-size:13px;color:var(--za-text3)}' +
       '.za-runs-wrap{width:80%;max-width:1280px;margin:0 auto;background:var(--za-bg);border:1px solid var(--za-border);border-radius:var(--za-radius-lg);overflow:hidden;padding:16px 20px 12px}' +
       '.za-runs-toolbar{display:flex;justify-content:flex-end;margin-bottom:12px;font-size:13px;color:var(--za-text3)}' +
-      '.za-table{width:100%;border-collapse:collapse}' +
-      '.za-table th{text-align:left;font-size:12px;color:var(--za-text3);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--za-border)}' +
-      '.za-table td{padding:10px;border-bottom:1px solid var(--za-border);font-size:13px;color:var(--za-text2);cursor:pointer;vertical-align:top}' +
+      '.za-table{width:100%;border-collapse:collapse;table-layout:fixed}' +
+      '.za-table th,.za-table td{white-space:nowrap;vertical-align:middle}' +
+      '.za-table th{text-align:left;font-size:12px;color:var(--za-text3);font-weight:600;padding:8px 4px;border-bottom:1px solid var(--za-border)}' +
+      '.za-table td{padding:8px 4px;border-bottom:1px solid var(--za-border);font-size:13px;color:var(--za-text2);cursor:pointer}' +
       '.za-table tr:hover td{background:var(--za-bg2)}' +
       '.za-table tr.selected td{background:var(--za-brand-light)}' +
+      '.za-table th.za-cell-name,.za-table td.za-cell-name{width:12em;padding-right:10px;overflow:hidden}' +
+      '.za-table th.za-cell-status,.za-table td.za-cell-status{width:3.5em;overflow:visible;padding-left:4px;padding-right:10px}' +
+      '.za-table th.za-cell-type,.za-table td.za-cell-type{width:10.5em;overflow:hidden;padding-left:4px;padding-right:10px}' +
+      '.za-table th.za-cell-time,.za-table td.za-cell-time{width:12em;overflow:visible;padding-left:4px;padding-right:10px}' +
+      '.za-table th.za-cell-preview,.za-table td.za-cell-preview{width:auto;max-width:0;min-width:0;padding-left:4px;overflow:hidden;text-overflow:ellipsis}' +
+      '.za-ellipsis{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:100%;min-width:0}' +
       '.za-run-status[data-status="succeeded"]{color:#166534;font-weight:600}' +
       '.za-run-status[data-status="failed"]{color:#dc2626;font-weight:600}' +
       '.za-run-status[data-status="running"]{color:#2563eb;font-weight:600}' +
       '.za-run-delivery[data-delivery="sent"]{color:#16a34a;font-weight:600}' +
       '.za-run-delivery[data-delivery="failed"]{color:#dc2626;font-weight:600}' +
+      '.za-run-delivery[data-delivery="skipped"]{color:var(--za-text3)}' +
       '.za-pager{display:flex;justify-content:flex-end;gap:6px;margin-top:16px;padding-top:12px;border-top:1px solid var(--za-border)}' +
       '.za-pager button{min-width:32px;height:32px;border:1px solid var(--za-border);border-radius:6px;background:var(--za-bg);cursor:pointer}' +
       '.za-pager button.on{background:var(--za-brand);color:#fff;border-color:transparent}' +
@@ -381,22 +536,46 @@ window.__ModuleLoader__.load({
       '.za-field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}' +
       '.za-field label{font-size:13px;color:var(--za-text)}' +
       '.za-field input,.za-field textarea,.za-field select{padding:8px 10px;border-radius:8px;border:1px solid var(--za-border);background:var(--za-bg);color:inherit;font:inherit}' +
-      '.za-field textarea{min-height:140px;resize:vertical}' +
+      '.za-field textarea{min-height:220px;resize:vertical}' +
       '.za-hint{font-size:12px;color:var(--za-text3);margin:4px 0 0}' +
       '.za-radio-row,.za-switch-row,.za-range-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}' +
+      '.za-toggle-row{display:flex;align-items:center;gap:10px;min-height:28px}' +
+      '.za-toggle{position:relative;width:40px;height:22px;border:none;border-radius:999px;background:#d1d5db;padding:0;cursor:pointer;flex-shrink:0}' +
+      '.za-toggle.on{background:var(--za-brand)}' +
+      '.za-toggle-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(15,23,42,.2);transition:left .15s}' +
+      '.za-toggle.on .za-toggle-knob{left:20px}' +
+      '.za-toggle-side{font-size:13px;color:var(--za-text2)}' +
+      '.za-toggle-side.on{color:var(--za-brand);font-weight:600}' +
+      '.za-toggle-side.dim{color:var(--za-text3)}' +
       '.za-footer-tip{font-size:12px;color:var(--za-text3);margin:0 12px 0 0;flex:1}' +
       '.za-dialog-foot{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:8px}' +
       '.za-toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:100;padding:8px 14px;border-radius:8px;background:#111827;color:#fff;font-size:13px}' +
       '.za-toast.ok{background:#166534}' +
       '.za-toast.err{background:#991b1b}' +
       '.za-morning{white-space:pre-wrap;font-size:13px;line-height:1.65;color:var(--za-text)}' +
+      '.za-charts{display:flex;flex-direction:column;gap:12px;margin:0 0 16px}' +
+      '.za-chart{border:1px solid var(--za-border);border-radius:10px;padding:12px;background:var(--za-bg2)}' +
+      '.za-chart-title{font-size:12px;font-weight:600;color:var(--za-text);margin:0 0 10px}' +
+      '.za-bar-row{display:grid;grid-template-columns:4.8em minmax(0,1fr) 4.2em;gap:8px;align-items:center;margin:5px 0}' +
+      '.za-bar-label{font-size:12px;color:var(--za-text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.za-bar-track{height:8px;border-radius:999px;background:#e2e8f0;overflow:hidden;min-width:0}' +
+      '.za-bar-fill{height:100%;border-radius:999px;background:var(--za-brand)}' +
+      '.za-bar-val{font-size:12px;color:var(--za-text);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}' +
+      '.za-pie-wrap{display:flex;align-items:center;gap:16px}' +
+      '.za-pie{width:88px;height:88px;border-radius:50%;flex-shrink:0}' +
+      '.za-pie-legend{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--za-text2)}' +
+      '.za-pie-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}' +
+      '.za-line-svg{display:block;width:100%;height:110px}' +
       '@media (max-width:900px){.za-template-grid,.za-template-grid.compact{grid-template-columns:repeat(2,minmax(0,1fr))}.za-task-grid{grid-template-columns:1fr}.za-runs-wrap{width:100%}.za-drawer{width:100%;max-width:none}}'
 
     function ensureCss() {
       if (typeof document === 'undefined') return
-      if (document.getElementById('za-ui-css')) return
+      var old = document.getElementById('za-ui-css')
+      if (old && old.getAttribute('data-v') === '21') return
+      if (old) old.parentNode && old.parentNode.removeChild(old)
       var style = document.createElement('style')
       style.id = 'za-ui-css'
+      style.setAttribute('data-v', '21')
       style.textContent = ZA_CSS
       document.head.appendChild(style)
     }
@@ -457,11 +636,15 @@ window.__ModuleLoader__.load({
         llmApiKey: '',
         llmApiKeyConfigured: false,
         llmModel: 'deepseek-chat',
+        zhipuApiKey: '',
+        zhipuApiKeyConfigured: false,
+        zhipuBaseUrl: '',
         wecomPushEnabled: false,
         wecomWebhookKey: '',
         wecomWebhookKeyConfigured: false,
         wecomDryRun: true,
-        mesBaseUrl: '',
+        mesConfigured: false,
+        mesFromWorkbuddy: false,
       }
     }
 
@@ -504,10 +687,12 @@ window.__ModuleLoader__.load({
           },
           [
             h('h3', null, '推送配置'),
-            h('p', { className: 'za-hint' }, '对标 WorkBuddy「系统配置 → 自动化推送 / 商用模型」。密钥只保存在本机。'),
+            h('p', { className: 'za-hint' }, 'MES、对话模型、智谱、企微以 WorkBuddy「系统配置」为准。MES 只从系统配置读取，本页不再填写。'),
             field('llmBaseUrl', 'LLM Base URL', { placeholder: 'https://api.deepseek.com/v1' }),
             field('llmApiKey', 'LLM API Key', { type: 'password', placeholder: '未改则保留已保存密钥' }),
             field('llmModel', '模型名'),
+            field('zhipuApiKey', '智谱 API Key（联网检索）', { type: 'password', placeholder: '新闻任务必需；未改则保留已保存密钥' }),
+            field('zhipuBaseUrl', '智谱 Base URL', { placeholder: 'https://open.bigmodel.cn/api/paas/v4' }),
             h('div', { className: 'za-field' }, [
               h('label', null, '开启企微推送'),
               h('div', { className: 'za-switch-row' }, [
@@ -535,7 +720,13 @@ window.__ModuleLoader__.load({
                 h('span', null, '仅打日志，不真正发送'),
               ]),
             ]),
-            field('mesBaseUrl', 'MES Base URL（生产日报）'),
+            h(
+              'p',
+              { className: 'za-hint' },
+              cfg.mesConfigured
+                ? 'MES 地址已从 WorkBuddy 系统配置读取，生产日报不再要求本页填写。'
+                : '未读取到 MES 地址。请到 WorkBuddy「系统配置」填写，不要在本页重复配置。',
+            ),
             h('div', { className: 'za-field' }, [
               h('label', null, '调度器'),
               h('div', { className: 'za-switch-row' }, [
@@ -581,21 +772,42 @@ window.__ModuleLoader__.load({
       var rewritingState = useState(false)
       var rewriting = rewritingState[0]
       var setRewriting = rewritingState[1]
+      var feishuParentRef = useRef(null)
+      var yuqueBookRef = useRef(null)
+      var openKey = (props.open ? '1' : '0') + ':' + (initial.id || initial._source || '')
 
       useEffect(
         function () {
+          if (!props.open) return
+          var src = props.initial || {}
           var next = {
-            id: initial.id || '',
-            name: initial.name || '',
-            prompt: initial.prompt || '',
-            template_id: initial.template_id || '',
-            schedule_type: initial.schedule_type || 'recurring',
-            rrule: initial.rrule || 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
-            scheduled_at: initial.scheduled_at ? String(initial.scheduled_at).slice(0, 16) : '',
-            cwdText: (initial.cwds || []).join(', '),
-            push_to_wecom: !!initial.push_to_wecom,
-            valid_from: initial.valid_from || '',
-            valid_until: initial.valid_until || '',
+            id: src.id || '',
+            name: src.name || '',
+            prompt: src.prompt || '',
+            template_id: src.template_id || '',
+            schedule_type: src.schedule_type || 'recurring',
+            rrule: src.rrule || 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+            scheduled_at: src.scheduled_at ? String(src.scheduled_at).slice(0, 16) : '',
+            cwdText: (src.cwds || []).join(', '),
+            push_to_wecom: !!src.push_to_wecom,
+            feishu_enabled: !!(
+              (src.feishu_doc && src.feishu_doc.enabled) ||
+              (src.bitable_sync &&
+                src.bitable_sync.enabled &&
+                (function () {
+                  var token = String((src.bitable_sync && src.bitable_sync.app_token) || '').toLowerCase()
+                  return token && token.indexOf('basc') !== 0 && token.indexOf('app') !== 0
+                })())
+            ),
+            feishu_parent_token:
+              (src.feishu_doc && src.feishu_doc.parent_token) ||
+              (src.bitable_sync && src.bitable_sync.app_token) ||
+              src.feishu_parent_token ||
+              '',
+            yuque_enabled: !!(src.yuque_doc && src.yuque_doc.enabled),
+            yuque_book: (src.yuque_doc && src.yuque_doc.book) || src.yuque_book || '',
+            valid_from: src.valid_from || '',
+            valid_until: src.valid_until || '',
           }
           setForm(next)
           var hit = findPresetByRrule(next.rrule)
@@ -611,7 +823,7 @@ window.__ModuleLoader__.load({
             setRecurringPreset('daily-0900')
           }
         },
-        [initial],
+        [openKey],
       )
 
       if (!props.open || !form) return null
@@ -695,15 +907,30 @@ window.__ModuleLoader__.load({
                         className: 'za-btn link',
                         disabled: rewriting,
                         onClick: function () {
+                          var draft = String(form.prompt || '').trim()
+                          var name = String(form.name || '').trim()
+                          var skeleton =
+                            draft === PROMPT_SKELETON.trim() ||
+                            /（一句话：要产出什么）/.test(draft) ||
+                            (/【数据来源】MES 查数/.test(draft) && /1\.\s*…/.test(draft))
+                          if ((!draft || skeleton) && !name) {
+                            props.onToast &&
+                              props.onToast('请先写几句任务意图，或填写任务名称，再使用 AI 改写', false)
+                            return
+                          }
                           setRewriting(true)
                           fetchJson(serviceBase() + '/api/rewrite-prompt', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ draft: form.prompt, task_name: form.name }),
+                            body: JSON.stringify({
+                              draft: skeleton ? '' : form.prompt,
+                              task_name: name,
+                            }),
                           })
                             .then(function (x) {
-                              if (!x.ok || !x.d.prompt) throw new Error((x.d && x.d.detail) || '改写失败')
+                              if (!x.ok || !x.d.prompt) throw new Error((x.d && x.d.detail) || 'AI 改写失败')
                               patch({ prompt: x.d.prompt })
+                              props.onToast && props.onToast('已按指令骨架扩写，请确认后保存', true)
                             })
                             .catch(function (e) {
                               props.onToast(e.message || String(e), false)
@@ -860,18 +1087,107 @@ window.__ModuleLoader__.load({
             ]),
             h('div', { className: 'za-field' }, [
               h('label', null, '推送到企业微信'),
-              h('div', { className: 'za-switch-row' }, [
-                h('input', {
-                  type: 'checkbox',
-                  checked: !!form.push_to_wecom,
-                  onChange: function (e) {
-                    patch({ push_to_wecom: e.target.checked })
+              h('div', { className: 'za-toggle-row' }, [
+                h('span', { className: 'za-toggle-side' + (form.push_to_wecom ? ' dim' : ' on') }, '不推企微'),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'za-toggle' + (form.push_to_wecom ? ' on' : ''),
+                    role: 'switch',
+                    'aria-checked': form.push_to_wecom ? 'true' : 'false',
+                    onClick: function () {
+                      patch({ push_to_wecom: !form.push_to_wecom })
+                    },
                   },
-                }),
-                h('span', null, form.push_to_wecom ? '任务成功后推送到企微群' : '不推企微'),
+                  h('span', { className: 'za-toggle-knob' }),
+                ),
+                h('span', { className: 'za-toggle-side' + (form.push_to_wecom ? ' on' : ' dim') }, '任务成功后推送到企微群'),
               ]),
-              h('p', { className: 'za-hint' }, 'Webhook 在本页「推送配置」中填写。'),
+              h('p', { className: 'za-hint' }, '与飞书文档互不干涉。Webhook 在 WorkBuddy「系统配置 → 自动化推送」中填写。'),
             ]),
+            h('div', { className: 'za-field' }, [
+              h('label', null, '写入飞书文档'),
+              h('div', { className: 'za-toggle-row' }, [
+                h('span', { className: 'za-toggle-side' + (form.feishu_enabled ? ' dim' : ' on') }, '不写飞书文档'),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'za-toggle' + (form.feishu_enabled ? ' on' : ''),
+                    role: 'switch',
+                    'aria-checked': form.feishu_enabled ? 'true' : 'false',
+                    onClick: function () {
+                      patch({ feishu_enabled: !form.feishu_enabled })
+                    },
+                  },
+                  h('span', { className: 'za-toggle-knob' }),
+                ),
+                h('span', { className: 'za-toggle-side' + (form.feishu_enabled ? ' on' : ' dim') }, '任务成功后新建一篇飞书文档'),
+              ]),
+              h('p', { className: 'za-hint' }, '与企微互不干涉。每天一篇新文档，不覆盖旧文。App ID/Secret 在 WorkBuddy「系统配置 → 自动化推送」。'),
+            ]),
+            form.feishu_enabled
+              ? h('div', { className: 'za-field' }, [
+                  h('label', null, '知识库父页面'),
+                  h('input', {
+                    key: 'feishu-parent-' + (form.id || 'new'),
+                    ref: feishuParentRef,
+                    placeholder: '粘贴飞书知识库链接（/wiki/…）或节点 token',
+                    defaultValue: form.feishu_parent_token || '',
+                    onInput: function (e) {
+                      patch({ feishu_parent_token: e.target.value })
+                    },
+                    onChange: function (e) {
+                      patch({ feishu_parent_token: e.target.value })
+                    },
+                  }),
+                  h('p', { className: 'za-hint' }, '新文档建在该页面下。不要填多维表格 /base/ 或 table_id。'),
+                ])
+              : null,
+            h('div', { className: 'za-field' }, [
+              h('label', null, '写入语雀'),
+              h('div', { className: 'za-toggle-row' }, [
+                h('span', { className: 'za-toggle-side' + (form.yuque_enabled ? ' dim' : ' on') }, '不写语雀'),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'za-toggle' + (form.yuque_enabled ? ' on' : ''),
+                    role: 'switch',
+                    'aria-checked': form.yuque_enabled ? 'true' : 'false',
+                    onClick: function () {
+                      patch({ yuque_enabled: !form.yuque_enabled })
+                    },
+                  },
+                  h('span', { className: 'za-toggle-knob' }),
+                ),
+                h('span', { className: 'za-toggle-side' + (form.yuque_enabled ? ' on' : ' dim') }, '任务成功后新建一篇语雀文档'),
+              ]),
+              h(
+                'p',
+                { className: 'za-hint' },
+                '与企微、飞书互不干涉。每天一篇新文档。凭证放到本机 ~/.zhongruan/automations/credentials/yuque.cookie（须含 _yuque_session 与 yuque_ctoken），不要改仓库里的配置文件，也不要把 Cookie 填进任务。',
+              ),
+            ]),
+            form.yuque_enabled
+              ? h('div', { className: 'za-field' }, [
+                  h('label', null, '语雀知识库'),
+                  h('input', {
+                    key: 'yuque-book-' + (form.id || 'new'),
+                    ref: yuqueBookRef,
+                    placeholder: 'group/book 或 https://www.yuque.com/group/book',
+                    defaultValue: form.yuque_book || '',
+                    onInput: function (e) {
+                      patch({ yuque_book: e.target.value })
+                    },
+                    onChange: function (e) {
+                      patch({ yuque_book: e.target.value })
+                    },
+                  }),
+                  h('p', { className: 'za-hint' }, '新文档建在该知识库下。不要把 Cookie 或 Token 填在这里。'),
+                ])
+              : null,
             h('div', { className: 'za-field' }, [
               h('label', null, '生效区间（可选）'),
               h('div', { className: 'za-range-row' }, [
@@ -902,6 +1218,34 @@ window.__ModuleLoader__.load({
                   className: 'za-btn primary',
                   disabled: props.saving,
                   onClick: function () {
+                    var parentToken = String(form.feishu_parent_token || '').trim()
+                    if (feishuParentRef.current && typeof feishuParentRef.current.value === 'string') {
+                      parentToken = String(feishuParentRef.current.value || '').trim()
+                    }
+                    var yuqueBook = String(form.yuque_book || '').trim()
+                    if (yuqueBookRef.current && typeof yuqueBookRef.current.value === 'string') {
+                      yuqueBook = String(yuqueBookRef.current.value || '').trim()
+                    }
+                    if (form.feishu_enabled && !parentToken) {
+                      props.onToast && props.onToast('已开启飞书文档时，请填写知识库父页面链接或 token。', false)
+                      return
+                    }
+                    if (!String(form.name || '').trim()) {
+                      props.onToast && props.onToast('请填写任务名称', false)
+                      return
+                    }
+                    if (!String(form.prompt || '').trim()) {
+                      props.onToast && props.onToast('请填写执行指令；可先点「AI 改写」按骨架扩写', false)
+                      return
+                    }
+                    if (form.yuque_enabled && !yuqueBook) {
+                      props.onToast && props.onToast('已开启语雀时，请填写知识库 group/book 或语雀链接。', false)
+                      return
+                    }
+                    if (/_yuque_session=|_yuque_ctoken=|yuque_ctoken=/i.test(yuqueBook)) {
+                      props.onToast && props.onToast('不要把 Cookie 填进知识库。请放到本机凭证文件。', false)
+                      return
+                    }
                     props.onSave({
                       name: form.name,
                       prompt: form.prompt,
@@ -919,6 +1263,19 @@ window.__ModuleLoader__.load({
                         })
                         .filter(Boolean),
                       push_to_wecom: !!form.push_to_wecom,
+                      feishu_doc: form.feishu_enabled
+                        ? {
+                            enabled: true,
+                            parent_token: parentToken,
+                          }
+                        : { enabled: false, parent_token: '' },
+                      yuque_doc: form.yuque_enabled
+                        ? {
+                            enabled: true,
+                            book: yuqueBook,
+                          }
+                        : { enabled: false, book: '' },
+                      bitable_sync: { enabled: false },
                       id: form.id || undefined,
                     })
                   },
@@ -1023,6 +1380,7 @@ window.__ModuleLoader__.load({
             if (x && x.ok && x.config) {
               var c = Object.assign(emptyConfig(), x.config)
               if (c.llmApiKeyConfigured) c.llmApiKey = SECRET_MASK
+              if (c.zhipuApiKeyConfigured) c.zhipuApiKey = SECRET_MASK
               if (c.wecomWebhookKeyConfigured) c.wecomWebhookKey = SECRET_MASK
               setCfg(c)
               rememberPort(c.port)
@@ -1067,7 +1425,9 @@ window.__ModuleLoader__.load({
           scheduleLabel: tpl.scheduleLabel,
           template_id: tpl.id,
           cwds: [],
-          push_to_wecom: Boolean(tpl.push_to_wecom),
+          push_to_wecom: false,
+          feishu_doc: { enabled: false },
+          yuque_doc: { enabled: false },
           _source: 'template',
         })
         setEditOpen(true)
@@ -1164,6 +1524,7 @@ window.__ModuleLoader__.load({
         setCfgSaving(true)
         var body = Object.assign({}, cfg)
         if (body.llmApiKey === SECRET_MASK) body.llmApiKey = ''
+        if (body.zhipuApiKey === SECRET_MASK) body.zhipuApiKey = ''
         if (body.wecomWebhookKey === SECRET_MASK) body.wecomWebhookKey = ''
         body.port = Number(body.port)
         body.tickSec = Number(body.tickSec)
@@ -1380,9 +1741,23 @@ window.__ModuleLoader__.load({
         body = h('div', { className: 'za-runs-wrap' }, [
           h('div', { className: 'za-runs-toolbar' }, h('span', null, '共 ' + runsTotal + ' 条记录')),
           h('table', { className: 'za-table' }, [
-            h('thead', null, h('tr', null, ['任务', '状态', '推送', '写表', '开始时间', '摘要预览'].map(function (col) {
-              return h('th', { key: col }, col)
-            }))),
+            h(
+              'thead',
+              null,
+              h(
+                'tr',
+                null,
+                [
+                  { label: '任务', cls: 'za-cell-name' },
+                  { label: '状态', cls: 'za-cell-status' },
+                  { label: '类型', cls: 'za-cell-type' },
+                  { label: '开始时间', cls: 'za-cell-time' },
+                  { label: '摘要预览', cls: 'za-cell-preview' },
+                ].map(function (col) {
+                  return h('th', { key: col.label, className: col.cls }, col.label)
+                }),
+              ),
+            ),
             h(
               'tbody',
               null,
@@ -1397,18 +1772,33 @@ window.__ModuleLoader__.load({
                     },
                   },
                   [
-                    h('td', null, row.automation_name || row.automation_id),
-                    h('td', null, h('span', { className: 'za-run-status', 'data-status': row.status }, runStatusLabel(row.status))),
                     h(
                       'td',
-                      { title: row.delivery_error || '' },
-                      row.delivery_status
-                        ? h('span', { className: 'za-run-delivery', 'data-delivery': row.delivery_status }, deliveryStatusLabel(row.delivery_status))
-                        : '—',
+                      { className: 'za-cell-name', title: row.automation_name || row.automation_id || '' },
+                      h('span', { className: 'za-ellipsis' }, row.automation_name || row.automation_id),
                     ),
-                    h('td', null, '—'),
-                    h('td', null, formatTime(row.started_at)),
-                    h('td', null, summaryPreview(row.summary)),
+                    h(
+                      'td',
+                      { className: 'za-cell-status' },
+                      h('span', { className: 'za-run-status', 'data-status': row.status }, runStatusLabel(row.status)),
+                    ),
+                    (function () {
+                      var parts = runTypeParts(row)
+                      return h(
+                        'td',
+                        { className: 'za-cell-type', title: row.delivery_error || row.feishu_error || row.yuque_error || row.bitable_error || parts.join(' · ') },
+                        h('span', { className: 'za-ellipsis za-run-delivery', 'data-delivery': runTypeTone(parts) }, parts.join(' · ')),
+                      )
+                    })(),
+                    h('td', { className: 'za-cell-time' }, formatTime(row.started_at)),
+                    (function () {
+                      var preview = summaryPreview(row.summary)
+                      return h(
+                        'td',
+                        { className: 'za-cell-preview', title: preview === '—' ? '' : preview },
+                        h('span', { className: 'za-ellipsis' }, preview),
+                      )
+                    })(),
                   ],
                 )
               }),
@@ -1504,11 +1894,24 @@ window.__ModuleLoader__.load({
                     h('span', { className: 'za-run-status', 'data-status': selectedRun.status }, runStatusLabel(selectedRun.status)),
                     h('span', null, '开始：' + formatTime(selectedRun.started_at)),
                     selectedRun.finished_at ? h('span', null, '结束：' + formatTime(selectedRun.finished_at)) : null,
-                    selectedRun.delivery_status
-                      ? h('span', null, '推送：' + deliveryStatusLabel(selectedRun.delivery_status))
+                    h('span', null, '类型：' + runTypeParts(selectedRun).join(' · ')),
+                    selectedRun.feishu_url
+                      ? h(
+                          'a',
+                          { href: selectedRun.feishu_url, target: '_blank', rel: 'noreferrer' },
+                          '打开飞书文档',
+                        )
+                      : null,
+                    selectedRun.yuque_url
+                      ? h(
+                          'a',
+                          { href: selectedRun.yuque_url, target: '_blank', rel: 'noreferrer' },
+                          '打开语雀文档',
+                        )
                       : null,
                   ]),
-                  h('div', { className: 'za-banner' }, [h('span', null, '— —'), h('span', null, '📰 ' + (selectedRun.automation_name || '任务摘要') + ' 📰'), h('span', null, '— —')]),
+                  selectedRun.feishu_error ? h('p', { className: 'za-error-card' }, selectedRun.feishu_error) : null,
+                  selectedRun.yuque_error ? h('p', { className: 'za-error-card' }, selectedRun.yuque_error) : null,
                   h(
                     'button',
                     {
@@ -1516,7 +1919,7 @@ window.__ModuleLoader__.load({
                       className: 'za-btn',
                       style: { marginBottom: 12 },
                       onClick: function () {
-                        var text = selectedRun.summary || ''
+                        var text = selectedRun.summary || selectedRun.display_text || ''
                         if (!text) return
                         if (navigator.clipboard && navigator.clipboard.writeText) {
                           navigator.clipboard.writeText(text).then(function () {
@@ -1528,7 +1931,10 @@ window.__ModuleLoader__.load({
                     '一键复制',
                   ),
                   runErrorText(selectedRun) ? h('p', { className: 'za-error-card' }, runErrorText(selectedRun)) : null,
-                  selectedRun.summary ? h('div', { className: 'za-morning' }, selectedRun.summary) : h('p', { className: 'za-runs-hint' }, '暂无摘要内容'),
+                  renderRunCharts(selectedRun.charts),
+                  selectedRun.summary || selectedRun.display_text
+                    ? h('div', { className: 'za-morning' }, selectedRun.summary || selectedRun.display_text)
+                    : h('p', { className: 'za-runs-hint' }, '暂无摘要内容'),
                 ]),
               ],
             ),
@@ -1539,8 +1945,9 @@ window.__ModuleLoader__.load({
         h('div', { className: 'za-view' }, [header, h('div', { className: 'za-page-body' }, body)]),
         drawer,
         h(EditDialog, {
+          key: editOpen ? 'open-' + ((editInitial && (editInitial.id || editInitial._source)) || 'new') : 'closed',
           open: editOpen,
-          initial: editInitial || {},
+          initial: editInitial || EMPTY_EDIT_INITIAL,
           saving: saving,
           onClose: function () {
             setEditOpen(false)

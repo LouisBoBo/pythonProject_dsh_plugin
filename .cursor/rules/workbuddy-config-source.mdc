@@ -1,0 +1,25 @@
+---
+description: 插件运行时凭证只读 WorkBuddy 系统配置，禁止再做第二套填写入口
+alwaysApply: true
+---
+
+# 配置只从 WorkBuddy 取
+
+对话模型、智谱/视觉、MES、企微、飞书等 **一律只读** WorkBuddy 引擎 `config.yaml`（界面：系统配置）。`dsh-automations` 对照 `dsh-automations/src/workbuddy_config.ts`。
+
+## 禁止
+
+- 在插件「推送配置」再要用户填 MES Base URL、LLM Key、智谱 Key、企微 Webhook、飞书 Secret
+- 插件 `config.json` 当业务凭证账本；环境变量当正式配置源
+- 未配置时把用户指去插件页（例如「左侧栏自动化 → 推送配置」）
+
+## 正确
+
+- 读 `mes.base_url`、`deepseek.*`、`vision.*`、`automations.*`
+- 未配置：请到 WorkBuddy「系统配置」对应页填写
+- 插件本地只留调度（端口、tick），不覆盖业务连接
+
+```text
+❌ 未配置 MES。请到「自动化」→ 推送配置填写 MES Base URL
+✅ 读 config.yaml → mes.base_url；空则提示去系统配置
+```

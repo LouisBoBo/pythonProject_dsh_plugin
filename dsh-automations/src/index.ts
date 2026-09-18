@@ -140,8 +140,16 @@ export function apply(ctx: Context) {
           `请到左侧栏「自动化」（与设置并列）管理模板/自定义任务与企微推送。`,
           `本机服务：${isServerRunning() ? '已监听' : '未监听'} ${getListenAddr() || view.addr}`,
           `调度：${view.schedulerEnabled ? '开启' : '关闭'}；任务 ${items.length} 个（启用 ${active.length}）`,
-          `LLM：${view.llmConfigured ? '已配置' : '未配置（自定义润色/部分模板需要）'}`,
-          `企微：${view.wecomPushEnabled ? (view.wecomConfigured ? '已开' : '已开但未填 Webhook') : '关闭'}${view.wecomDryRun ? '（干跑）' : ''}`,
+          `LLM：${view.llmConfigured ? (view.llmFromWorkbuddy ? '已配置（WorkBuddy 系统配置）' : '已配置') : '未配置（自定义润色/部分模板需要）'}`,
+          `联网检索：${view.webSearchConfigured ? (view.webSearchFromWorkbuddy ? '已配置（WorkBuddy 视觉/智谱 Key）' : '已配置') : '未配置（新闻任务需要智谱 API Key）'}`,
+          `企微：${view.wecomPushEnabled ? (view.wecomConfigured ? '已开' : '已开但未填 Webhook') : '关闭'}${view.wecomFromWorkbuddy ? '（WorkBuddy 系统配置）' : ''}${view.wecomDryRun ? '（干跑）' : ''}`,
+          `MES：${view.mesConfigured ? (view.mesFromWorkbuddy ? '已配置（WorkBuddy 系统配置）' : '已配置') : '未配置（请到系统配置填写）'}`,
+          `飞书文档：${view.feishuConfigured ? '已配置（WorkBuddy 系统配置 App ID/Secret）' : '未配置（请到系统配置填写飞书 App ID/Secret）'}`,
+          `语雀：${
+            view.yuqueConfigured
+              ? `已配置（${view.yuqueAuthMode === 'token' ? 'Token' : 'Cookie'}，${view.yuqueAuthSource === 'file' ? '本机凭证文件' : 'WorkBuddy'}）`
+              : `未配置（把浏览器 Cookie 放到 ${view.yuqueCookieFile}，不要改仓库配置文件）`
+          }`,
         ]
         return { summary: lines.join('\n') }
       },
@@ -207,9 +215,16 @@ export function apply(ctx: Context) {
         const run = result.run
         const err = run?.error ? `${run.error.code}: ${run.error.message}` : ''
         const sum = (run?.summary || '').slice(0, 1200)
+        const extra = [
+          run?.feishu_url ? `飞书：${run.feishu_url}` : '',
+          run?.yuque_url ? `语雀：${run.yuque_url}` : '',
+          run?.yuque_status === 'failed' && run.yuque_error ? `语雀未写入：${run.yuque_error}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
         return {
           summary: result.ok
-            ? `任务「${item.name}」执行成功。\n${sum}`
+            ? `任务「${item.name}」执行成功。\n${sum}${extra ? `\n${extra}` : ''}`
             : `任务「${item.name}」未成功。${err}\n${sum}`,
         }
       },
@@ -300,5 +315,49 @@ export function apply(ctx: Context) {
     }),
   )
 
-  console.log('[automations] 插件已加载，工具 zr_auto_status / zr_auto_list / zr_auto_run / zr_auto_update')
+  ctx.tools.register(
+    defineTool({
+      name: 'zr_auto_yuque_status',
+      description:
+        '【语雀写入状态】仅当用户问自动化任务能否写语雀、Cookie/Token 是否配好、知识库怎么填时调用。' +
+        '不返回 Cookie 或 Token。问写码、审码不要用本工具。参数 ignore 传空字符串。',
+      parameters: {
+        ignore: { type: 'string', required: true, description: '占位参数，传空字符串即可' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { summary: { type: 'string' } },
+        },
+        render: (_args, value) => textBlocks(value.summary),
+      },
+      async execute() {
+        const cfg = loadConfig()
+        const view = publicConfigView(cfg)
+        const items = listAutomations(cfg.dataRoot).filter((x) => x.yuque_doc?.enabled)
+        const mode =
+          view.yuqueAuthMode === 'token' ? 'Token（官方 /api/v2）' : view.yuqueAuthMode === 'cookie' ? 'Cookie（网页接口）' : '无'
+        const lines = [
+          `语雀凭证：${view.yuqueConfigured ? `已配置，模式=${mode}` : '未配置'}`,
+          `来源：${
+            view.yuqueAuthSource === 'file'
+              ? '本机凭证文件'
+              : view.yuqueAuthSource === 'workbuddy'
+                ? 'WorkBuddy 系统配置'
+                : '无'
+          }`,
+          `站点：${view.yuqueHost}`,
+          `凭证文件：${view.yuqueCookieFile}（勿把 Cookie 填进任务，勿改仓库配置文件）`,
+          `已开启写语雀的任务：${items.length} 个`,
+          items.length
+            ? items.map((x) => `- ${x.name} → ${x.yuque_doc?.book || '（未填知识库）'}`).join('\n')
+            : '到左侧栏「自动化」打开任务，打开「写入语雀」。',
+        ]
+        return { summary: lines.join('\n') }
+      },
+    }),
+  )
+
+  console.log('[automations] 插件已加载，工具 zr_auto_status / zr_auto_list / zr_auto_run / zr_auto_update / zr_auto_yuque_status')
 }

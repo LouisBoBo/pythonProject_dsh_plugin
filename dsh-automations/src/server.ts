@@ -3,6 +3,7 @@ import {
   applyConfigFromUi,
   editableConfigView,
   loadConfig,
+  pluginVersion,
   publicConfigView,
 } from './config.js'
 import {
@@ -18,6 +19,8 @@ import { clearAllRunning } from './runtime.js'
 import { executeById } from './executor.js'
 import { scheduleSummary } from './schedule.js'
 import { AUTOMATION_SCHEDULE_PRESETS, AUTOMATION_TEMPLATES, PROMPT_SKELETON } from './templates.js'
+import { formatWecomText } from './run_summary_text.js'
+import { attachRunCharts } from './mes_charts.js'
 import { rewriteAutomationPrompt } from './rewrite.js'
 import { startScheduler, stopScheduler } from './scheduler.js'
 
@@ -138,7 +141,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       {
         ok: true,
         service: 'dsh-automations',
-        version: '0.1.0',
+        version: pluginVersion(),
         listen: listenAddr || `http://${cfg.listen}:${cfg.port}`,
         schedulerEnabled: cfg.schedulerEnabled,
         next: upcoming ? { id: upcoming.id, name: upcoming.name, next_run_at: upcoming.next_run_at } : null,
@@ -187,10 +190,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (method === 'POST' && path === '/api/rewrite-prompt') {
     try {
       const body = await readJson(req)
-      const prompt = await rewriteAutomationPrompt(String(body.draft || body.prompt || ''), String(body.task_name || body.name || ''))
+      const prompt = await rewriteAutomationPrompt(
+        String(body.draft || body.prompt || ''),
+        String(body.task_name || body.name || ''),
+      )
       send(res, 200, { ok: true, prompt }, req)
     } catch (e) {
-      send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
+      const msg = e instanceof Error ? e.message : String(e)
+      const client = msg.includes('请先') || msg.includes('未配置') || msg.includes('未返回')
+      send(res, client ? 400 : 502, { ok: false, detail: msg }, req)
     }
     return
   }
@@ -215,7 +223,23 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const u = new URL(req.url || '/', 'http://127.0.0.1')
     const page = Number(u.searchParams.get('page') || '1')
     const pageSize = Number(u.searchParams.get('page_size') || '10')
-    send(res, 200, { ok: true, ...listRuns(cfg.dataRoot, page, pageSize) }, req)
+    const listed = listRuns(cfg.dataRoot, page, pageSize)
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        ...listed,
+        items: listed.items.map((row) => ({
+          ...row,
+          display_text: row.summary
+            ? formatWecomText(row.summary, row.automation_name, row.started_at)
+            : '',
+          charts: attachRunCharts(row),
+        })),
+      },
+      req,
+    )
     return
   }
 

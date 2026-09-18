@@ -1,10 +1,21 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Automation, AutomationRun, AutomationSource, RunStatus, ScheduleType } from './types.js'
+import type {
+  Automation,
+  AutomationRun,
+  AutomationSource,
+  BitableSync,
+  FeishuDocSync,
+  RunStatus,
+  ScheduleType,
+  YuqueDocSync,
+} from './types.js'
 import { fingerprintPrompt, newId, nowSec, withLock, writeJsonAtomic } from './util.js'
 import { enrichSchedule } from './schedule.js'
 import { sanitizeCwds } from './paths.js'
 import { getTemplate } from './templates.js'
+import { normalizeWikiToken } from './wiki_token.js'
+import { looksLikeYuqueSecret, normalizeYuqueBook } from './yuque_book.js'
 
 const STATUSES = new Set(['active', 'paused'])
 const MAX_RUNS = 100
@@ -71,11 +82,83 @@ export type CreateFields = {
   valid_until?: string | null
   cwds?: unknown
   push_to_wecom?: boolean
+  bitable_sync?: BitableSync | null
+  feishu_doc?: FeishuDocSync | null
+  yuque_doc?: YuqueDocSync | null
 }
 
 function normalizeStatus(v: unknown, fallback: 'active' | 'paused' = 'active'): 'active' | 'paused' {
   const s = String(v || fallback).trim().toLowerCase()
   return STATUSES.has(s) ? (s as 'active' | 'paused') : fallback
+}
+
+function sanitizeBitableSync(raw: unknown): BitableSync {
+  if (!raw || typeof raw !== 'object') {
+    return { enabled: false, app_token: '', table_id: '', mode: 'append' }
+  }
+  const o = raw as Record<string, unknown>
+  const mode = String(o.mode || 'append').trim().toLowerCase() === 'upsert' ? 'upsert' : 'append'
+  return {
+    enabled: Boolean(o.enabled),
+    app_token: String(o.app_token || '').trim().slice(0, 128),
+    table_id: String(o.table_id || '').trim().slice(0, 128),
+    mode,
+  }
+}
+
+function sanitizeFeishuDoc(raw: unknown): FeishuDocSync {
+  if (!raw || typeof raw !== 'object') {
+    return { enabled: false, parent_token: '' }
+  }
+  const o = raw as Record<string, unknown>
+  let parent = String(o.parent_token || '').trim().slice(0, 512)
+  if (parent) parent = normalizeWikiToken(parent).slice(0, 512)
+  return {
+    enabled: Boolean(o.enabled),
+    parent_token: parent,
+  }
+}
+
+function sanitizeYuqueDoc(raw: unknown): YuqueDocSync {
+  if (!raw || typeof raw !== 'object') {
+    return { enabled: false, book: '' }
+  }
+  const o = raw as Record<string, unknown>
+  const enabled = Boolean(o.enabled)
+  const input = String(o.book || '').trim().slice(0, 512)
+  if (looksLikeYuqueSecret(input)) {
+    throw new Error('语雀 Cookie/Token 不能写进任务。请放到本机凭证文件，不要改仓库配置文件')
+  }
+  if (!input) return { enabled, book: '' }
+  try {
+    return { enabled, book: normalizeYuqueBook(input).slice(0, 128) }
+  } catch (e) {
+    if (enabled) throw e
+    return { enabled: false, book: '' }
+  }
+}
+
+function looksLikeBitableAppToken(token: string): boolean {
+  const t = token.trim().toLowerCase()
+  return t.startsWith('basc') || t.startsWith('bascn') || t.startsWith('app')
+}
+
+/** 任务级飞书文档目标。旧任务若把知识库 token 填进了写表字段，按父页面沿用，不写表。 */
+export function resolveFeishuDocSync(item: Automation): FeishuDocSync {
+  const doc = sanitizeFeishuDoc(item.feishu_doc)
+  if (doc.enabled && doc.parent_token) return doc
+  const b = item.bitable_sync
+  if (b?.enabled) {
+    const token = String(b.app_token || '').trim()
+    if (token && !looksLikeBitableAppToken(token)) {
+      return { enabled: true, parent_token: token }
+    }
+  }
+  return { enabled: false, parent_token: '' }
+}
+
+export function resolveYuqueDocSync(item: Automation): YuqueDocSync {
+  return sanitizeYuqueDoc(item.yuque_doc)
 }
 
 function normalizeScheduleType(v: unknown, fallback: ScheduleType = 'recurring'): ScheduleType {
@@ -111,7 +194,10 @@ export async function createAutomation(dataRoot: string, fields: CreateFields): 
     valid_from: fields.valid_from ?? null,
     valid_until: fields.valid_until ?? null,
     cwds: sanitizeCwds(fields.cwds),
-    push_to_wecom: Boolean(fields.push_to_wecom ?? tpl?.push_to_wecom ?? false),
+    push_to_wecom: Boolean(fields.push_to_wecom),
+    bitable_sync: sanitizeBitableSync(fields.bitable_sync),
+    feishu_doc: sanitizeFeishuDoc(fields.feishu_doc),
+    yuque_doc: sanitizeYuqueDoc(fields.yuque_doc),
     next_run_at: null,
     last_run_at: null,
     created_at: now,
@@ -155,6 +241,9 @@ export async function updateAutomation(
     if (fields.valid_until !== undefined) item.valid_until = fields.valid_until
     if (fields.cwds !== undefined) item.cwds = sanitizeCwds(fields.cwds)
     if (fields.push_to_wecom !== undefined) item.push_to_wecom = Boolean(fields.push_to_wecom)
+    if (fields.bitable_sync !== undefined) item.bitable_sync = sanitizeBitableSync(fields.bitable_sync)
+    if (fields.feishu_doc !== undefined) item.feishu_doc = sanitizeFeishuDoc(fields.feishu_doc)
+    if (fields.yuque_doc !== undefined) item.yuque_doc = sanitizeYuqueDoc(fields.yuque_doc)
     if (fields.last_run_at !== undefined) item.last_run_at = fields.last_run_at
     if (fields.next_run_at !== undefined) item.next_run_at = fields.next_run_at
     item.updated_at = nowSec()
@@ -208,6 +297,7 @@ export async function appendRun(dataRoot: string, fields: Partial<AutomationRun>
     skip_reason: fields.skip_reason,
     delivery_status: fields.delivery_status,
     delivery_error: fields.delivery_error,
+    charts: fields.charts,
   }
   await withLock(() => {
     const items = readJson<AutomationRun[]>(runsPath(dataRoot), [])
