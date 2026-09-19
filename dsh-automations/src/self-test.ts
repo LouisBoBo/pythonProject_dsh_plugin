@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { computeNextRunAt, shouldRunNow, rruleToScheduleLabel, enrichSchedule } from './schedule.js'
@@ -51,6 +51,11 @@ import {
   cookieValue,
 } from './yuque_book.js'
 import { chatCompletionsUrl } from './llm.js'
+import {
+  meterEventsPath,
+  providerFromBaseUrl,
+  tokensFromChatUsage,
+} from './llm_meter.js'
 import { isPromptSkeleton, resolveRewriteDraft, rewriteAutomationPrompt } from './rewrite.js'
 import { resolveMesEntity, loadMesEntities, type MesEntity } from './mes_catalog.js'
 import { runCustomAgent } from './agent.js'
@@ -183,6 +188,43 @@ assert(mes && mes.prompt.includes('禁止：Markdown 表格'), 'mes prompt has f
     chatCompletionsUrl('https://open.bigmodel.cn/api/paas/v4') === 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
     'glm v4 untouched',
   )
+  assert(providerFromBaseUrl('https://api.deepseek.com') === 'deepseek', 'meter provider deepseek')
+  {
+    const hitInclusive = tokensFromChatUsage({
+      prompt_tokens: 21666,
+      completion_tokens: 361,
+      total_tokens: 22027,
+      prompt_tokens_details: { cached_tokens: 19840 },
+      completion_tokens_details: { reasoning_tokens: 70 },
+    })
+    assert(hitInclusive, 'usage mapped')
+    if (!hitInclusive) throw new Error('usage mapped')
+    assert(hitInclusive.input === 1826, 'uncached exclusive')
+    assert(hitInclusive.cacheRead === 19840, 'cache hit')
+    assert(hitInclusive.output === 361, 'output only completion')
+    assert(hitInclusive.reasoning === 70, 'reasoning detail')
+    assert(hitInclusive.total === 22027, 'provider total kept')
+    assert(hitInclusive.total === hitInclusive.input + hitInclusive.output + hitInclusive.cacheRead, 'card = 命中+未命中+输出')
+    assert(hitInclusive.total !== 22027 + 70, 'reasoning not in total')
+  }
+  {
+    const exclusive = tokensFromChatUsage({
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      total_tokens: 120,
+    })
+    assert(exclusive && exclusive.input === 100 && exclusive.cacheRead === 0 && exclusive.total === 120, 'no cache')
+  }
+  {
+    const plusReasoning = tokensFromChatUsage({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 18,
+      completion_tokens_details: { reasoning_tokens: 3 },
+    })
+    assert(plusReasoning && plusReasoning.total === 15 && plusReasoning.reasoning === 3, 'strip reasoning from total')
+  }
+  assert(tokensFromChatUsage({}) === null, 'empty usage null')
   assert(isPromptSkeleton(PROMPT_SKELETON), 'skeleton detected')
   assert(isPromptSkeleton('【目标】（一句话：要产出什么）\n【数据来源】MES'), 'placeholder skeleton')
   assert(!isPromptSkeleton('【目标】每日物料库存推送\n【数据来源】当前 MES'), 'real prompt not skeleton')
@@ -592,6 +634,9 @@ assert(mes && mes.prompt.includes('禁止：Markdown 表格'), 'mes prompt has f
   writeFileSync(join(cwd, 'a.txt'), 'hello')
 
   void (async () => {
+    const prevDshHome = process.env.DSH_HOME
+    const meterHome = mkdtempSync(join(tmpdir(), 'dsh-home-'))
+    process.env.DSH_HOME = meterHome
     const prevLlmUrl = process.env.DSH_AUTOMATIONS_LLM_BASE_URL
     const prevLlmKey = process.env.DSH_AUTOMATIONS_LLM_API_KEY
     process.env.DSH_AUTOMATIONS_LLM_BASE_URL = 'https://api.deepseek.com'
@@ -615,6 +660,13 @@ assert(mes && mes.prompt.includes('禁止：Markdown 表格'), 'mes prompt has f
               },
             },
           ],
+          usage: {
+            prompt_tokens: 21666,
+            completion_tokens: 361,
+            total_tokens: 22027,
+            prompt_tokens_details: { cached_tokens: 19840 },
+            completion_tokens_details: { reasoning_tokens: 70 },
+          },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       )
@@ -637,6 +689,31 @@ assert(mes && mes.prompt.includes('禁止：Markdown 表格'), 'mes prompt has f
       assert(user.includes('【指令骨架参考】'), 'rewrite user has skeleton')
       const drafted = await rewriteAutomationPrompt('查昨日工单', '日报')
       assert(drafted.includes('【目标】'), 'draft rewrite ok')
+      const meterPath = meterEventsPath()
+      assert(existsSync(meterPath), 'rewrite writes llm-meter jsonl')
+      const meterLines = readFileSync(meterPath, 'utf8').trim().split('\n').filter(Boolean)
+      assert(meterLines.length === 2, 'one meter row per chat call')
+      const row = JSON.parse(meterLines[0]) as {
+        v: number
+        source: string
+        quality: string
+        prompt_tokens: number
+        cache_read_tokens: number
+        completion_tokens: number
+        reasoning_tokens: number
+        total_tokens: number
+        session_id: string
+      }
+      assert(row.v === 1 && row.source === 'dsh_other', 'meter schema v1 dsh_other')
+      assert(row.quality === 'provider', 'provider usage')
+      assert(row.prompt_tokens === 1826, 'meter uncached')
+      assert(row.cache_read_tokens === 19840, 'meter cache')
+      assert(row.completion_tokens === 361, 'meter output')
+      assert(row.reasoning_tokens === 70, 'meter reasoning detail')
+      assert(row.total_tokens === 22027, 'meter total')
+      assert(row.session_id === '', 'no session')
+      assert(!meterLines.join('\n').includes('每日物料库存推送'), 'meter jsonl has no prompt body')
+      assert(!meterLines.join('\n').includes('sk-test-rewrite'), 'meter jsonl has no api key')
     } finally {
       globalThis.fetch = origRewriteFetch
       if (prevLlmUrl === undefined) delete process.env.DSH_AUTOMATIONS_LLM_BASE_URL
@@ -1174,6 +1251,9 @@ assert(mes && mes.prompt.includes('禁止：Markdown 表格'), 'mes prompt has f
 
     rmSync(root, { recursive: true, force: true })
     rmSync(cwd, { recursive: true, force: true })
+    rmSync(meterHome, { recursive: true, force: true })
+    if (prevDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prevDshHome
     console.log('self-test ok')
   })().catch((err) => {
     console.error(err)

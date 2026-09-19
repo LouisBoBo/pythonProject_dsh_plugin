@@ -1,0 +1,13 @@
+{
+  "id": "mcp-chart",
+  "title": "AntV 图表 MCP",
+  "summary": "ModelScope antvis/mcp-server-chart：柱状/折线/面积/饼/漏斗/雷达/双轴。仅在面板启用后注册工具。",
+  "vendor": "AntV",
+  "marketplace": "ModelScope",
+  "mcpServer": "@antvis/mcp-server-chart",
+  "mcpUrl": "https://www.modelscope.cn/mcp/servers/@antvis/mcp-server-chart",
+  "kind": "mcp",
+  "avatar": "https://gw.alipayobjects.com/zos/antfincdn/FLrTNDvlna/antv.png",
+  "tools": ["zr_esc_mcp_chart"],
+  "defaultEnabled": false
+}

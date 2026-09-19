@@ -1,0 +1,13 @@
+{
+  "id": "mcp-feishu",
+  "title": "飞书知识库",
+  "summary": "把运营简报、会议纪要落到飞书知识库新文档。凭证读系统配置 App，不另填 Secret。",
+  "vendor": "飞书",
+  "marketplace": "开放平台",
+  "mcpServer": "lark-wiki",
+  "mcpUrl": "https://open.feishu.cn/document/server-docs/docs/wiki-v2/wiki-oaid",
+  "kind": "mcp",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=Feishu&backgroundColor=dbeafe",
+  "tools": ["zr_esc_feishu_wiki"],
+  "defaultEnabled": false
+}

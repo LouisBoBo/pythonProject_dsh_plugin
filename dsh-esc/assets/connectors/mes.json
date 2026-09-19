@@ -1,0 +1,10 @@
+{
+  "id": "mes",
+  "title": "公司 MES",
+  "summary": "只读工单、在制、产出、OEE、稼动、良率、报废、物料库存。凭证只读 WorkBuddy 系统配置，默认关闭以免抢走 mes_ask。",
+  "vendor": "中软",
+  "kind": "http",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=MESFactory&backgroundColor=dcfce7",
+  "tools": ["zr_esc_mes_query"],
+  "defaultEnabled": false
+}

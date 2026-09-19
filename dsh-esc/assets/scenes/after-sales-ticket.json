@@ -1,0 +1,8 @@
+{
+  "id": "after-sales-ticket",
+  "title": "售后工单分析",
+  "description": "售后专家 + 工单 SOP + MES/Dify。把客诉工单做成结构化分析。",
+  "expertId": "after-sales-expert",
+  "skillIds": ["after-sales-ticket"],
+  "connectorIds": ["mes", "dify"]
+}

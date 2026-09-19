@@ -1,0 +1,13 @@
+{
+  "id": "mcp-wecom",
+  "title": "企微群机器人",
+  "summary": "把品质简报、缺料预警发到企微群。官方 Webhook，免费。凭证读系统配置，定时推送仍走自动化。",
+  "vendor": "企业微信",
+  "marketplace": "官方 API",
+  "mcpServer": "wecom-webhook",
+  "mcpUrl": "https://developer.work.weixin.qq.com/document/path/91770",
+  "kind": "mcp",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=Wecom&backgroundColor=dcfce7",
+  "tools": ["zr_esc_wecom_send"],
+  "defaultEnabled": false
+}

@@ -1,0 +1,8 @@
+{
+  "id": "test-case-gen",
+  "title": "测试用例生成",
+  "description": "测试专家 + 用例 SOP + 可选 Dify 模板检索。",
+  "expertId": "test-expert",
+  "skillIds": ["test-case-gen"],
+  "connectorIds": ["dify"]
+}

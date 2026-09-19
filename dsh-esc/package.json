@@ -1,10 +1,10 @@
 {
-  "name": "@zhongruan/dsh-automations",
-  "version": "0.1.31",
-  "description": "DSH 自动化任务：模板或自定义指令定时执行只读汇总，可选推企微、写入飞书/语雀文档",
+  "name": "@zhongruan/dsh-esc",
+  "version": "0.1.21",
+  "description": "DSH 专家·技能·连接器：PCB 数据分析师、MES 运营分析、AntV 图表 MCP",
   "dshMarket": {
-    "zh": "自动化任务：模板一键建或自定义指令，定时执行只读汇总，可选推企微、每天新建飞书或语雀文档",
-    "en": "Scheduled automations: templates or custom prompts, read-only summaries, optional WeCom push and daily Feishu/Yuque docs"
+    "zh": "专家·技能·连接器：岗位人设、SOP 技能、MES 取数与 ModelScope 图表 MCP（与现网查数/8D 并存）",
+    "en": "Experts, skills and connectors: PCB analyst, MES ops SOP, ModelScope chart MCP"
   },
   "type": "module",
   "main": "lib/index.js",
@@ -15,10 +15,11 @@
   },
   "files": [
     "lib",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "assets"
   ],
   "scripts": {
-    "build": "tsc && cp src/client.js lib/client.js && cp src/chart_render.py lib/chart_render.py",
+    "build": "tsc && cp src/client.js lib/client.js",
     "self-test": "node lib/self-test.js"
   },
   "publishConfig": {

@@ -1,0 +1,13 @@
+{
+  "id": "mcp-web-read",
+  "title": "网页与规范阅读",
+  "summary": "对照 fetch/MarkItDown：把工艺规范、规格书、客诉 PDF 的公开 URL 转成 Markdown。Jina 免费，不访问内网。",
+  "vendor": "Jina",
+  "marketplace": "Jina Reader",
+  "mcpServer": "@jina-ai/reader",
+  "mcpUrl": "https://jina.ai/reader",
+  "kind": "mcp",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=WebRead&backgroundColor=fef3c7",
+  "tools": ["zr_esc_web_read"],
+  "defaultEnabled": false
+}

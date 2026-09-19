@@ -1,0 +1,8 @@
+{
+  "id": "pcb-process-qa",
+  "title": "PCB 工艺顾问",
+  "description": "工艺岗位人设。与现网 mes_pcb 并存，不替换引擎专家问答。",
+  "expertId": "pcb-process-advisor",
+  "skillIds": [],
+  "connectorIds": ["dify"]
+}

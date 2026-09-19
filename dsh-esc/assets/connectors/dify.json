@@ -1,0 +1,10 @@
+{
+  "id": "dify",
+  "title": "Dify 知识库",
+  "summary": "按 datasetId 检索。没有 id 时不检索、不编造条目。",
+  "vendor": "Dify",
+  "kind": "http",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=DifyDocs&backgroundColor=fef3c7",
+  "tools": ["zr_esc_dify_search"],
+  "defaultEnabled": false
+}

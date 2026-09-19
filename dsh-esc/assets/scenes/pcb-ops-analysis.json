@@ -1,0 +1,8 @@
+{
+  "id": "pcb-ops-analysis",
+  "title": "PCB 生产运营分析",
+  "description": "数据分析师按 SMT→DIP→组装→测试出专家简报：表格扫读风险，AntV 多图（趋势/双轴/柱状/漏斗/雷达）对照 MES 只读取数。",
+  "expertId": "pcb-data-analyst",
+  "skillIds": ["mes-ops-analysis"],
+  "connectorIds": ["mes", "mcp-chart"]
+}

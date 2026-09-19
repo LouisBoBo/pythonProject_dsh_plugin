@@ -1,4 +1,10 @@
 import { loadConfig } from './config.js'
+import {
+  clipMeterError,
+  countMessageChars,
+  providerFromBaseUrl,
+  recordChatCompletion,
+} from './llm_meter.js'
 import { AutomationError } from './types.js'
 import { readWorkbuddyCreds } from './workbuddy_config.js'
 
@@ -83,6 +89,12 @@ async function postChat(
   const url = chatCompletionsUrl(cred.base)
   const ac = new AbortController()
   const t = setTimeout(() => ac.abort(), timeoutMs)
+  const started = Date.now()
+  const model = String(payload.model || cred.model || '')
+  let usage: unknown
+  let ok = false
+  let finish = ''
+  let errMsg = ''
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -94,10 +106,8 @@ async function postChat(
       body: JSON.stringify(payload),
     })
     const text = await res.text()
-    if (!res.ok) {
-      throw new AutomationError('llm_failed', 'AI 暂时不可用，请稍后重试或手工完善指令')
-    }
     let data: {
+      usage?: unknown
       choices?: {
         message?: {
           content?: string | null
@@ -109,17 +119,47 @@ async function postChat(
     try {
       data = JSON.parse(text) as typeof data
     } catch {
-      throw new AutomationError('llm_failed', 'AI 返回异常，请稍后重试')
+      finish = 'error'
+      errMsg = 'AI 返回异常，请稍后重试'
+      throw new AutomationError('llm_failed', errMsg)
+    }
+    usage = data.usage
+    if (!res.ok) {
+      finish = 'error'
+      errMsg = 'AI 暂时不可用，请稍后重试或手工完善指令'
+      throw new AutomationError('llm_failed', errMsg)
     }
     const msg = data.choices?.[0]?.message || {}
     const tool_calls = parseToolCalls(msg)
     const content = String(msg.content || '').trim()
     if (!content && !tool_calls.length) {
-      throw new AutomationError('llm_failed', 'AI 未返回有效内容')
+      finish = 'error'
+      errMsg = 'AI 未返回有效内容'
+      throw new AutomationError('llm_failed', errMsg)
     }
+    finish = 'stop'
+    ok = true
     return { content, tool_calls }
+  } catch (e) {
+    if (!finish) {
+      const aborted = e instanceof Error && e.name === 'AbortError'
+      finish = aborted ? 'aborted' : 'throw'
+      errMsg = clipMeterError(e instanceof Error ? e.message : e)
+    }
+    if (e instanceof AutomationError) throw e
+    throw new AutomationError('llm_failed', 'AI 暂时不可用，请稍后重试或手工完善指令')
   } finally {
     clearTimeout(t)
+    await recordChatCompletion({
+      usage,
+      provider: providerFromBaseUrl(cred.base),
+      model,
+      ok,
+      finish,
+      error: ok ? '' : errMsg,
+      started,
+      promptChars: countMessageChars(payload.messages),
+    })
   }
 }
 

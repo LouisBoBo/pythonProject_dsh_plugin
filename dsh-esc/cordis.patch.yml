@@ -1,0 +1,3 @@
+- insert:
+    - id: esc
+      name: '@zhongruan/dsh-esc'
