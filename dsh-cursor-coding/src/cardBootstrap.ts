@@ -56,6 +56,87 @@ export function shouldApplyJobSnapshot(opts: { sealedStatus?: string; incomingSt
   return false
 }
 
+/** 已封口后，SSE 回放的 review/auto_apply 不得再把相位打回「写码中」。 */
+export function sseMayForceRunning(sealedStatus?: string): boolean {
+  return !TERMINAL_JOB_STATUS[String(sealedStatus || '').trim()]
+}
+
+/**
+ * 进度卡可见相位：工具结果 / presentationMeta / 封口 status 优先于 React phase。
+ * 宿主在工具返回后可能冻住 toolview；只要权威 status 已是终态，转圈必须停。
+ */
+export function cardVisiblePhase(opts: {
+  phase: string
+  sealedStatus?: string
+  uiStatus?: string
+  resultDone?: boolean
+  resultStatus?: string
+  resultJobId?: string
+  liveJobId?: string
+  cancelled?: boolean
+}): string {
+  if (opts.cancelled) return 'done'
+  const live = String(opts.liveJobId || '').trim()
+  const resultJob = String(opts.resultJobId || '').trim()
+  const resultMatches = !live || !resultJob || resultJob === live
+  const resultSt = opts.resultDone === true && resultMatches ? String(opts.resultStatus || '').trim() : ''
+  const auth = preferJobStatus(
+    preferJobStatus(String(opts.sealedStatus || ''), resultSt),
+    String(opts.uiStatus || ''),
+  )
+  if (TERMINAL_JOB_STATUS[auth]) return 'done'
+  return opts.phase
+}
+
+/** 只认工具 JSON 的 job_id / status / done，禁止扫正文。 */
+export function readToolJobFields(value: unknown): {
+  jobId: string
+  status: string
+  done: boolean
+  detail: string
+} {
+  const empty = { jobId: '', status: '', done: false, detail: '' }
+  const seen = new Set<unknown>()
+  const walk = (v: unknown, depth: number): typeof empty => {
+    if (v == null || depth > 4) return empty
+    if (typeof v === 'string') {
+      const t = v.trim()
+      if (!t.startsWith('{') && !t.startsWith('[')) return empty
+      try {
+        return walk(JSON.parse(t) as unknown, depth + 1)
+      } catch {
+        return empty
+      }
+    }
+    if (typeof v !== 'object') return empty
+    if (seen.has(v)) return empty
+    seen.add(v)
+    const o = v as Record<string, unknown>
+    const ui =
+      o.cursor_coding_ui && typeof o.cursor_coding_ui === 'object'
+        ? (o.cursor_coding_ui as Record<string, unknown>)
+        : null
+    const jobId = String(o.job_id || (ui && ui.job_id) || '').trim()
+    const status = String(o.status || (ui && ui.status) || '').trim()
+    const done = o.done === true
+    const detail = String(o.detail || '').trim()
+    if (jobId || status || done) return { jobId, status, done, detail }
+    for (const k of ['result', 'value', 'output', 'data', 'json']) {
+      const inner = walk(o[k], depth + 1)
+      if (inner.jobId || inner.status || inner.done) return inner
+    }
+    if (Array.isArray(o.content)) {
+      for (const c of o.content) {
+        if (!c || typeof c !== 'object') continue
+        const inner = walk((c as Record<string, unknown>).text, depth + 1)
+        if (inner.jobId || inner.status || inner.done) return inner
+      }
+    }
+    return empty
+  }
+  return walk(value, 0)
+}
+
 export function cardIdentity(opts: {
   callId?: string
   blockId?: string

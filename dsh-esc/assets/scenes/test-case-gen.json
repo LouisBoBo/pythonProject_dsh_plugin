@@ -1,8 +1,8 @@
 {
   "id": "test-case-gen",
   "title": "测试用例生成",
-  "description": "测试专家 + 用例 SOP + 可选 Dify 模板检索。",
+  "description": "测试专家 + 用例 SOP，生成后写入飞书文档。Dify 模板检索可另加。",
   "expertId": "test-expert",
   "skillIds": ["test-case-gen"],
-  "connectorIds": ["dify"]
+  "connectorIds": ["mcp-feishu"]
 }

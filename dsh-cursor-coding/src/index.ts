@@ -20,8 +20,8 @@ import { applyJobReview, healStalePendingReview } from './orchestrator/runJob.js
 import { createPendingConfirm, cancelPendingConfirm, loadPendingConfirm } from './pendingConfirm.js'
 import { decideCodingGate, extractSessionEvents } from './clarifyFlow.js'
 import { looksLikeFollowUp } from './requirementGate.js'
-import { criticalDeferredFiles, isStuckEmptyPendingReview } from './scopeCompanions.js'
-import { preferredConclusionAssistantText } from './transcript.js'
+import { isStuckEmptyPendingReview } from './scopeCompanions.js'
+import { formatChatConclusion } from './conclusion.js'
 import { getListenAddr, isServerRunning, startServer, stopServer } from './server.js'
 
 /** 展开 ~/… 为绝对路径 */
@@ -129,7 +129,7 @@ function buildConclusionToolResult(opts: {
     status: fresh.status,
     detail: fresh.detail || '',
     synced_files: fresh.synced_files || fresh.last_synced_files || [],
-    chat_body: buildChatConclusionBody(fresh.id),
+    chat_body: formatChatConclusion(fresh),
     source: 'cursor_coding',
     cursor_coding_ui: {
       kind: opts.kind,
@@ -165,6 +165,10 @@ async function waitJobUntilConclusion(
     const detail = String(job.detail || '')
     const inScopeLen = (job.review_in_scope || []).length
     if (FINISH_DONE.has(st) || isStuckEmptyPendingReview(detail, inScopeLen)) {
+      // 终态已落盘：让 SSE 把带 job_id 的 done 送到进度卡。工具一返回宿主可能冻住 toolview。
+      const updated = Date.parse(String(job.updated_at || '')) || 0
+      const age = updated ? Date.now() - updated : 0
+      if (age >= 0 && age < 700) await sleep(700 - age, signal)
       return loadJob(jobId)
     }
     if (st === 'pending_review') {
@@ -278,12 +282,29 @@ async function waitConfirmThenStart(opts: {
   })
 }
 
+function asToolValue(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  if (typeof value === 'string') {
+    const t = value.trim()
+    if (!t.startsWith('{')) return null
+    try {
+      const o = JSON.parse(t) as unknown
+      if (o && typeof o === 'object' && !Array.isArray(o)) return o as Record<string, unknown>
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
 /**
  * 聊天正文门禁：确认卡/进度过程中正文为空；
  * begin/continue/finish 在 done=true 时输出「本轮结论」（凡写码必有结论）。
  */
 function chatBodyRender(_args: unknown, value: unknown) {
-  const v = value && typeof value === 'object' ? (value as Record<string, unknown>) : null
+  const v = asToolValue(value)
   if (!v) return textBlocks('')
   // 须澄清：模型必须看见下一步（否则空返回会编造「已发出确认卡」）；聊天卡由 toolview 藏掉
   if (v.need_clarify === true) {
@@ -318,6 +339,18 @@ function ccPresentationMeta(_args: unknown, value: unknown): JsonValue {
     return asJson({ cc: { ui: { kind: 'await_ask_user' } } })
   }
   return asJson({ cc: { ui: null } })
+}
+
+/** 会话日志 / 聊天正文权威内容 = chat_body，避免宿主只展示模型一句短复述。 */
+function finalizeChatBody(
+  _exec: unknown,
+  result: { isError?: boolean; value?: unknown; content?: unknown },
+): ReturnType<typeof textBlocks> | undefined {
+  if (!result || result.isError) return undefined
+  const v = asToolValue(result.value)
+  const body = v && typeof v.chat_body === 'string' ? v.chat_body.trim() : ''
+  if (body) return textBlocks(body)
+  return undefined
 }
 
 function registerHarnessHandlers(): void {
@@ -396,53 +429,10 @@ function buildProgressBody(jobId: string): string {
 function buildChatConclusionBody(jobId: string): string {
   const job = loadJob(jobId)
   if (!job) return `任务不存在：${jobId}`
-  const asst = preferredConclusionAssistantText(job.assistant_text || '')
-  const synced = job.synced_files || job.last_synced_files || job.review_in_scope || []
-  const deferred = job.review_deferred || job.deferred_files || []
-  const lines: string[] = [`## 本轮结论`, ``]
-  if (asst) {
-    lines.push(asst, ``)
-  } else {
-    lines.push(job.detail || '写码流程已结束。', ``)
-  }
-  lines.push(`---`, ``)
-  lines.push(`**状态：** ${job.status}`)
-  if (job.status === 'succeeded') {
-    lines.push(`**同步：** 已自动同步 ${synced.length} 个文件到本机，并尝试刷新前端。`)
-    if (synced.length) {
-      lines.push(``)
-      for (const f of synced.slice(0, 30)) lines.push(`- ${f}`)
-      if (synced.length > 30) lines.push(`- …另有 ${synced.length - 30} 个`)
-    }
-  } else if (job.status === 'pending_review') {
-    lines.push(`**同步：** 待审（自动同步未开启或范围内无文件）。`)
-  } else {
-    lines.push(`**说明：** ${job.detail || job.status}`)
-  }
-  if (deferred.length) {
-    const crit = criticalDeferredFiles(deferred)
-    lines.push(``, `**范围外未同步 ${deferred.length} 个**：`)
-    for (const f of deferred.slice(0, 15)) lines.push(`- ${f}`)
-    if (deferred.length > 15) lines.push(`- …另有 ${deferred.length - 15} 个`)
-    if (crit.length) {
-      lines.push(
-        ``,
-        `⚠ **契约文件未同步**（${crit.join(', ')}）：易导致「页面已改但接口请求失败」。请扩大可写范围后走续改，或设置里补上 \`schemas.py\` / \`models.py\`。`,
-      )
-    } else {
-      lines.push(`（可扩大写范围后重试）`)
-    }
-  }
-  lines.push(``)
-  lines.push(`请自行打开页面确认编码效果。`)
-  lines.push(``)
-  lines.push(
-    `如需调整或修 bug，请直接在本对话说明具体问题（例如：写入成功但提示请求失败）。小改直接续改确认卡；大改先选择题澄清。`,
-  )
-  return lines.join('\n')
+  return formatChatConclusion(job)
 }
 
-/** 终态正文：精简（排障用） */
+/** 终态正文：与聊天结论同一份 */
 function buildDoneBody(jobId: string): string {
   return buildChatConclusionBody(jobId)
 }
@@ -517,6 +507,7 @@ export function apply(ctx: Context) {
         render: chatBodyRender,
         presentationMeta: ccPresentationMeta,
       },
+      finalizeContent: finalizeChatBody,
       async execute(args, exec) {
         await startServer()
         const cfg = loadConfig()
@@ -620,6 +611,7 @@ export function apply(ctx: Context) {
         render: chatBodyRender,
         presentationMeta: ccPresentationMeta,
       },
+      finalizeContent: finalizeChatBody,
       async execute(args, exec) {
         await startServer()
         const cfg = loadConfig()
@@ -714,6 +706,7 @@ export function apply(ctx: Context) {
         schema: JSON_OUTPUT_SCHEMA,
         render: chatBodyRender,
       },
+      finalizeContent: finalizeChatBody,
       async execute(args, exec) {
         await startServer()
         let jobId = String((args && (args as { job_id?: string }).job_id) || '').trim()

@@ -30,7 +30,12 @@ window.__ModuleLoader__.load({
     }
     function fetchJson(url, opts) {
       opts = opts || {}
-      return fetch(url, Object.assign({ cache: 'no-store', signal: AbortSignal.timeout(30000) }, opts)).then(function (r) {
+      var timeoutMs = opts.timeoutMs || 30000
+      var rest = {}
+      Object.keys(opts).forEach(function (k) {
+        if (k !== 'timeoutMs') rest[k] = opts[k]
+      })
+      return fetch(url, Object.assign({ cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) }, rest)).then(function (r) {
         return r.text().then(function (text) {
           var d = {}
           try {
@@ -65,10 +70,22 @@ window.__ModuleLoader__.load({
       '.esc-chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}' +
       '.esc-chip{border:1px solid var(--esc-border);background:#fff;border-radius:16px;padding:4px 12px;font:inherit;cursor:pointer;color:var(--esc-text2)}' +
       '.esc-chip.on{background:#111827;color:#fff;border-color:#111827}' +
+      '.esc-source{display:flex;gap:8px;margin:0 0 12px}' +
+      '.esc-source-btn{border:1px solid var(--esc-border);background:#fff;border-radius:18px;padding:6px 14px;font:inherit;cursor:pointer;color:var(--esc-text2);font-weight:600}' +
+      '.esc-source-btn.on{background:#111827;color:#fff;border-color:#111827}' +
+      '.esc-pager{display:flex;align-items:center;justify-content:center;gap:10px;margin:16px 0 0}' +
+      '.esc-pager button{border:1px solid var(--esc-border);background:#fff;border-radius:8px;padding:4px 10px;font:inherit;cursor:pointer}' +
+      '.esc-pager button:disabled{opacity:.45;cursor:not-allowed}' +
+      '.esc-hub-badge{display:inline-block;margin-left:6px;font-size:10px;padding:1px 6px;border-radius:999px;background:#eff6ff;color:#1d4ed8;vertical-align:middle}' +
       '.esc-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}' +
       '.esc-card{text-align:left;padding:16px;border:1px solid var(--esc-border);border-radius:var(--esc-radius);background:#fff;display:flex;flex-direction:column;gap:8px;min-height:0}' +
       '.esc-card-skill{gap:0;padding:14px 16px;cursor:pointer}' +
-      '.esc-card-skill:hover{border-color:#d1d5db}' +
+      '.esc-card-skill:hover,.esc-card-scene:hover{border-color:#d1d5db}' +
+      '.esc-card-scene{height:176px;box-sizing:border-box;overflow:hidden;cursor:pointer}' +
+      '.esc-card-scene h3{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.esc-card-scene .esc-desc{min-height:38px}' +
+      '.esc-card-scene .esc-tags{margin-top:auto;flex-wrap:nowrap}' +
+      '.esc-card-scene .esc-actions{margin-top:0;flex-shrink:0}' +
       '.esc-card-conn{height:200px;box-sizing:border-box;gap:6px}' +
       '.esc-card-extra{flex:1;min-height:0;overflow:hidden}' +
       '.esc-card-conn .esc-hint{margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
@@ -119,6 +136,13 @@ window.__ModuleLoader__.load({
       '.esc-detail-pill{margin:0;padding:10px 14px;border-radius:12px;background:#f3f4f6;color:#111827;font-size:13px}' +
       '.esc-detail-tags{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 0}' +
       '.esc-detail-sop{margin:8px 0 0;padding:12px 14px;border-radius:12px;background:#f9fafb;white-space:pre-wrap;font-size:12px;line-height:1.65;max-height:36vh;overflow:auto}' +
+      '.esc-detail-item{display:flex;gap:12px;align-items:flex-start;padding:10px 12px;border-radius:12px;background:#f9fafb;margin:8px 0 0}' +
+      '.esc-detail-item .esc-avatar{width:40px;height:40px}' +
+      '.esc-detail-item h4{margin:0;font-size:14px;font-weight:650}' +
+      '.esc-detail-item p{margin:4px 0 0;color:#6b7280;font-size:13px;line-height:1.5}' +
+      '.esc-detail-empty{margin:8px 0 0;color:#9ca3af;font-size:13px}' +
+      '.esc-detail-list{margin:8px 0 0;padding-left:18px;color:#374151;font-size:13px;line-height:1.65}' +
+      '.esc-detail-list li{margin:0 0 6px}' +
       '.esc-check{display:flex;align-items:flex-start;gap:8px;margin:6px 0;font-size:13px}' +
       '.esc-scene-chip-wrap{position:relative;display:inline-flex}' +
       '.esc-scene-chip{height:28px;max-width:176px;border:1px solid var(--border, #e5e7eb);border-radius:8px;padding:0 10px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
@@ -220,6 +244,21 @@ window.__ModuleLoader__.load({
       var chipState = useState('全部')
       var chip = chipState[0]
       var setChip = chipState[1]
+      var skillSourceState = useState('company')
+      var skillSource = skillSourceState[0]
+      var setSkillSource = skillSourceState[1]
+      var hubPageState = useState(1)
+      var hubPage = hubPageState[0]
+      var setHubPage = hubPageState[1]
+      var hubState = useState({ items: [], total: 0, page: 1, pageSize: 12, categories: [], loading: false, error: '' })
+      var hub = hubState[0]
+      var setHub = hubState[1]
+      var hubPreviewState = useState(null)
+      var hubPreview = hubPreviewState[0]
+      var setHubPreview = hubPreviewState[1]
+      var catalogStampState = useState(0)
+      var catalogStamp = catalogStampState[0]
+      var setCatalogStamp = catalogStampState[1]
       var dataState = useState(null)
       var data = dataState[0]
       var setData = dataState[1]
@@ -241,6 +280,9 @@ window.__ModuleLoader__.load({
       var skillDetailState = useState(null)
       var skillDetailId = skillDetailState[0]
       var setSkillDetailId = skillDetailState[1]
+      var sceneDetailState = useState(null)
+      var sceneDetailId = sceneDetailState[0]
+      var setSceneDetailId = sceneDetailState[1]
       var reviewState = useState(null)
       var liveReview = reviewState[0]
       var setLiveReview = reviewState[1]
@@ -264,6 +306,9 @@ window.__ModuleLoader__.load({
           if (rows[2].ok && rows[2].d.view && rows[2].d.view.port) rememberPort(rows[2].d.view.port)
           setData({ catalog: catalog, state: state, health: rows[2].ok ? rows[2].d : null, draft: rows[1].ok ? rows[1].d.draft : null })
           setDrafts(Object.assign({}, state.connectors || {}))
+          setCatalogStamp(function (n) {
+            return n + 1
+          })
           setErr('')
         }).catch(function (e) {
           setErr(String(e.message || e) + '。请确认宿主已加载插件，本机 18786 在听。')
@@ -300,6 +345,52 @@ window.__ModuleLoader__.load({
         [create && create.expertId, create && (create.skillIds || []).join(','), create && (create.connectorIds || []).join(',')],
       )
 
+      useEffect(
+        function () {
+          if (tab !== 'skills' || skillSource !== 'skillhub') return
+          var cancelled = false
+          var timer = setTimeout(function () {
+            setHub(function (prev) {
+              return Object.assign({}, prev, { loading: true, error: '' })
+            })
+            var cat = !chip || chip === '全部' ? '' : chip
+            fetchJson(
+              serviceBase() +
+                '/api/skillhub/market?keyword=' +
+                encodeURIComponent(q || '') +
+                '&category=' +
+                encodeURIComponent(cat) +
+                '&page=' +
+                hubPage,
+            )
+              .then(function (r) {
+                if (cancelled) return
+                if (!r.ok) throw new Error(r.d.detail || 'SkillHub 加载失败')
+                setHub({
+                  items: r.d.items || [],
+                  total: r.d.total || 0,
+                  page: r.d.page || 1,
+                  pageSize: r.d.pageSize || 12,
+                  categories: r.d.categories || [],
+                  loading: false,
+                  error: '',
+                })
+              })
+              .catch(function (e) {
+                if (cancelled) return
+                setHub(function (prev) {
+                  return Object.assign({}, prev, { loading: false, error: String(e.message || e) })
+                })
+              })
+          }, 280)
+          return function () {
+            cancelled = true
+            clearTimeout(timer)
+          }
+        },
+        [tab, skillSource, q, chip, hubPage, catalogStamp],
+      )
+
       function run(fn, okText) {
         setBusy(true)
         return Promise.resolve()
@@ -331,6 +422,10 @@ window.__ModuleLoader__.load({
       var skills = state.skills || {}
       var connectors = state.connectors || {}
       var limits = catalog.limits || { maxSkills: 3, maxConnectors: 3 }
+
+      function skillInUse(id) {
+        return !!(skills[id] && skills[id].enabled)
+      }
 
       function issueList(review) {
         if (!review) return null
@@ -416,7 +511,32 @@ window.__ModuleLoader__.load({
           }).then(function (r) {
             if (!r.ok) throw new Error(r.d.detail || '更新失败')
           })
-        })
+        }, enabled ? '已启用技能' : '已停用技能')
+      }
+
+      function installHub(slug, name) {
+        run(function () {
+          return fetchJson(serviceBase() + '/api/skillhub/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slug: slug }),
+            timeoutMs: 60000,
+          }).then(function (r) {
+            if (!r.ok) throw new Error(r.d.detail || '安装失败')
+          })
+        }, '已安装「' + (name || slug) + '」。请点开手册确认后再点 + 启用')
+      }
+
+      function uninstallHub(slug, name) {
+        run(function () {
+          return fetchJson(serviceBase() + '/api/skillhub/uninstall', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slug: slug }),
+          }).then(function (r) {
+            if (!r.ok) throw new Error(r.d.detail || '卸载失败')
+          })
+        }, '已卸载「' + (name || slug) + '」')
       }
 
       function saveConnector(id) {
@@ -435,7 +555,13 @@ window.__ModuleLoader__.load({
 
       function testConnector(id) {
         run(function () {
-          return fetchJson(serviceBase() + '/api/connectors/' + id + '/test', { method: 'POST' }).then(function (r) {
+          var draft = drafts[id] || {}
+          var opts = { method: 'POST' }
+          if (id === 'mcp-feishu') {
+            opts.headers = { 'Content-Type': 'application/json' }
+            opts.body = JSON.stringify({ docTarget: draft.docTarget || '' })
+          }
+          return fetchJson(serviceBase() + '/api/connectors/' + id + '/test', opts).then(function (r) {
             var detail = (r.d.result && r.d.result.detail) || r.d.detail || ''
             if (!r.ok) throw new Error(detail || '测通失败')
             toastMsg(true, detail || '连通')
@@ -447,6 +573,15 @@ window.__ModuleLoader__.load({
         var needle = (q || '').trim().toLowerCase()
         if (!needle) return true
         return String(text || '').toLowerCase().indexOf(needle) >= 0
+      }
+
+      function catalogById(list, id) {
+        if (!id) return null
+        var rows = list || []
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].id === id) return rows[i]
+        }
+        return null
       }
 
       function Avatar(src, letter, sq) {
@@ -476,7 +611,7 @@ window.__ModuleLoader__.load({
       if (tab === 'scenes') {
         body = h('div', null, [
           h('div', { className: 'esc-toolbar' }, [
-            h('p', { className: 'esc-hint', style: { margin: 0 } }, '可以同时召唤多张，再点一次「已召唤」即可取消。对话输入框旁从已召唤的里面选用。'),
+            h('p', { className: 'esc-hint', style: { margin: 0 } }, '点卡片看详情（能处理什么、专家、技能、连接器）。可以同时召唤多张，再点一次「已召唤」即可取消。对话输入框旁从已召唤的里面选用。'),
             h('button', { type: 'button', className: 'esc-btn primary', disabled: busy, onClick: function () { openCreate(null) } }, '创建场景卡'),
           ]),
           h(
@@ -489,37 +624,65 @@ window.__ModuleLoader__.load({
               .map(function (s) {
                 var summoned = summonedIds.indexOf(s.id) >= 0
                 var userCard = s.source === 'user'
-                return h('div', { key: s.id, className: 'esc-card' + (summoned ? ' summoned' : '') }, [
-                  h('h3', null, s.title + (userCard ? ' · 自建' : '')),
-                  h('p', { className: 'esc-desc' }, s.description),
-                  h('div', { className: 'esc-tags' }, [
-                    h('span', { className: 'esc-tag' }, '1 专家'),
-                    h('span', { className: 'esc-tag' }, (s.skillIds || []).length + ' 技能'),
-                    h('span', { className: 'esc-tag' }, (s.connectorIds || []).length + ' 连接器'),
-                  ]),
-                  h('div', { className: 'esc-actions' }, [
-                    userCard
-                      ? h(
-                          'button',
-                          { type: 'button', className: 'esc-btn', disabled: busy, onClick: function () { removeScene(s.id) } },
-                          '删除',
-                        )
-                      : null,
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'esc-summon' + (summoned ? ' on' : ''),
-                        disabled: busy,
-                        title: summoned ? '点击取消召唤' : '召唤后可在对话中选用',
-                        onClick: function () {
-                          toggleSummon(s.id, s.title, summoned)
+                return h(
+                  'div',
+                  {
+                    key: s.id,
+                    className: 'esc-card esc-card-scene' + (summoned ? ' summoned' : ''),
+                    role: 'button',
+                    tabIndex: 0,
+                    title: '查看场景卡详情',
+                    onClick: function () {
+                      setSceneDetailId(s.id)
+                    },
+                    onKeyDown: function (ev) {
+                      if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault()
+                        setSceneDetailId(s.id)
+                      }
+                    },
+                  },
+                  [
+                    h('h3', null, s.title + (userCard ? ' · 自建' : '')),
+                    h('p', { className: 'esc-desc' }, s.description),
+                    h('div', { className: 'esc-tags' }, [
+                      h('span', { className: 'esc-tag' }, '1 专家'),
+                      h('span', { className: 'esc-tag' }, (s.skillIds || []).length + ' 技能'),
+                      h('span', { className: 'esc-tag' }, (s.connectorIds || []).length + ' 连接器'),
+                    ]),
+                    h('div', { className: 'esc-actions' }, [
+                      userCard
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'esc-btn',
+                              disabled: busy,
+                              onClick: function (ev) {
+                                ev.stopPropagation()
+                                removeScene(s.id)
+                              },
+                            },
+                            '删除',
+                          )
+                        : null,
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'esc-summon' + (summoned ? ' on' : ''),
+                          disabled: busy,
+                          title: summoned ? '点击取消召唤' : '召唤后可在对话中选用',
+                          onClick: function (ev) {
+                            ev.stopPropagation()
+                            toggleSummon(s.id, s.title, summoned)
+                          },
                         },
-                      },
-                      summoned ? '已召唤' : '召唤',
-                    ),
-                  ]),
-                ])
+                        summoned ? '已召唤' : '召唤',
+                      ),
+                    ]),
+                  ],
+                )
               }),
           ),
         ])
@@ -568,84 +731,225 @@ window.__ModuleLoader__.load({
             }),
         )
       } else if (tab === 'skills') {
-        var cats = ['全部']
-        ;(catalog.skills || []).forEach(function (s) {
-          var c = s.category || '全部'
-          if (cats.indexOf(c) < 0) cats.push(c)
+        var companySkills = (catalog.skills || []).filter(function (s) {
+          return s.source !== 'skillhub'
         })
-        var skillRows = (catalog.skills || []).filter(function (s) {
-          if (chip !== '全部' && (s.category || '全部') !== chip) return false
-          return hit(s.name + s.description + (s.triggers || []).join(' '))
-        })
-        body = h('div', null, [
+        var sourceBar = h('div', { className: 'esc-source' }, [
           h(
-            'div',
-            { className: 'esc-chips' },
-            cats.map(function (c) {
-              return h(
-                'button',
-                {
-                  key: c,
-                  type: 'button',
-                  className: 'esc-chip' + (chip === c ? ' on' : ''),
-                  onClick: function () {
-                    setChip(c)
-                  },
-                },
-                c,
-              )
-            }),
+            'button',
+            {
+              type: 'button',
+              className: 'esc-source-btn' + (skillSource === 'company' ? ' on' : ''),
+              onClick: function () {
+                setSkillSource('company')
+                setChip('全部')
+              },
+            },
+            '公司预制',
           ),
           h(
-            'div',
-            { className: 'esc-grid' },
-            skillRows.map(function (s) {
-              var on = !!(skills[s.id] && skills[s.id].enabled)
-              return h(
-                'div',
-                {
-                  key: s.id,
-                  className: 'esc-card esc-card-skill' + (on ? ' summoned' : ''),
-                  role: 'button',
-                  tabIndex: 0,
-                  title: '查看技能详情',
-                  onClick: function () {
-                    setSkillDetailId(s.id)
-                  },
-                  onKeyDown: function (ev) {
-                    if (ev.key === 'Enter' || ev.key === ' ') {
-                      ev.preventDefault()
-                      setSkillDetailId(s.id)
-                    }
-                  },
-                },
-                [
-                  h('div', { className: 'esc-card-hd' }, [
-                    Avatar(s.icon, (s.name || '?').slice(0, 1), true),
-                    h('div', { style: { flex: 1, minWidth: 0 } }, [
-                      h('h3', null, s.name),
-                      h('p', { className: 'esc-desc' }, s.description),
-                    ]),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'esc-plus' + (on ? ' on' : ''),
-                        disabled: busy,
-                        title: on ? '停用' : '启用',
-                        onClick: function (ev) {
-                          ev.stopPropagation()
-                          toggleSkill(s.id, !on)
-                        },
-                      },
-                      on ? '✓' : '+',
-                    ),
-                  ]),
-                ],
-              )
-            }),
+            'button',
+            {
+              type: 'button',
+              className: 'esc-source-btn' + (skillSource === 'skillhub' ? ' on' : ''),
+              onClick: function () {
+                setSkillSource('skillhub')
+                setChip('全部')
+                setHubPage(1)
+              },
+            },
+            'SkillHub',
           ),
         ])
+        if (skillSource === 'skillhub') {
+          var hubCats = [{ key: '', label: '全部' }].concat(hub.categories || [])
+          var hubPages = Math.max(1, Math.ceil((hub.total || 0) / (hub.pageSize || 12)))
+          body = h('div', null, [
+            sourceBar,
+            h(
+              'p',
+              { className: 'esc-hint' },
+              '对接 SkillHub 公开目录。点 + 只安装到本机，点开手册确认后再点 + 启用。PCB/MES 公司技能仍在「公司预制」。',
+            ),
+            h(
+              'div',
+              { className: 'esc-chips' },
+              hubCats.map(function (c) {
+                var key = c.key || '全部'
+                var onChip = (!chip || chip === '全部' ? '' : chip) === (c.key || '')
+                return h(
+                  'button',
+                  {
+                    key: key,
+                    type: 'button',
+                    className: 'esc-chip' + (onChip ? ' on' : ''),
+                    onClick: function () {
+                      setChip(c.key || '全部')
+                      setHubPage(1)
+                    },
+                  },
+                  c.label,
+                )
+              }),
+            ),
+            hub.loading && !(hub.items || []).length
+              ? h('p', { className: 'esc-hint' }, '正在加载 SkillHub…')
+              : hub.error
+                ? h('div', { className: 'esc-error' }, hub.error)
+                : h(
+                    'div',
+                    { className: 'esc-grid' },
+                    (hub.items || []).map(function (s) {
+                      var on = !!(s.enabled || (skills[s.id] && skills[s.id].enabled))
+                      return h(
+                        'div',
+                        {
+                          key: s.id,
+                          className: 'esc-card esc-card-skill' + (on ? ' summoned' : ''),
+                          role: 'button',
+                          tabIndex: 0,
+                          title: '查看 SkillHub 技能',
+                          onClick: function () {
+                            if (s.installed) setSkillDetailId(s.id)
+                            else setHubPreview(s)
+                          },
+                        },
+                        [
+                          h('div', { className: 'esc-card-hd' }, [
+                            Avatar(s.icon, (s.name || '?').slice(0, 1), true),
+                            h('div', { style: { flex: 1, minWidth: 0 } }, [
+                              h('h3', null, [s.name, h('span', { className: 'esc-hub-badge' }, 'SkillHub')]),
+                              h('p', { className: 'esc-desc' }, s.description),
+                            ]),
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'esc-plus' + (on ? ' on' : ''),
+                                disabled: busy,
+                                title: s.installed ? (on ? '停用' : '启用') : '安装到本机',
+                                onClick: function (ev) {
+                                  ev.stopPropagation()
+                                  if (s.installed) toggleSkill(s.id, !on)
+                                  else installHub(s.slug, s.name)
+                                },
+                              },
+                              on ? '✓' : '+',
+                            ),
+                          ]),
+                        ],
+                      )
+                    }),
+                  ),
+            hubPages > 1
+              ? h('div', { className: 'esc-pager' }, [
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      disabled: busy || hub.page <= 1,
+                      onClick: function () {
+                        setHubPage(Math.max(1, hub.page - 1))
+                      },
+                    },
+                    '上一页',
+                  ),
+                  h('span', { className: 'esc-muted' }, hub.page + ' / ' + hubPages + ' · 共 ' + (hub.total || 0)),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      disabled: busy || hub.page >= hubPages,
+                      onClick: function () {
+                        setHubPage(hub.page + 1)
+                      },
+                    },
+                    '下一页',
+                  ),
+                ])
+              : null,
+          ])
+        } else {
+          var cats = ['全部']
+          companySkills.forEach(function (s) {
+            var c = s.category || '全部'
+            if (cats.indexOf(c) < 0) cats.push(c)
+          })
+          var skillRows = companySkills.filter(function (s) {
+            if (chip !== '全部' && (s.category || '全部') !== chip) return false
+            return hit(s.name + s.description + (s.triggers || []).join(' '))
+          })
+          body = h('div', null, [
+            sourceBar,
+            h(
+              'div',
+              { className: 'esc-chips' },
+              cats.map(function (c) {
+                return h(
+                  'button',
+                  {
+                    key: c,
+                    type: 'button',
+                    className: 'esc-chip' + (chip === c ? ' on' : ''),
+                    onClick: function () {
+                      setChip(c)
+                    },
+                  },
+                  c,
+                )
+              }),
+            ),
+            h(
+              'div',
+              { className: 'esc-grid' },
+              skillRows.map(function (s) {
+                var on = skillInUse(s.id)
+                return h(
+                  'div',
+                  {
+                    key: s.id,
+                    className: 'esc-card esc-card-skill' + (on ? ' summoned' : ''),
+                    role: 'button',
+                    tabIndex: 0,
+                    title: '查看技能详情',
+                    onClick: function () {
+                      setSkillDetailId(s.id)
+                    },
+                    onKeyDown: function (ev) {
+                      if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault()
+                        setSkillDetailId(s.id)
+                      }
+                    },
+                  },
+                  [
+                    h('div', { className: 'esc-card-hd' }, [
+                      Avatar(s.icon, (s.name || '?').slice(0, 1), true),
+                      h('div', { style: { flex: 1, minWidth: 0 } }, [
+                        h('h3', null, s.name),
+                        h('p', { className: 'esc-desc' }, s.description),
+                      ]),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'esc-plus' + (on ? ' on' : ''),
+                          disabled: busy,
+                          title: on ? '停用' : '启用',
+                          onClick: function (ev) {
+                            ev.stopPropagation()
+                            toggleSkill(s.id, !on)
+                          },
+                        },
+                        on ? '✓' : '+',
+                      ),
+                    ]),
+                  ],
+                )
+              }),
+            ),
+          ])
+        }
       } else {
         body = h('div', null, [
           h('p', { className: 'esc-hint' }, '连接器默认关闭。MES / 企微 / 飞书读系统配置；图表与网页阅读免费不必填密钥。定时推送仍走自动化。'),
@@ -704,30 +1008,43 @@ window.__ModuleLoader__.load({
                             },
                           }),
                         ])
-                      : h(
-                          'p',
-                          { className: 'esc-hint' },
-                          c.id === 'mes'
-                            ? live.mesFromWorkbuddy
-                              ? '已从系统配置读取 MES ' + (live.mesWorkbuddyBaseUrl || '')
-                              : '未读到系统配置 MES。可 mock 演示，或到 WorkBuddy 系统配置填写访问地址。'
-                            : c.id === 'mcp-chart'
-                              ? '默认对接 AntV GPT-Vis，不必再填密钥。'
-                              : c.id === 'mcp-wecom'
-                                ? live.wecomFromWorkbuddy
-                                  ? '已从系统配置读取企微群机器人。测通不往群里发消息。'
-                                  : '未读到企微 Webhook。请到 WorkBuddy 系统配置 → 自动化推送填写。'
-                                : c.id === 'mcp-feishu'
-                                  ? live.feishuFromWorkbuddy
-                                    ? '已从系统配置读取飞书应用。写入时需知识库 /wiki/ 链接。'
-                                    : '未读到飞书 App。请到 WorkBuddy 系统配置 → 自动化推送填写 App ID/Secret。'
+                      : c.id === 'mcp-feishu'
+                        ? h('div', { className: 'esc-field' }, [
+                            h('input', {
+                              value: draft.docTarget || '',
+                              placeholder: '知识库父节点 /wiki/…（在其下新建文档）',
+                              onChange: function (ev) {
+                                setDrafts(Object.assign({}, drafts, { [c.id]: Object.assign({}, draft, { docTarget: ev.target.value }) }))
+                              },
+                            }),
+                            h(
+                              'p',
+                              { className: 'esc-hint' },
+                              live.feishuFromWorkbuddy
+                                ? '已从系统配置读取飞书应用。填知识库父节点 /wiki/ 链接，写入会在其下新建一篇，不会改父文档正文。'
+                                : '未读到飞书 App。请到 WorkBuddy 系统配置 → 自动化推送填写 App ID/Secret。',
+                            ),
+                          ])
+                        : h(
+                            'p',
+                            { className: 'esc-hint' },
+                            c.id === 'mes'
+                              ? live.mesFromWorkbuddy
+                                ? '已从系统配置读取 MES ' + (live.mesWorkbuddyBaseUrl || '')
+                                : '未读到系统配置 MES。可 mock 演示，或到 WorkBuddy 系统配置填写访问地址。'
+                              : c.id === 'mcp-chart'
+                                ? '默认对接 AntV GPT-Vis，不必再填密钥。'
+                                : c.id === 'mcp-wecom'
+                                  ? live.wecomFromWorkbuddy
+                                    ? '已从系统配置读取企微群机器人。测通不往群里发消息。'
+                                    : '未读到企微 Webhook。请到 WorkBuddy 系统配置 → 自动化推送填写。'
                                   : c.id === 'mcp-web-read'
                                     ? '免费 Jina Reader，不必填密钥。只读公开 URL，不访问内网。'
                                     : '',
-                        ),
+                          ),
                   ),
                   h('div', { className: 'esc-actions' }, [
-                    c.id === 'dify'
+                    c.id === 'dify' || c.id === 'mcp-feishu'
                       ? h('button', { type: 'button', className: 'esc-btn primary', disabled: busy, onClick: function () { saveConnector(c.id) } }, '保存')
                       : null,
                     h('button', { type: 'button', className: 'esc-btn', disabled: busy, onClick: function () { testConnector(c.id) } }, '测通'),
@@ -764,6 +1081,7 @@ window.__ModuleLoader__.load({
             value: q,
             onChange: function (ev) {
               setQ(ev.target.value)
+              setHubPage(1)
             },
           }),
         ]),
@@ -841,7 +1159,7 @@ window.__ModuleLoader__.load({
                             setCreate(Object.assign({}, create, { skillIds: toggleId(create.skillIds, s.id, limits.maxSkills) }))
                           },
                         }),
-                        s.name,
+                        s.name + (s.source === 'skillhub' ? ' · SkillHub' : ''),
                       ])
                     }),
                   ]),
@@ -886,16 +1204,25 @@ window.__ModuleLoader__.load({
                 return x.id === skillDetailId
               })[0]
             : null
-          if (!detail) return null
-          var on = !!(skills[detail.id] && skills[detail.id].enabled)
-          var connIds = [].concat(detail.requiredConnectorIds || [], detail.optionalConnectorIds || [])
+          var preview = !detail ? hubPreview : null
+          if (!detail && !preview) return null
+          var on = detail ? skillInUse(detail.id) : false
+          var connIds = detail ? [].concat(detail.requiredConnectorIds || [], detail.optionalConnectorIds || []) : []
           var connNames = connIds.map(function (id) {
             var hit = (catalog.connectors || []).filter(function (c) {
               return c.id === id
             })[0]
             return hit ? hit.title : id
           })
-          return h('div', { className: 'esc-modal', onClick: function () { setSkillDetailId(null) } }, [
+          var name = (detail && detail.name) || (preview && preview.name) || ''
+          var icon = (detail && detail.icon) || (preview && preview.icon) || ''
+          var desc = (detail && detail.description) || (preview && preview.description) || ''
+          var isHub = (detail && detail.source === 'skillhub') || !!preview
+          var closeDetail = function () {
+            setSkillDetailId(null)
+            setHubPreview(null)
+          }
+          return h('div', { className: 'esc-modal', onClick: closeDetail }, [
             h(
               'div',
               {
@@ -907,35 +1234,71 @@ window.__ModuleLoader__.load({
               [
                 h(
                   'button',
-                  { type: 'button', className: 'esc-detail-close', title: '关闭', onClick: function () { setSkillDetailId(null) } },
+                  { type: 'button', className: 'esc-detail-close', title: '关闭', onClick: closeDetail },
                   '×',
                 ),
                 h('div', { className: 'esc-detail-hd' }, [
-                  Avatar(detail.icon, (detail.name || '?').slice(0, 1), true),
-                  h('h2', null, detail.name),
+                  Avatar(icon, (name || '?').slice(0, 1), true),
+                  h('h2', null, [name, isHub ? h('span', { className: 'esc-hub-badge' }, 'SkillHub') : null]),
                 ]),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'esc-detail-install' + (on ? ' on' : ''),
-                    disabled: busy,
-                    onClick: function () {
-                      toggleSkill(detail.id, !on)
-                    },
-                  },
-                  on ? '已启用' : '启用',
-                ),
-                h('p', { className: 'esc-detail-lead' }, detail.description || ''),
+                detail
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-detail-install' + (on ? ' on' : ''),
+                        disabled: busy,
+                        onClick: function () {
+                          toggleSkill(detail.id, !on)
+                        },
+                      },
+                      on ? '已启用' : '启用',
+                    )
+                  : h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-detail-install',
+                        disabled: busy,
+                        onClick: function () {
+                          installHub(preview.slug, preview.name)
+                          closeDetail()
+                        },
+                      },
+                      '安装',
+                    ),
+                detail && detail.source === 'skillhub' && detail.slug
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-btn',
+                        style: { marginLeft: 8 },
+                        disabled: busy,
+                        onClick: function () {
+                          uninstallHub(detail.slug, detail.name)
+                          closeDetail()
+                        },
+                      },
+                      '卸载',
+                    )
+                  : null,
+                h('p', { className: 'esc-detail-lead' }, desc),
                 h('div', { className: 'esc-detail-sec' }, '基本信息'),
-                h('p', { className: 'esc-detail-pill' }, '版本  v' + (catalog.pluginVersion || '0')),
+                h(
+                  'p',
+                  { className: 'esc-detail-pill' },
+                  isHub
+                    ? 'SkillHub' + ((detail && detail.version) || (preview && preview.version) ? '  v' + ((detail && detail.version) || preview.version) : '')
+                    : '版本  v' + (catalog.pluginVersion || '0'),
+                ),
                 h('div', { className: 'esc-detail-tags' }, [
-                  h('span', { className: 'esc-tag' }, detail.category || '技能'),
+                  h('span', { className: 'esc-tag' }, (detail && detail.category) || (preview && preview.categoryLabel) || '技能'),
                   connNames.length
                     ? h('span', { className: 'esc-tag' }, '连接器 ' + connNames.join('、'))
                     : h('span', { className: 'esc-tag' }, '不依赖连接器'),
                 ]),
-                (detail.triggers || []).length
+                detail && (detail.triggers || []).length
                   ? h('div', { className: 'esc-detail-tags' }, [
                       h('span', { className: 'esc-muted' }, '触发：'),
                     ].concat(
@@ -944,12 +1307,144 @@ window.__ModuleLoader__.load({
                       }),
                     ))
                   : null,
-                detail.sop
+                detail && detail.sop
                   ? [
                       h('div', { className: 'esc-detail-sec' }, '技能手册'),
                       h('pre', { className: 'esc-detail-sop' }, detail.sop),
                     ]
+                  : preview
+                    ? h('p', { className: 'esc-hint' }, '安装后会写入本机 SKILL.md，对话启用时注入手册。包内脚本不会执行。')
+                    : null,
+              ],
+            ),
+          ])
+        })(),
+        (function () {
+          var scene = sceneDetailId
+            ? (catalog.scenes || []).filter(function (x) {
+                return x.id === sceneDetailId
+              })[0]
+            : null
+          if (!scene) return null
+          var summoned = summonedIds.indexOf(scene.id) >= 0
+          var userCard = scene.source === 'user'
+          var expert = catalogById(catalog.experts, scene.expertId)
+          var skills = (scene.skillIds || []).map(function (id) {
+            return catalogById(catalog.skills, id) || { id: id, name: id, description: '目录中未找到该技能' }
+          })
+          var conns = (scene.connectorIds || []).map(function (id) {
+            return catalogById(catalog.connectors, id) || { id: id, title: id, summary: '目录中未找到该连接器' }
+          })
+          var handleLines = skills
+            .map(function (sk) {
+              return sk.description ? sk.name + '：' + sk.description : ''
+            })
+            .filter(Boolean)
+          var triggers = []
+          skills.forEach(function (sk) {
+            ;(sk.triggers || []).forEach(function (t) {
+              if (t && triggers.indexOf(t) < 0) triggers.push(t)
+            })
+          })
+          function memberRow(key, avatar, letter, sq, title, sub) {
+            return h('div', { key: key, className: 'esc-detail-item' }, [
+              Avatar(avatar, letter, sq),
+              h('div', { style: { minWidth: 0, flex: 1 } }, [
+                h('h4', null, title),
+                sub ? h('p', null, sub) : null,
+              ]),
+            ])
+          }
+          return h('div', { className: 'esc-modal', onClick: function () { setSceneDetailId(null) } }, [
+            h(
+              'div',
+              {
+                className: 'esc-detail',
+                onClick: function (ev) {
+                  ev.stopPropagation()
+                },
+              },
+              [
+                h(
+                  'button',
+                  { type: 'button', className: 'esc-detail-close', title: '关闭', onClick: function () { setSceneDetailId(null) } },
+                  '×',
+                ),
+                h('div', { className: 'esc-detail-hd' }, [
+                  Avatar(expert && expert.avatar, (scene.title || '?').slice(0, 1), true),
+                  h('h2', null, scene.title + (userCard ? ' · 自建' : '')),
+                ]),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'esc-detail-install' + (summoned ? ' on' : ''),
+                    disabled: busy,
+                    onClick: function () {
+                      toggleSummon(scene.id, scene.title, summoned)
+                    },
+                  },
+                  summoned ? '已召唤' : '召唤',
+                ),
+                h('div', { className: 'esc-detail-sec' }, '能处理什么'),
+                h('p', { className: 'esc-detail-lead', style: { marginTop: 0 } }, scene.description || '未填写场景说明'),
+                handleLines.length
+                  ? h(
+                      'ul',
+                      { className: 'esc-detail-list' },
+                      handleLines.map(function (line, i) {
+                        return h('li', { key: i }, line)
+                      }),
+                    )
                   : null,
+                triggers.length
+                  ? h(
+                      'div',
+                      { className: 'esc-detail-tags' },
+                      [h('span', { className: 'esc-muted' }, '适用提问：')].concat(
+                        triggers.map(function (t) {
+                          return h('span', { key: t, className: 'esc-tag' }, t)
+                        }),
+                      ),
+                    )
+                  : null,
+                h('div', { className: 'esc-detail-sec' }, '专家'),
+                expert
+                  ? memberRow(
+                      expert.id,
+                      expert.avatar,
+                      (expert.title || '?').slice(0, 1),
+                      false,
+                      expert.title,
+                      [expert.role, expert.preview].filter(Boolean).join(' · '),
+                    )
+                  : h('p', { className: 'esc-detail-empty' }, '未绑定专家'),
+                h('div', { className: 'esc-detail-sec' }, '技能（' + skills.length + '）'),
+                skills.length
+                  ? skills.map(function (sk) {
+                      return memberRow(
+                        sk.id,
+                        sk.icon,
+                        (sk.name || '?').slice(0, 1),
+                        true,
+                        sk.name,
+                        sk.description || '',
+                      )
+                    })
+                  : h('p', { className: 'esc-detail-empty' }, '这张卡没有绑定技能，对话里只注入专家人设。'),
+                h('div', { className: 'esc-detail-sec' }, '连接器（' + conns.length + '）'),
+                conns.length
+                  ? conns.map(function (c) {
+                      return memberRow(
+                        c.id,
+                        c.avatar,
+                        (c.title || '?').slice(0, 1),
+                        true,
+                        c.title,
+                        c.summary || (c.kind === 'mcp' ? 'MCP' : ''),
+                      )
+                    })
+                  : h('p', { className: 'esc-detail-empty' }, '不依赖连接器。'),
               ],
             ),
           ])

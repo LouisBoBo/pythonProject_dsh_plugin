@@ -17,10 +17,13 @@ import {
 import { inferSparseBeforeAfter, diffSnapshots, prepareSandboxForJob, prepareSandboxSparse, prepareSandboxReuse } from './sandbox.js'
 import {
   cardIdentity,
+  cardVisiblePhase,
   detachStaleJobUi,
   preferJobStatus,
+  readToolJobFields,
   requirementsConflict,
   shouldApplyJobSnapshot,
+  sseMayForceRunning,
 } from './cardBootstrap.js'
 import { buildLiveEditSnippet, previewFileSnippet } from './editSnippet.js'
 import {
@@ -37,7 +40,7 @@ import {
   snippetFromTextDiff,
   normalizeStatusDisplay,
 } from './transcript.js'
-import { appendEvent, createJob, findLatestJobForSession, loadJob, patchJob, setStatus } from './jobs.js'
+import { appendEvent, createJob, findLatestJobForSession, jobCardView, loadJob, onJobChange, patchJob, setStatus } from './jobs.js'
 import {
   hasClarifyEvidence,
   looksLikeFollowUp,
@@ -48,6 +51,7 @@ import {
   expandWriteScopeWithCompanions,
   selectCompanionPromotions,
 } from './scopeCompanions.js'
+import { formatChatConclusion } from './conclusion.js'
 import { compactParentHandoff } from './sessionMemory.js'
 import { startServer, stopServer, getListenAddr } from './server.js'
 import { checkCompat, satisfiesRange } from './compat.js'
@@ -106,7 +110,7 @@ async function main() {
   const prevHome = process.env.CURSOR_CODING_HOME
   const home = mkdtempSync(join(tmpdir(), 'cc-self-test-'))
   process.env.CURSOR_CODING_HOME = home
-  process.env.CURSOR_CODING_PORT = '18789'
+  process.env.CURSOR_CODING_PORT = '18797'
   delete process.env.CURSOR_API_KEY
 
   const workspace = mkdtempSync(join(tmpdir(), 'cc-ws-'))
@@ -372,6 +376,16 @@ async function main() {
     )
     assert(pref.startsWith('## 说明方案'), '结论应优先取说明方案段')
     assert(pref.split('## 说明方案').length === 2, '终稿双份应去重')
+    {
+      const ended = createJob({ workspace, requirement: '结论正文' })
+      patchJob(ended.id, {
+        assistant_text: '过程…\n\n## 说明方案\n**结论**\n已改菜单\n\n**改动文件**\n- a.js\n',
+      })
+      setStatus(loadJob(ended.id)!, 'succeeded', '已同步 1 个文件')
+      const body = formatChatConclusion(loadJob(ended.id)!)
+      assert(body.indexOf('## 本轮结论') === 0, '正文须以本轮结论开头')
+      assert(body.indexOf('## 说明方案') >= 0 && body.indexOf('已改菜单') >= 0, '须带上说明方案')
+    }
     const live = snippetFromTextDiff('const a = 1\n', 'const a = 2\nconst b = 3\n')
     assert(live && live.includes('- const a = 1') && live.includes('+ const a = 2'), '沙箱 diff 片断应含 +/-')
     console.log('ok: progress tool snippets')
@@ -454,6 +468,70 @@ async function main() {
       assert(shouldApplyJobSnapshot({ sealedStatus: 'succeeded', incomingStatus: 'running' }) === false, '封口后忽略 running 快照')
       assert(shouldApplyJobSnapshot({ sealedStatus: 'succeeded', incomingStatus: 'succeeded' }) === true, '终态快照仍可刷新')
       assert(shouldApplyJobSnapshot({ sealedStatus: '', incomingStatus: 'running' }) === true, '未封口须吃 running')
+      assert(sseMayForceRunning('succeeded') === false, '封口后禁止 review 打回 running')
+      assert(sseMayForceRunning('') === true, '未封口允许 running')
+      assert(
+        cardVisiblePhase({
+          phase: 'running',
+          sealedStatus: '',
+          uiStatus: 'succeeded',
+          resultDone: true,
+          resultStatus: 'succeeded',
+        }) === 'done',
+        '工具结果 succeeded 时进度卡不得继续转圈',
+      )
+      assert(
+        cardVisiblePhase({
+          phase: 'running',
+          sealedStatus: 'succeeded',
+          uiStatus: 'running',
+        }) === 'done',
+        '已封口后陈旧 ui.running 不得覆盖终态',
+      )
+      assert(
+        cardVisiblePhase({ phase: 'running', resultDone: false, resultStatus: 'succeeded' }) === 'running',
+        '无 done=true 不得把 status 当终态',
+      )
+      const parsed = readToolJobFields({
+        result: { done: true, job_id: 'ccj-x', status: 'succeeded', cursor_coding_ui: { status: 'succeeded' } },
+      })
+      assert(parsed.done === true && parsed.status === 'succeeded' && parsed.jobId === 'ccj-x', '须从嵌套 result 取出权威 status')
+      const stringDone = readToolJobFields({ done: 'true', job_id: 'ccj-y', status: 'succeeded' })
+      assert(stringDone.done === false, 'done 只认布尔 true，不认字符串')
+      assert(
+        cardVisiblePhase({
+          phase: 'running',
+          resultDone: true,
+          resultStatus: 'succeeded',
+          resultJobId: 'ccj-other',
+          liveJobId: 'ccj-live',
+        }) === 'running',
+        '他人 job 终态不得封本卡',
+      )
+      assert(
+        cardVisiblePhase({
+          phase: 'running',
+          resultDone: true,
+          resultStatus: 'succeeded',
+          resultJobId: 'ccj-live',
+          liveJobId: 'ccj-live',
+        }) === 'done',
+        '本卡工具终态须停转圈',
+      )
+      {
+        let seen = ''
+        const off = onJobChange((id, st) => {
+          seen = id + ':' + st
+        })
+        const noted = createJob({ workspace, requirement: '终态须立即通知 SSE' })
+        setStatus(noted, 'succeeded', 'ok')
+        off()
+        assert(seen === noted.id + ':succeeded', 'succeeded 落盘须同步通知监听器')
+        const card = jobCardView(loadJob(noted.id)!)
+        assert(card.status === 'succeeded', '进度卡视图含 status')
+        assert(!('events' in card), '进度卡视图不得带 events')
+        assert(String(card.chat_conclusion || '').indexOf('## 本轮结论') === 0, '进度卡视图须带正文结论')
+      }
       const ended = createJob({ workspace, requirement: '终态不可回写' })
       setStatus(ended, 'succeeded', 'ok')
       setStatus(loadJob(ended.id)!, 'running', '不得打回写码中')
@@ -511,7 +589,7 @@ async function main() {
     _resetPendingConfirmForTests()
     saveConfig({
       listen: '127.0.0.1',
-      port: 18789,
+      port: 18797,
       cursorApiKey: '',
       writeScope: [],
       dataRoot: home,
@@ -932,7 +1010,7 @@ async function main() {
     }
 
     console.log('[self-test] 阶段 B+C 全部通过（Mock Cursor + 自动同步 + 手工回退）')
-    console.log('[self-test] port=', 18789)
+    console.log('[self-test] port=', 18797)
 
     // 续改复用父沙箱（AUTO_APPLY 开）
     {

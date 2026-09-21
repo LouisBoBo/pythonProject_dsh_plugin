@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { loadConfig, publicConfigView, saveConfig } from './config.js'
-import { publicCatalog } from './catalog.js'
+import { loadCatalog, publicCatalog } from './catalog.js'
 import {
   applyScene,
   clearSessionScene,
@@ -29,9 +29,10 @@ import { probeMes } from './adapters/mes.js'
 import { probeDify } from './adapters/dify.js'
 import { probeChart } from './adapters/mcp_chart.js'
 import { probeWecom } from './adapters/wecom.js'
-import { probeFeishu } from './adapters/feishu.js'
+import { parseFeishuTarget, probeFeishu } from './adapters/feishu.js'
 import { assertPublicHttpUrl, probeWebRead } from './adapters/web_read.js'
 import type { ConnectorConfig, QueryResult, SceneReview } from './types.js'
+import { fetchHubDetail, fetchHubMarket, installHubSkill, loadInstalledHubSkills, uninstallHubSkill } from './skillhub.js'
 
 let server: Server | null = null
 let listenAddr = ''
@@ -181,13 +182,79 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (rejectNonLoopback(req, res)) return
 
-  // 预制专家 / 技能 / 连接器 / 场景列表（含本机自建卡）
+  // 预制专家 / 技能 / 连接器 / 场景列表（含本机自建卡与已安装 SkillHub）
   if (method === 'GET' && path === '/api/catalog') {
-    send(res, 200, { ok: true, ...publicCatalog(publicScenes(cfg.dataRoot)) }, req)
+    send(res, 200, { ok: true, ...publicCatalog(publicScenes(cfg.dataRoot), cfg.dataRoot) }, req)
     return
   }
 
-  // 查询启用状态、当前专家、本会话场景卡
+  // SkillHub 公开目录浏览（api.skillhub.cn，无需密钥）
+  if (method === 'GET' && path === '/api/skillhub/market') {
+    try {
+      const u = new URL(req.url || '/', 'http://127.0.0.1')
+      const state = loadState(cfg.dataRoot)
+      const enabledIds = new Set(
+        Object.entries(state.skills)
+          .filter(([, v]) => v.enabled)
+          .map(([id]) => id),
+      )
+      const page = await fetchHubMarket({
+        keyword: u.searchParams.get('keyword') || u.searchParams.get('q') || '',
+        category: u.searchParams.get('category') || '',
+        page: Number(u.searchParams.get('page') || 1),
+        pageSize: Number(u.searchParams.get('pageSize') || 12),
+        installed: loadInstalledHubSkills(cfg.dataRoot),
+        enabledIds,
+      })
+      send(res, 200, { ok: true, ...page }, req)
+    } catch (e) {
+      send(res, 502, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  // SkillHub 技能摘要（安装前预览）
+  if (method === 'GET' && path === '/api/skillhub/detail') {
+    try {
+      const u = new URL(req.url || '/', 'http://127.0.0.1')
+      const item = await fetchHubDetail(u.searchParams.get('slug') || '')
+      const installed = loadInstalledHubSkills(cfg.dataRoot).some((s) => s.slug === item.slug)
+      const enabled = Boolean(loadState(cfg.dataRoot).skills[item.id]?.enabled)
+      send(res, 200, { ok: true, item: { ...item, installed, enabled } }, req)
+    } catch (e) {
+      send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  // 从 SkillHub 下载 zip，只落 SKILL.md；不自动启用，须用户点开手册后再 +
+  if (method === 'POST' && path === '/api/skillhub/install') {
+    try {
+      const body = await readJson(req)
+      const skill = await installHubSkill(cfg.dataRoot, String(body.slug || ''))
+      const state = await setSkillEnabled(cfg.dataRoot, skill.id, false)
+      notify()
+      send(res, 200, { ok: true, skill: { id: skill.id, name: skill.name, slug: skill.slug }, state: publicState(state) }, req)
+    } catch (e) {
+      send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  // 卸载本机 SkillHub 技能，不改公司预制
+  if (method === 'POST' && path === '/api/skillhub/uninstall') {
+    try {
+      const body = await readJson(req)
+      uninstallHubSkill(cfg.dataRoot, String(body.slug || ''))
+      const state = await saveState(cfg.dataRoot, loadState(cfg.dataRoot))
+      notify()
+      send(res, 200, { ok: true, state: publicState(state) }, req)
+    } catch (e) {
+      send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
   if (method === 'GET' && path === '/api/session-state') {
     const u = new URL(req.url || '/', 'http://127.0.0.1')
     const sessionId = u.searchParams.get('sessionId') || ''
@@ -226,7 +293,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         String(body.expertId || ''),
         Array.isArray(body.skillIds) ? body.skillIds.map((x) => String(x)) : [],
         Array.isArray(body.connectorIds) ? body.connectorIds.map((x) => String(x)) : [],
-        { existing: publicScenes(cfg.dataRoot), ignoreSceneId: body.ignoreSceneId ? String(body.ignoreSceneId) : undefined },
+        {
+          catalog: loadCatalog(cfg.dataRoot),
+          existing: publicScenes(cfg.dataRoot),
+          ignoreSceneId: body.ignoreSceneId ? String(body.ignoreSceneId) : undefined,
+        },
       )
       send(res, 200, { ok: review.ok, review }, req)
     } catch (e) {
@@ -383,6 +454,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           enabled,
           mode,
           datasetId: 'datasetId' in body ? String(body.datasetId || '').trim() : row.datasetId,
+          docTarget: row.docTarget,
           apiKey: keepOrReplace(body.apiKey, row.apiKey),
           password: keepOrReplace(body.password, row.password),
           token: keepOrReplace(body.token, row.token),
@@ -419,6 +491,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
               ? String(body.enterpriseCode || '').trim()
               : row.enterpriseCode
         }
+        if (id === 'mcp-feishu' && 'docTarget' in body) {
+          const raw = String(body.docTarget || '').trim()
+          if (raw) parseFeishuTarget(raw)
+          nextRow.docTarget = raw
+        }
         if (OUTBOUND_CONNECTOR_IDS.has(id) && 'enabled' in body) {
           nextRow.outboundArmed = enabled
         }
@@ -445,7 +522,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         send(res, 404, { ok: false, detail: '该连接器无测通实现' }, req)
         return
       }
-      const result = await probe(row)
+      let probeRow = row
+      if (id === 'mcp-feishu') {
+        const body = await readJson(req)
+        if ('docTarget' in body) {
+          probeRow = { ...row, docTarget: String(body.docTarget || '').trim() }
+        }
+      }
+      const result = await probe(probeRow)
       send(res, result.ok ? 200 : 400, { ok: result.ok, result }, req)
       return
     }

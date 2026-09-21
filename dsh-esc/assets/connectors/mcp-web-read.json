@@ -7,6 +7,7 @@
   "mcpServer": "@jina-ai/reader",
   "mcpUrl": "https://jina.ai/reader",
   "kind": "mcp",
+  "role": "tool",
   "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=WebRead&backgroundColor=fef3c7",
   "tools": ["zr_esc_web_read"],
   "defaultEnabled": false

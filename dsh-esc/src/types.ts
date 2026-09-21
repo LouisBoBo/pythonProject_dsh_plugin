@@ -18,6 +18,8 @@ export type ExpertMeta = {
   body: string
 }
 
+export type SkillSource = 'builtin' | 'skillhub'
+
 export type SkillMeta = {
   id: string
   name: string
@@ -28,7 +30,14 @@ export type SkillMeta = {
   requiredConnectorIds: string[]
   optionalConnectorIds: string[]
   body: string
+  source?: SkillSource
+  slug?: string
+  version?: string
+  homepage?: string
 }
+
+/** source=取数必须由技能点名；sink=写出去/发通知，任意组合可配；tool=画图/读网页等通用能力 */
+export type ConnectorRole = 'source' | 'sink' | 'tool'
 
 export type ConnectorMeta = {
   id: string
@@ -39,6 +48,8 @@ export type ConnectorMeta = {
   mcpServer?: string
   mcpUrl?: string
   kind?: string
+  /** 缺省按 source：未点名的取数连接器才提示「多半调不到」 */
+  role?: ConnectorRole
   avatar?: string
   tools: string[]
   defaultEnabled: boolean
@@ -80,6 +91,8 @@ export type ConnectorConfig = {
   token: string
   enterpriseCode: string
   datasetId: string
+  /** 飞书默认写入目标：知识库父节点 /wiki/（其下新建）或云文档 /docx/，不是密钥。 */
+  docTarget: string
 }
 
 export type SessionOverride = {

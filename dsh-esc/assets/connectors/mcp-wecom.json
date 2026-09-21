@@ -7,6 +7,7 @@
   "mcpServer": "wecom-webhook",
   "mcpUrl": "https://developer.work.weixin.qq.com/document/path/91770",
   "kind": "mcp",
+  "role": "sink",
   "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=Wecom&backgroundColor=dcfce7",
   "tools": ["zr_esc_wecom_send"],
   "defaultEnabled": false

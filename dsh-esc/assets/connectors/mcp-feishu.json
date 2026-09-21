@@ -1,13 +1,14 @@
 {
   "id": "mcp-feishu",
-  "title": "飞书知识库",
-  "summary": "把运营简报、会议纪要落到飞书知识库新文档。凭证读系统配置 App，不另填 Secret。",
+  "title": "飞书文档",
+  "summary": "把运营简报、会议纪要、表格数据写入飞书：填知识库父节点则在其下新建文档，不往父页追加。凭证读系统配置 App。",
   "vendor": "飞书",
   "marketplace": "开放平台",
-  "mcpServer": "lark-wiki",
-  "mcpUrl": "https://open.feishu.cn/document/server-docs/docs/wiki-v2/wiki-oaid",
+  "mcpServer": "lark-docx",
+  "mcpUrl": "https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create",
   "kind": "mcp",
+  "role": "sink",
   "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=Feishu&backgroundColor=dbeafe",
-  "tools": ["zr_esc_feishu_wiki"],
+  "tools": ["zr_esc_feishu_doc"],
   "defaultEnabled": false
 }

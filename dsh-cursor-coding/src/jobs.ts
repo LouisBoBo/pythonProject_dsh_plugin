@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { loadConfig } from './config.js'
+import { formatChatConclusion } from './conclusion.js'
 import type { CursorCodingJob, JobStatus, StreamEvent } from './types.js'
 
 const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
@@ -15,6 +16,27 @@ function jobsDir(): string {
 
 function jobPath(id: string): string {
   return join(jobsDir(), `${id}.json`)
+}
+
+type JobChangeListener = (jobId: string, status: JobStatus) => void
+const jobChangeListeners = new Set<JobChangeListener>()
+
+/** SSE 订阅账本写入：终态必须立刻推封口帧，不能等 400ms 轮询。 */
+export function onJobChange(fn: JobChangeListener): () => void {
+  jobChangeListeners.add(fn)
+  return () => {
+    jobChangeListeners.delete(fn)
+  }
+}
+
+function emitJobChange(job: CursorCodingJob): void {
+  for (const fn of jobChangeListeners) {
+    try {
+      fn(job.id, job.status)
+    } catch {
+      /* 监听失败不得打断落盘 */
+    }
+  }
 }
 
 export function newJobId(): string {
@@ -70,7 +92,26 @@ export function loadJob(id: string): CursorCodingJob | null {
 export function saveJob(job: CursorCodingJob): CursorCodingJob {
   job.updated_at = new Date().toISOString()
   writeFileSync(jobPath(job.id), JSON.stringify(job, null, 2) + '\n', 'utf8')
+  emitJobChange(job)
   return job
+}
+
+/** 进度卡对账用：不含 events，避免大 JSON 拖死 fetch。 */
+export function jobCardView(job: CursorCodingJob): Record<string, unknown> {
+  return {
+    id: job.id,
+    status: job.status,
+    detail: job.detail,
+    workspace: job.workspace,
+    requirement: job.requirement,
+    transcript: job.transcript || [],
+    review_in_scope: job.review_in_scope || [],
+    review_deleted: job.review_deleted || [],
+    review_deferred: job.review_deferred || [],
+    synced_files: job.synced_files || [],
+    updated_at: job.updated_at,
+    chat_conclusion: formatChatConclusion(job),
+  }
 }
 
 export function appendEvent(

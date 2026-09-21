@@ -25,7 +25,7 @@ optionalConnectorIds:
 
 1. `kind=yield`（综合 KPI + 工序良率）。
 2. `kind=scrap`（缺陷 TOP / 分布）。
-3. 用户给了工单再补 `kind=work_order`。日期默认近 7 日。
+3. 用户给了工单再补 `kind=work_order`。日期跟用户窗口（近 N 天 / 本周 / 起止日）；没说才近 7 日。
 
 ## 判读
 

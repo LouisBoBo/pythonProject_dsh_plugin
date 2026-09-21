@@ -23,7 +23,7 @@ optionalConnectorIds:
 ## 取数
 
 1. `kind=wip`（在制工单，按工序/产线/状态分组）。
-2. 需要对照产出再取 `kind=output`（近 7 日，Asia/Shanghai）。
+2. 需要对照产出再取 `kind=output`，日期跟用户窗口（没说才近 7 日，Asia/Shanghai）。
 3. 有库存线索再取 `kind=inventory`。utilization/oee 404 不能当成停线证据。
 
 ## 判读

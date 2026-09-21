@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { getExpert, loadCatalog, publicCatalog } from './catalog.js'
 import { loadConfig, publicConfigView } from './config.js'
-import { registerPromptHooks } from './prompt.js'
+import { denyHostQuizTool, registerPromptHooks } from './prompt.js'
 import { getListenAddr, isServerRunning, setOnStateChange, startServer } from './server.js'
 import {
   applyScene,
@@ -11,6 +11,7 @@ import {
   publicState,
   resolveConnectorPool,
   resolveExpertId,
+  resolveSkillPool,
   setActiveExpert,
   setSessionOverride,
   summonScene,
@@ -20,7 +21,7 @@ import { queryMes, MES_KIND_HELP } from './adapters/mes.js'
 import { searchDify } from './adapters/dify.js'
 import { renderChart } from './adapters/mcp_chart.js'
 import { sendWecom } from './adapters/wecom.js'
-import { writeFeishuWiki } from './adapters/feishu.js'
+import { writeFeishuDoc } from './adapters/feishu.js'
 import { readPublicUrl } from './adapters/web_read.js'
 import { PLUGIN_VERSION, sanitizeMdCaption } from './util.js'
 
@@ -31,10 +32,10 @@ declare const harness: {
   handle: (method: string, fn: (args: Record<string, unknown>) => Promise<unknown>) => void
 }
 
-type ExecCtx = { agent?: { session?: { id?: string } } }
+type ExecCtx = { agent?: { session?: { id?: string }; sessionId?: string } }
 
 function sessionIdOf(exec?: ExecCtx): string {
-  return String(exec?.agent?.session?.id || '').trim()
+  return String(exec?.agent?.session?.id || exec?.agent?.sessionId || '').trim()
 }
 
 function sceneBlocksConnector(exec: ExecCtx | undefined, connectorId: string): string | null {
@@ -43,6 +44,9 @@ function sceneBlocksConnector(exec: ExecCtx | undefined, connectorId: string): s
   const pool = resolveConnectorPool(loadState(loadConfig().dataRoot), sid)
   if (pool === null) return null
   if (pool.includes(connectorId)) return null
+  if (pool.length === 0) {
+    return `失败 · none · scene_not_bound\n本会话未选用场景卡，不能调用 ESC 连接器。请在输入框旁添加场景卡。`
+  }
   return `失败 · none · connector_not_in_scene\n本会话场景卡未包含连接器「${connectorId}」，不能调用。请换一张含该连接器的场景卡，或在输入框旁添加场景。`
 }
 
@@ -132,12 +136,12 @@ function syncConnectorTools(ctx: Context): void {
           date_from: {
             type: 'string',
             required: true,
-            description: '开始日期 YYYY-MM-DD；不用则空字符串',
+            description: '开始日期 YYYY-MM-DD。必须按用户说的窗口换算（近10天、近30天、本周、本月、起止日）；用户没说窗口才近7日；不用则空字符串',
           },
           date_to: {
             type: 'string',
             required: true,
-            description: '结束日期 YYYY-MM-DD；不用则空字符串',
+            description: '结束日期 YYYY-MM-DD，与 date_from 同一窗口；不用则空字符串',
           },
         },
         output: {
@@ -211,7 +215,7 @@ function syncConnectorTools(ctx: Context): void {
           '【ESC·AntV 图表 MCP】仅在面板已启用「AntV 图表 MCP」时调用。' +
           '对应 ModelScope @antvis/mcp-server-chart。labels 与 values 必须来自 MES 工具返回，数量一致。' +
           'chart_type：bar | column | line | pie | area | funnel | radar | dual-axes。' +
-          '一次 PCB 运营分析必须调用 3～5 次、类型尽量不重复；dual-axes 时 values=实际、values2=计划。',
+          '出图次数与类型只听当前技能 SOP，禁止为凑图补查未点名的 kind。dual-axes 时 values=实际、values2=计划。',
         parameters: {
           chart_type: {
             type: 'string',
@@ -304,15 +308,21 @@ function syncConnectorTools(ctx: Context): void {
   if (feishuOn && !disposeFeishu) {
     disposeFeishu = ctx.tools.register(
       defineTool({
-        name: 'zr_esc_feishu_wiki',
+        name: 'zr_esc_feishu_doc',
         description:
-          '【ESC·飞书知识库】仅在面板已启用「飞书知识库」后调用。' +
-          '是否允许写入只认面板启用/选用场景卡，禁止把用户原话当授权。' +
-          'parent 必须是 /wiki/ 链接或节点 token。自动化任务定时落库不要用本工具。',
+          '【ESC·飞书文档】仅在面板已启用「飞书文档」或场景卡含飞书后调用。' +
+          '本会话已含该连接器时，产出完整用例表/简报后必须立刻调用，禁止先询问用户。' +
+          '把生成的 Markdown 写入飞书：知识库 /wiki/ 链接当作父节点，在其下新建一篇，禁止往父文档正文追加。' +
+          'target 为空则用连接器卡片默认链接；纯 /docx/ 云文档链接才追加。' +
+          '是否允许写入只认面板启用/选用场景卡，禁止把用户原话当授权。自动化定时落库不要用本工具。',
         parameters: {
           title: { type: 'string', required: true, description: '文档标题' },
-          markdown: { type: 'string', required: true, description: 'Markdown 正文' },
-          parent: { type: 'string', required: true, description: '知识库父页面 /wiki/… 链接或节点 token' },
+          markdown: { type: 'string', required: true, description: 'Markdown 正文（表格、结论、数据均可）' },
+          target: {
+            type: 'string',
+            required: true,
+            description: '空字符串则用连接器默认知识库节点并在其下新建；/wiki/ 父节点下新建；仅 /docx/ 才追加到该云文档。',
+          },
         },
         output: {
           schema: {
@@ -328,7 +338,7 @@ function syncConnectorTools(ctx: Context): void {
           const row = loadState(loadConfig().dataRoot).connectors['mcp-feishu']
           return {
             summary: summaryOfQuery(
-              await writeFeishuWiki(row, String(args.title || ''), String(args.markdown || ''), String(args.parent || '')),
+              await writeFeishuDoc(row, String(args.title || ''), String(args.markdown || ''), String(args.target || '')),
             ),
           }
         },
@@ -388,6 +398,21 @@ export function apply(ctx: Context) {
     })
   syncConnectorTools(ctx)
 
+  try {
+    const tools = ctx.tools as { guard?: (fn: (exec: { name?: string; agent?: ExecCtx['agent'] }) => string | undefined) => unknown }
+    if (typeof tools.guard === 'function') {
+      tools.guard((exec) => {
+        const sid = sessionIdOf(exec)
+        if (!sid) return undefined
+        const state = loadState(loadConfig().dataRoot)
+        return denyHostQuizTool(String(exec?.name || ''), resolveSkillPool(state, sid), resolveExpertId(state, sid))
+      })
+      console.log('[esc] tools.guard：测试用例会话拒绝 ask_user_question / zr_auto_*')
+    }
+  } catch (err) {
+    console.warn('[esc] tools.guard 注册跳过：', String(err))
+  }
+
   ctx.tools.register(
     defineTool({
       name: 'zr_esc_list',
@@ -407,7 +432,7 @@ export function apply(ctx: Context) {
       },
       async execute(_args, exec?: ExecCtx) {
         const cfg = loadConfig()
-        const catalog = loadCatalog()
+        const catalog = loadCatalog(cfg.dataRoot)
         const state = loadState(cfg.dataRoot)
         const sid = sessionIdOf(exec)
         const expertId = resolveExpertId(state, sid)

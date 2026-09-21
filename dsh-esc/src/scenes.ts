@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { getExpert, getSkill, loadCatalog, type Catalog } from './catalog.js'
+import { getExpert, loadCatalog, type Catalog } from './catalog.js'
 import type { EscState, SceneIssue, SceneMeta, SceneReview } from './types.js'
 import { SCENE_MAX_CONNECTORS, SCENE_MAX_SKILLS, USER_SCENE_MAX } from './types.js'
 import { writeJsonAtomic } from './util.js'
@@ -89,6 +89,7 @@ export function reviewSceneCombo(
   opts?: { catalog?: Catalog; existing?: SceneMeta[]; ignoreSceneId?: string },
 ): SceneReview {
   const catalog = opts?.catalog || loadCatalog()
+  const skillOf = (id: string) => catalog.skills.find((x) => x.id === id) || null
   const skills = unique(skillIds)
   const connectors = unique(connectorIds)
   const errors: SceneIssue[] = []
@@ -111,7 +112,7 @@ export function reviewSceneCombo(
   }
 
   for (const id of skills) {
-    if (!getSkill(id)) errors.push(issue('error', 'unknown_skill', `未知技能：${id}`))
+    if (!skillOf(id)) errors.push(issue('error', 'unknown_skill', `未知技能：${id}`))
   }
   for (const id of connectors) {
     if (!catalog.connectors.some((c) => c.id === id)) {
@@ -125,7 +126,7 @@ export function reviewSceneCombo(
 
   const connSet = new Set(connectors)
   for (const id of skills) {
-    const skill = getSkill(id)
+    const skill = skillOf(id)
     if (!skill) continue
     const missing = skill.requiredConnectorIds.filter(
       (cid) => cid && catalog.connectors.some((c) => c.id === cid) && !connSet.has(cid),
@@ -145,7 +146,7 @@ export function reviewSceneCombo(
         warnings.push(issue('warning', 'missing_optional_connector', `技能「${skill.name}」建议加上「${title}」，没有也能用，只是能力变弱。`))
       }
     }
-    if (expert && expert.preferredSkillIds.length && !expert.preferredSkillIds.includes(id)) {
+    if (expert && expert.preferredSkillIds.length && !expert.preferredSkillIds.includes(id) && skill.source !== 'skillhub') {
       warnings.push(
         issue('warning', 'skill_not_preferred', `「${skill.name}」不太适合「${expert.title}」，建议去掉。`),
       )
@@ -155,13 +156,15 @@ export function reviewSceneCombo(
   if (expert) {
     for (const cid of connectors) {
       const needed = skills.some((sid) => {
-        const skill = getSkill(sid)
+        const skill = skillOf(sid)
         return Boolean(skill && (skill.requiredConnectorIds.includes(cid) || skill.optionalConnectorIds.includes(cid)))
       })
       const preferred = expert.preferredConnectorIds.includes(cid)
-      if (!needed && !preferred) {
-        const title = catalog.connectors.find((c) => c.id === cid)?.title || cid
-        warnings.push(issue('warning', 'connector_unused', `连接器「${title}」与当前专家/技能没有对应关系，加了也多半调不到，建议去掉。`))
+      const meta = catalog.connectors.find((c) => c.id === cid)
+      const companion = meta?.role === 'sink' || meta?.role === 'tool'
+      if (!needed && !preferred && !companion) {
+        const title = meta?.title || cid
+        warnings.push(issue('warning', 'connector_unused', `连接器「${title}」当前技能不会用来取数，加上也用不上，建议去掉。`))
       }
     }
   }
@@ -201,10 +204,11 @@ export function suggestCombo(
     }
   }
   const expert = getExpert(expertId)
+  const catalog = dataRoot ? loadCatalog(dataRoot) : loadCatalog()
   const enabledSkills = Object.entries(state.skills)
     .filter(([, v]) => v.enabled)
     .map(([id]) => id)
-    .filter((id) => getSkill(id))
+    .filter((id) => catalog.skills.some((s) => s.id === id))
   const preferred = (expert?.preferredSkillIds || []).filter((id) => enabledSkills.includes(id))
   const rest = enabledSkills.filter((id) => !preferred.includes(id))
   const pickedSkills = unique([...preferred, ...rest])
@@ -217,7 +221,7 @@ export function suggestCombo(
   const required: string[] = []
   const optional: string[] = []
   for (const sid of skillIds) {
-    const skill = getSkill(sid)
+    const skill = catalog.skills.find((s) => s.id === sid)
     if (!skill) continue
     required.push(...skill.requiredConnectorIds)
     optional.push(...skill.optionalConnectorIds)
@@ -238,7 +242,8 @@ export function createUserScene(
   const skillIds = unique(input.skillIds)
   const connectorIds = unique(input.connectorIds)
   const existing = listScenes(dataRoot)
-  const review = reviewSceneCombo(expertId, skillIds, connectorIds, { existing })
+  const catalog = loadCatalog(dataRoot)
+  const review = reviewSceneCombo(expertId, skillIds, connectorIds, { catalog, existing })
   if (!title) {
     review.ok = false
     review.errors.unshift(issue('error', 'empty_title', '请填写场景卡名称。'))
@@ -254,7 +259,7 @@ export function createUserScene(
   const expert = getExpert(expertId)
   const description =
     String(input.description || '').trim() ||
-    `召唤${expert?.title || expertId}，搭配 ${skillIds.map((id) => getSkill(id)?.name || id).join('、') || '无人手册'}，连接 ${connectorIds.join('、') || '无'}。`
+    `召唤${expert?.title || expertId}，搭配 ${skillIds.map((id) => catalog.skills.find((s) => s.id === id)?.name || id).join('、') || '无人手册'}，连接 ${connectorIds.join('、') || '无'}。`
   const scene: SceneMeta = {
     id: `user-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`,
     title,

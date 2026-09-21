@@ -1,9 +1,9 @@
 {
   "name": "@zhongruan/dsh-esc",
-  "version": "0.1.21",
+  "version": "0.1.38",
   "description": "DSH 专家·技能·连接器：PCB 数据分析师、MES 运营分析、AntV 图表 MCP",
   "dshMarket": {
-    "zh": "专家·技能·连接器：岗位人设、SOP 技能、MES 取数与 ModelScope 图表 MCP（与现网查数/8D 并存）",
+    "zh": "专家·技能·连接器：岗位人设、公司 SOP，并对接 SkillHub 公开技能目录；MES 取数与图表 MCP",
     "en": "Experts, skills and connectors: PCB analyst, MES ops SOP, ModelScope chart MCP"
   },
   "type": "module",

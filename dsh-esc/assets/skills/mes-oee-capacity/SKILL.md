@@ -24,7 +24,7 @@ optionalConnectorIds:
 
 1. `kind=capacity`（利用率 / 稼动，period=day）。
 2. `kind=oee`（OEE 及可用率/性能率/质量率）。
-3. 对照 `kind=output`（近 7 日）。某接口 HTTP 404：该节标盲区，**禁止**用产出跌幅代替停线结论。
+3. 对照 `kind=output`，日期跟用户窗口（没说才近 7 日）。某接口 HTTP 404：该节标盲区，**禁止**用产出跌幅代替停线结论。
 
 ## 判读
 

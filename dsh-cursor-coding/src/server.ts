@@ -21,9 +21,11 @@ import {
   createJob,
   findLatestJobForSession,
   forceCancelJob,
+  jobCardView,
   jobSummary,
   listJobs,
   loadJob,
+  onJobChange,
   saveJob,
   setStatus,
 } from './jobs.js'
@@ -793,56 +795,95 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       })
       let cursor = 0
       let closed = false
+      let ticking = false
+      let timer: ReturnType<typeof setInterval> | undefined
+      let unsub: () => void = () => {}
+      const terminalOk = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
       const writeEv = (payload: unknown) => {
         if (closed) return
         res.write(`data: ${JSON.stringify(payload)}\n\n`)
       }
+      const stop = () => {
+        closed = true
+        if (timer) clearInterval(timer)
+        unsub()
+        unsub = () => {}
+      }
       writeEv({ type: 'hello', job_id: id, service: SERVICE_NAME })
       const tick = () => {
-        if (closed) return
-        healStalePendingReview(id)
-        const job = loadJob(id)
-        if (!job) {
-          writeEv({ type: 'error', message: '任务消失' })
-          clearInterval(timer)
-          res.end()
-          return
-        }
-        while (cursor < job.events.length) {
-          const ev = job.events[cursor]
-          cursor += 1
-          // 账本 type=done 是同步完成记录，不是 SSE 封口。回放它会让前端在 snapshot 前关流，过程区变空。
-          if (ev && ev.type === 'done') continue
-          writeEv(ev)
-        }
-        writeEv({
-          type: 'snapshot',
-          job_id: job.id,
-          status: job.status,
-          detail: job.detail,
-          workspace: job.workspace,
-          review_in_scope: job.review_in_scope || [],
-          review_deleted: job.review_deleted || [],
-          review_deferred: job.review_deferred || [],
-          synced_files: job.synced_files || [],
-          assistant_text: job.assistant_text || '',
-          assistant_chars: (job.assistant_text || '').length,
-          thinking_text: job.thinking_text || '',
-          thinking_chars: (job.thinking_text || '').length,
-          transcript: job.transcript || [],
-        })
-        const terminalOk = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
-        if (terminalOk.includes(job.status)) {
-          writeEv({ type: 'done', status: job.status, job_id: job.id })
-          clearInterval(timer)
-          res.end()
+        if (closed || ticking) return
+        ticking = true
+        try {
+          healStalePendingReview(id)
+          const job = loadJob(id)
+          if (!job) {
+            writeEv({ type: 'error', message: '任务消失' })
+            stop()
+            res.end()
+            return
+          }
+          const terminal = terminalOk.includes(job.status)
+          while (cursor < job.events.length) {
+            const ev = job.events[cursor]
+            cursor += 1
+            // 账本 type=done 是同步完成记录，不是 SSE 封口。回放它会让前端在 snapshot 前关流，过程区变空。
+            if (ev && ev.type === 'done') continue
+            // 终态帧禁止回放 review/auto_apply，避免进度卡被打回「写码中」。
+            if (terminal && ev && ev.type === 'review') continue
+            writeEv(ev)
+          }
+          if (terminal) {
+            // 终态立刻封口：瘦事件回放（跳过 review）+ 带 transcript 的 snapshot + 带 job_id 的 done。
+            // 顺序必须是 snapshot 在前、done 在后，过程区才不会被提前关流抽空。
+            writeEv({
+              type: 'snapshot',
+              job_id: job.id,
+              status: job.status,
+              detail: job.detail,
+              workspace: job.workspace,
+              review_in_scope: job.review_in_scope || [],
+              review_deleted: job.review_deleted || [],
+              review_deferred: job.review_deferred || [],
+              synced_files: job.synced_files || [],
+              assistant_text: job.assistant_text || '',
+              assistant_chars: (job.assistant_text || '').length,
+              thinking_text: job.thinking_text || '',
+              thinking_chars: (job.thinking_text || '').length,
+              transcript: job.transcript || [],
+            })
+            writeEv({ type: 'done', status: job.status, job_id: job.id })
+            stop()
+            res.end()
+            return
+          }
+          writeEv({
+            type: 'snapshot',
+            job_id: job.id,
+            status: job.status,
+            detail: job.detail,
+            workspace: job.workspace,
+            review_in_scope: job.review_in_scope || [],
+            review_deleted: job.review_deleted || [],
+            review_deferred: job.review_deferred || [],
+            synced_files: job.synced_files || [],
+            assistant_text: job.assistant_text || '',
+            assistant_chars: (job.assistant_text || '').length,
+            thinking_text: job.thinking_text || '',
+            thinking_chars: (job.thinking_text || '').length,
+            transcript: job.transcript || [],
+          })
+        } finally {
+          ticking = false
         }
       }
-      const timer = setInterval(tick, 400)
+      const timerHandle = setInterval(tick, 400)
+      timer = timerHandle
+      unsub = onJobChange((changedId, status) => {
+        if (changedId === id && terminalOk.includes(status)) tick()
+      })
       tick()
       req.on('close', () => {
-        closed = true
-        clearInterval(timer)
+        stop()
       })
       return
     }
@@ -854,7 +895,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       send(res, 404, { ok: false, detail: '任务不存在' }, req)
       return
     }
-    send(res, 200, { ok: true, job }, req)
+    const view = new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('view')
+    send(res, 200, { ok: true, job: view === 'card' ? jobCardView(job) : job }, req)
     return
   }
 

@@ -44,7 +44,7 @@ optionalConnectorIds:
 | `wip` | 在制工单 |
 | `work_order` | 指定工单号或料号 |
 
-日期：`date_from` / `date_to` 用 `YYYY-MM-DD`；用户没说则查近 7 日（Asia/Shanghai）。库存、在制可不传日期。MES 未启用 → 停在「请到专家·技能·连接器打开 MES」，不要编数字。
+日期：`date_from` / `date_to` 用 `YYYY-MM-DD`，**按用户说的窗口换算**（近 7 / 10 / 30 天、本周、本月、起止日均可）。近 N 天含今天。用户没说任何时间才用近 7 日（Asia/Shanghai）。库存、在制可不传日期。表头写清实际窗口。MES 未启用 → 停在「请到专家·技能·连接器打开 MES」，不要编数字。
 
 全面运营分析默认取：`output`、`yield`、`scrap`、`inventory`，再尝试 `capacity`、`oee`、`wip`。404 记盲区，继续其它节。
 

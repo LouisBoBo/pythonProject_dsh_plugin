@@ -210,6 +210,63 @@ window.__ModuleLoader__.load({
       return false
     }
 
+    function sseMayForceRunning(sealedStatus) {
+      return !TERMINAL_JOB[String(sealedStatus || '').trim()]
+    }
+
+    function cardVisiblePhase(opts) {
+      var o = opts || {}
+      if (o.cancelled) return 'done'
+      var live = String(o.liveJobId || '').trim()
+      var resultJob = String(o.resultJobId || '').trim()
+      var resultMatches = !live || !resultJob || resultJob === live
+      var resultSt = o.resultDone === true && resultMatches ? String(o.resultStatus || '').trim() : ''
+      var auth = preferJobStatus(preferJobStatus(String(o.sealedStatus || ''), resultSt), String(o.uiStatus || ''))
+      if (TERMINAL_JOB[auth]) return 'done'
+      return o.phase
+    }
+
+    function readToolJobFields(value) {
+      var empty = { jobId: '', status: '', done: false, detail: '' }
+      var seen = []
+      function walk(v, depth) {
+        if (v == null || depth > 4) return empty
+        if (typeof v === 'string') {
+          var t = String(v).trim()
+          if (t.charAt(0) !== '{' && t.charAt(0) !== '[') return empty
+          try {
+            return walk(JSON.parse(t), depth + 1)
+          } catch (e) {
+            return empty
+          }
+        }
+        if (typeof v !== 'object') return empty
+        for (var i = 0; i < seen.length; i++) if (seen[i] === v) return empty
+        seen.push(v)
+        var ui = v.cursor_coding_ui && typeof v.cursor_coding_ui === 'object' ? v.cursor_coding_ui : null
+        var jobId = String((v.job_id || (ui && ui.job_id) || '')).trim()
+        var status = String((v.status || (ui && ui.status) || '')).trim()
+        var done = v.done === true
+        var detail = String(v.detail || '').trim()
+        if (jobId || status || done) return { jobId: jobId, status: status, done: done, detail: detail }
+        var keys = ['result', 'value', 'output', 'data', 'json']
+        for (var k = 0; k < keys.length; k++) {
+          var inner = walk(v[keys[k]], depth + 1)
+          if (inner.jobId || inner.status || inner.done) return inner
+        }
+        if (Array.isArray(v.content)) {
+          for (var c = 0; c < v.content.length; c++) {
+            var block = v.content[c]
+            if (!block || typeof block !== 'object') continue
+            var fromText = walk(block.text, depth + 1)
+            if (fromText.jobId || fromText.status || fromText.done) return fromText
+          }
+        }
+        return empty
+      }
+      return walk(value, 0)
+    }
+
     function sealTranscriptItems(items) {
       if (!Array.isArray(items)) return items
       return items.map(function (it) {
@@ -256,6 +313,23 @@ window.__ModuleLoader__.load({
       }
       if (s) return 'running'
       return 'form'
+    }
+
+    function conclusionFromJob(job) {
+      if (!job) return ''
+      var ready = String(job.chat_conclusion || '').trim()
+      if (ready) return ready
+      var asst = String(job.assistant_text || '')
+      var markers = ['## 说明方案', '## 本轮结论']
+      var start = -1
+      for (var i = 0; i < markers.length; i++) {
+        var idx = asst.lastIndexOf(markers[i])
+        if (idx > start) start = idx
+      }
+      var body = start >= 0 ? asst.slice(start).trim() : ''
+      if (!body && job.detail) body = String(job.detail)
+      if (!body) return ''
+      return '## 本轮结论\n\n' + body
     }
 
     function labelFromJobStatus(st, detail, inScopeLen) {
@@ -385,6 +459,8 @@ window.__ModuleLoader__.load({
         '.cc-steer{margin-top:10px;border-top:1px solid var(--color-border,rgba(127,127,127,.3));padding-top:10px}' +
         '.cc-done-panel{margin-top:12px;border-top:1px solid var(--color-border,rgba(127,127,127,.3));padding-top:12px}' +
         '.cc-done-panel h5{margin:0 0 8px;font-size:13px}' +
+        '.cc-conclusion{margin:8px 0 0;padding:10px 12px;border:1px solid var(--color-border,rgba(127,127,127,.35));border-radius:10px;line-height:1.55}' +
+        '.cc-conclusion h3,.cc-conclusion h4{margin:0 0 8px;font-size:14px}' +
         '.cc-conclusion{white-space:pre-wrap;font-size:13px;line-height:1.55;padding:10px 12px;border-radius:8px;border:1px solid var(--color-border,rgba(127,127,127,.3));background:var(--color-bg-subtle,rgba(127,127,127,.05));max-height:280px;overflow:auto;overscroll-behavior:contain}' +
         '.cc-follow-hint{margin:10px 0 0;padding:8px 10px;border-radius:8px;background:rgba(47,111,237,.08);font-size:12.5px;line-height:1.5}' +
         '.cc-cursor{display:inline-block;width:7px;height:1em;background:currentColor;margin-left:2px;animation:ccblink 1s step-end infinite;vertical-align:text-bottom}' +
@@ -986,6 +1062,9 @@ window.__ModuleLoader__.load({
       )
       var statusLabel = statusLabelState[0]
       var setStatusLabel = statusLabelState[1]
+      var conclusionState = useState((cache0 && cache0.chat_conclusion) || '')
+      var conclusionMd = conclusionState[0]
+      var setConclusionMd = conclusionState[1]
       var reviewState = useState({ inScope: [], deleted: [], deferred: [] })
       var review = reviewState[0]
       var setReview = reviewState[1]
@@ -1015,6 +1094,8 @@ window.__ModuleLoader__.load({
         jobIdInit && TERMINAL_JOB[statusInit] ? statusInit : '',
       )
       var emptyDonePullRef = useRef('')
+      var jobIdRef = useRef(jobIdInit)
+      jobIdRef.current = jobId
 
       function hardResetToConfirm(nextReq) {
         try {
@@ -1028,6 +1109,7 @@ window.__ModuleLoader__.load({
         cancelOnceRef.current = false
         sealedStatusRef.current = ''
         emptyDonePullRef.current = ''
+        jobIdRef.current = ''
         setJobId('')
         setPhase('form')
         setBusy(false)
@@ -1036,6 +1118,7 @@ window.__ModuleLoader__.load({
         setStreamText('')
         setTranscript([])
         setStatusLabel('')
+        setConclusionMd('')
         setReview({ inScope: [], deleted: [], deferred: [] })
         setSelected({})
         setConfirmToken('')
@@ -1287,30 +1370,34 @@ window.__ModuleLoader__.load({
           }
           if (cancelOnceRef.current) return
           if (phase === 'done' && sealedStatusRef.current) return
-          var value =
-            (block && (block.result || block.value || block.output)) || (props && props.result) || null
-          var vJob = String(
-            (value && (value.job_id || (value.cursor_coding_ui && value.cursor_coding_ui.job_id))) || '',
-          ).trim()
-          var vSt = String(
-            (value && (value.status || (value.cursor_coding_ui && value.cursor_coding_ui.status))) || '',
-          ).trim()
+          var payload = readToolJobFields(
+            (block && (block.result || block.value || block.output)) || (props && props.result) || null,
+          )
+          var vJob = payload.jobId
+          var vSt = payload.status
           var uiJid = String((ui && ui.job_id) || '').trim()
           var uiSt = String((ui && ui.status) || '').trim()
           var sameJob = function (id) {
             return jobId && id && String(id) === String(jobId)
           }
-          // 只认工具结果/presentationMeta 的 status 字段。进行中 leftover 无 done=true，不会误封。
-          if (jobId && value && value.done === true && sameJob(vJob) && (TERMINAL_JOB[vSt] || vSt === 'pending_review')) {
+          // 只认本卡 job_id 的工具结果 status。进行中 leftover 无 done=true，不会误封。
+          if (
+            payload.done === true &&
+            (TERMINAL_JOB[vSt] || vSt === 'pending_review') &&
+            vJob &&
+            (!jobId || sameJob(vJob)) &&
+            (!uiJid || uiJid === vJob)
+          ) {
+            if (!jobId) setJobId(vJob)
             applyJobSnapshot({
-              id: jobId,
+              id: vJob,
               status: vSt,
-              detail: String((value && value.detail) || ''),
-              review_in_scope: value.cursor_coding_ui && value.cursor_coding_ui.review_in_scope,
-              review_deleted: value.cursor_coding_ui && value.cursor_coding_ui.review_deleted,
-              review_deferred: value.cursor_coding_ui && value.cursor_coding_ui.review_deferred,
+              detail: payload.detail,
+              review_in_scope: ui && ui.review_in_scope,
+              review_deleted: ui && ui.review_deleted,
+              review_deferred: ui && ui.review_deferred,
             })
-            reconcileJob(jobId)
+            reconcileJob(vJob)
             return
           }
           if (sameJob(uiJid) && (TERMINAL_JOB[uiSt] || uiSt === 'pending_review')) {
@@ -1325,7 +1412,7 @@ window.__ModuleLoader__.load({
             reconcileJob(jobId)
             return
           }
-          if (toolBlockSettled(block) && phase === 'running' && jobId) {
+          if ((toolBlockSettled(block) || payload.done === true) && phase === 'running' && jobId) {
             reconcileJob(jobId)
           }
         },
@@ -1335,7 +1422,7 @@ window.__ModuleLoader__.load({
       function applyJobSnapshot(job) {
         if (!job) return
         var incomingId = String(job.id || '').trim()
-        var liveId = String(jobId || '').trim()
+        var liveId = String((jobIdRef && jobIdRef.current) || jobId || '').trim()
         if (incomingId && liveId && incomingId !== liveId) return
         var st = String(job.status || '')
         if (!shouldApplyJobSnapshot(sealedStatusRef.current, st)) {
@@ -1396,6 +1483,8 @@ window.__ModuleLoader__.load({
         if (Array.isArray(job.transcript) && job.transcript.length) {
           setTranscript(nextPhase === 'done' ? sealTranscriptItems(job.transcript) : job.transcript)
         }
+        var conc = conclusionFromJob(job)
+        if (conc) setConclusionMd(conc)
         var jid = String(job.id || jobId || '').trim()
         if (jid) {
           saveSessionCache(jid, {
@@ -1403,6 +1492,7 @@ window.__ModuleLoader__.load({
             phase: nextPhase === 'form' ? 'running' : nextPhase,
             statusLabel: nextLabel || st,
             transcript: Array.isArray(job.transcript) ? job.transcript : undefined,
+            chat_conclusion: conc || undefined,
           })
         }
       }
@@ -1410,7 +1500,7 @@ window.__ModuleLoader__.load({
       function reconcileJob(jid) {
         var id = String(jid || jobId || '').trim()
         if (!id) return Promise.resolve(null)
-        return fetch(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(id))
+        return fetch(base() + '/api/cursor-coding/jobs/' + encodeURIComponent(id) + '?view=card')
           .then(function (r) {
             return r.json()
           })
@@ -1503,8 +1593,10 @@ window.__ModuleLoader__.load({
                   setPhase('done')
                   setStatusLabel('已完成·有范围外文件')
                 } else if (data.auto_apply) {
-                  setPhase('running')
-                  setStatusLabel('自动同步中')
+                  if (sseMayForceRunning(sealedStatusRef.current)) {
+                    setPhase('running')
+                    setStatusLabel('自动同步中')
+                  }
                 } else if (data.review_in_scope || data.review_deleted || data.review_deferred) {
                   setReview({
                     inScope: data.review_in_scope || [],
@@ -1521,6 +1613,9 @@ window.__ModuleLoader__.load({
                 parsed = JSON.parse(data.message || '{}')
               } catch (e3) {
                 parsed = {}
+              }
+              if (!sseMayForceRunning(sealedStatusRef.current)) {
+                return
               }
               if (parsed.auto_apply) {
                 setPhase('running')
@@ -1580,12 +1675,42 @@ window.__ModuleLoader__.load({
           if (phase !== 'running' || !jobId) return
           var t = setInterval(function () {
             reconcileJob(jobId)
-          }, 4000)
+          }, 2000)
           return function () {
             clearInterval(t)
           }
         },
         [phase, jobId],
+      )
+
+      // 权威 status 已是终态时，把 React phase 对齐（不依赖 SSE / 宿主是否更新 kind）
+      useEffect(
+        function () {
+          if (cancelOnceRef.current) return
+          if (phase === 'done' && sealedStatusRef.current) return
+          var payload = readToolJobFields(
+            ((props && props.block && (props.block.result || props.block.value || props.block.output)) ||
+              (props && props.result) ||
+              null),
+          )
+          var liveId = String(jobId || '').trim()
+          var payloadId = String(payload.jobId || '').trim()
+          var uiJid = String((ui && ui.job_id) || '').trim()
+          var toolSt =
+            payload.done === true && payloadId && (!liveId || payloadId === liveId) ? String(payload.status || '') : ''
+          var uiSt = liveId && uiJid === liveId ? String((ui && ui.status) || '') : ''
+          var auth = preferJobStatus(preferJobStatus(String(sealedStatusRef.current || ''), toolSt), uiSt)
+          if (!TERMINAL_JOB[auth]) return
+          var jid = liveId || (toolSt ? payloadId : '') || (uiSt ? uiJid : '')
+          if (!jid) return
+          applyJobSnapshot({
+            id: jid,
+            status: auth,
+            detail: payload.detail || String((ui && ui.detail) || ''),
+          })
+          reconcileJob(jid)
+        },
+        [phase, jobId, ui && ui.status, ui && ui.job_id, props && props.block, props && props.result],
       )
 
       // 已完成但过程区为空：回拉账本 transcript（刷新/SSE 误关流时必补）
@@ -1935,6 +2060,37 @@ window.__ModuleLoader__.load({
       )
 
       var kind = (ui && ui.kind) || (parentJobId ? 'continue' : 'live')
+      var resultFields = readToolJobFields(
+        ((props && props.block && (props.block.result || props.block.value || props.block.output)) ||
+          (props && props.result) ||
+          null),
+      )
+      var authStatus = preferJobStatus(
+        preferJobStatus(
+          String(sealedStatusRef.current || ''),
+          resultFields.done === true && (!jobId || !resultFields.jobId || resultFields.jobId === jobId)
+            ? String(resultFields.status || '')
+            : '',
+        ),
+        jobId && ui && ui.job_id && String(ui.job_id) === String(jobId) ? String(ui.status || '') : '',
+      )
+      var visiblePhase = cardVisiblePhase({
+        phase: phase,
+        sealedStatus: sealedStatusRef.current,
+        uiStatus: ui && ui.status,
+        resultDone: resultFields.done,
+        resultStatus: resultFields.status,
+        resultJobId: resultFields.jobId,
+        liveJobId: jobId,
+        cancelled: cancelOnceRef.current,
+      })
+      var visibleLabel = cancelOnceRef.current
+        ? statusLabel && statusLabel !== '写码中' && statusLabel !== '自动同步中'
+          ? statusLabel
+          : '已取消'
+        : TERMINAL_JOB[authStatus]
+          ? labelFromJobStatus(authStatus)
+          : statusLabel
       var title =
         (ui && ui.job_id) || phase === 'running' || phase === 'review' || phase === 'done'
           ? parentJobId || kind === 'continue'
@@ -1946,7 +2102,7 @@ window.__ModuleLoader__.load({
       var canStart = Boolean(String(workspace || '').trim() && String(requirement || '').trim())
 
       var statusZh = (function () {
-        var s = String(statusLabel || phase || '')
+        var s = String(visibleLabel || visiblePhase || '')
         if (s === 'running' || s === 'queued') return '写码中'
         if (s === 'pending_review' || s === '待审同步') return '待审同步'
         if (s === 'succeeded' || s === 'done' || s === '已完成') return '已完成'
@@ -2025,7 +2181,7 @@ window.__ModuleLoader__.load({
 
       function renderTranscript() {
         if (!transcript || !transcript.length) {
-          if (phase === 'done') {
+          if (visiblePhase === 'done' || phase === 'done') {
             return h(
               'div',
               { className: 'cc-note', style: { margin: '8px 0' } },
@@ -2059,6 +2215,7 @@ window.__ModuleLoader__.load({
           if (it.kind === 'thinking') {
             var streaming =
               !!it.streaming &&
+              visiblePhase !== 'done' &&
               phase !== 'done' &&
               !cancelOnceRef.current &&
               !toolBlockCancelled(props && props.block) &&
@@ -2178,7 +2335,9 @@ window.__ModuleLoader__.load({
             ? '本卡只展示过程（思考/工具）。完整结论与追问引导会在对话正文中给出。'
             : '请确认工作区与诉求。点确认前不会写码；点「确认并用 Cursor 开写」后才开始。',
         ),
-        phase === 'running' && (statusZh === '写码中' || statusZh === '自动同步中' || statusZh === '准备中')
+        phase === 'running' &&
+        visiblePhase === 'running' &&
+        (statusZh === '写码中' || statusZh === '自动同步中' || statusZh === '准备中')
           ? h(
               'div',
               { className: 'cc-live-bar' },
@@ -2275,7 +2434,7 @@ window.__ModuleLoader__.load({
                 h(
                   'span',
                   { style: { display: 'flex', gap: '8px' } },
-                  phase === 'running'
+                  visiblePhase === 'running'
                     ? h(
                         'button',
                         {
@@ -2311,15 +2470,20 @@ window.__ModuleLoader__.load({
                 id: 'cc-dialog-' + (jobId || 'x'),
                 onScroll: onDialogScroll,
               }, renderTranscript()),
-              phase === 'done'
+              phase === 'done' || visiblePhase === 'done'
                 ? h(
                     'div',
                     { className: 'cc-done-panel' },
-                    h(
-                      'p',
-                      { className: 'cc-note' },
-                      '本卡过程已结束。结论正在输出到下方对话正文，请向下查看；如需调整，直接在对话框回复即可。',
-                    ),
+                    conclusionMd
+                      ? h('div', {
+                          className: 'cc-conclusion',
+                          dangerouslySetInnerHTML: { __html: renderMd(conclusionMd) },
+                        })
+                      : h(
+                          'p',
+                          { className: 'cc-note' },
+                          '本卡过程已结束。结论正在从本机任务恢复；若仍为空，请刷新本页。',
+                        ),
                     err ? h('p', { className: 'cc-set-msg err' }, err) : null,
                   )
                 : null,

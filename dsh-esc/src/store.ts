@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConnectorConfig, EscState, SessionOverride } from './types.js'
-import { loadCatalog } from './catalog.js'
+import { getSkill, loadCatalog } from './catalog.js'
 import { getAnyScene } from './scenes.js'
 import { asBool, asString, writeJsonAtomic, withLock } from './util.js'
 import { publicMesSource, readWorkbuddyMes } from './workbuddy_mes.js'
@@ -23,6 +23,7 @@ function emptyConnector(): ConnectorConfig {
     token: '',
     enterpriseCode: '',
     datasetId: '',
+    docTarget: '',
   }
 }
 
@@ -73,8 +74,8 @@ function readSessionRow(row: Partial<SessionOverride> | null | undefined): Sessi
   }
 }
 
-export function emptyState(): EscState {
-  const catalog = loadCatalog()
+export function emptyState(dataRoot?: string): EscState {
+  const catalog = loadCatalog(dataRoot)
   const skills: EscState['skills'] = {}
   for (const s of catalog.skills) skills[s.id] = { enabled: false }
   const connectors: EscState['connectors'] = {}
@@ -96,12 +97,12 @@ function statePath(dataRoot: string): string {
 }
 
 function readStateFile(dataRoot: string): EscState {
-  const fallback = emptyState()
+  const fallback = emptyState(dataRoot)
   const path = statePath(dataRoot)
   if (!existsSync(path)) return fallback
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<EscState>
-    const next = emptyState()
+    const next = emptyState(dataRoot)
     if (raw.activeExpertId === null || typeof raw.activeExpertId === 'string') {
       next.activeExpertId = raw.activeExpertId ?? null
     }
@@ -137,6 +138,7 @@ function readStateFile(dataRoot: string): EscState {
           token: asString(row.token),
           enterpriseCode: asString(row.enterpriseCode),
           datasetId: asString(row.datasetId),
+          docTarget: asString(row.docTarget),
         })
       }
     }
@@ -146,18 +148,9 @@ function readStateFile(dataRoot: string): EscState {
         next.sessions[sid] = readSessionRow(row)
       }
     }
-    if (next.activeSceneId) {
-      const scene = getAnyScene(dataRoot, next.activeSceneId)
-      if (scene && (!next.activeExpertId || scene.expertId === next.activeExpertId)) {
-        for (const id of Object.keys(next.skills)) {
-          next.skills[id] = { enabled: scene.skillIds.includes(id) }
-        }
-        for (const id of Object.keys(next.connectors)) {
-          next.connectors[id] = { ...next.connectors[id], enabled: scene.connectorIds.includes(id) }
-        }
-        next.pinnedSkillId = scene.skillIds[0] || next.pinnedSkillId
-      }
-    }
+    /* 禁止读盘时按 activeScene 改写 connectors.*.enabled / pinnedSkillId：
+     * 会把面板「+」启用立刻盖掉（场景卡未含该连接器时点了等于没点）。
+     * 场景组合只在 applyScene 时写入。 */
     if (!rawSummoned) {
       if (!next.activeSceneId && next.activeExpertId) {
         const hit = loadCatalog().scenes.find((s) => s.expertId === next.activeExpertId)
@@ -213,8 +206,11 @@ export function saveState(dataRoot: string, state: EscState): Promise<EscState> 
 
 export function resolveExpertId(state: EscState, sessionId: string): string | null {
   const sid = sessionId.trim()
-  if (sid && Object.prototype.hasOwnProperty.call(state.sessions, sid)) {
-    return state.sessions[sid].expertId
+  if (sid) {
+    if (Object.prototype.hasOwnProperty.call(state.sessions, sid)) {
+      return state.sessions[sid].expertId
+    }
+    return null
   }
   return state.activeExpertId
 }
@@ -229,8 +225,11 @@ export function resolveSceneId(state: EscState, sessionId: string): string | nul
 
 export function resolveSkillPool(state: EscState, sessionId: string): string[] {
   const sid = sessionId.trim()
-  if (sid && Object.prototype.hasOwnProperty.call(state.sessions, sid) && state.sessions[sid].sceneId) {
-    return state.sessions[sid].skillIds
+  if (sid) {
+    if (Object.prototype.hasOwnProperty.call(state.sessions, sid) && state.sessions[sid].sceneId) {
+      return state.sessions[sid].skillIds
+    }
+    return []
   }
   return Object.entries(state.skills)
     .filter(([, v]) => v.enabled)
@@ -239,8 +238,11 @@ export function resolveSkillPool(state: EscState, sessionId: string): string[] {
 
 export function resolveConnectorPool(state: EscState, sessionId: string): string[] | null {
   const sid = sessionId.trim()
-  if (sid && Object.prototype.hasOwnProperty.call(state.sessions, sid) && state.sessions[sid].sceneId) {
-    return state.sessions[sid].connectorIds
+  if (sid) {
+    if (Object.prototype.hasOwnProperty.call(state.sessions, sid) && state.sessions[sid].sceneId) {
+      return state.sessions[sid].connectorIds
+    }
+    return []
   }
   return null
 }
@@ -248,13 +250,12 @@ export function resolveConnectorPool(state: EscState, sessionId: string): string
 export function resolvePinnedSkillId(state: EscState, sessionId: string): string | null {
   const sid = sessionId.trim()
   const pool = resolveSkillPool(state, sid)
-  if (sid && state.sessions[sid] && state.sessions[sid].sceneId) {
-    const pin = state.sessions[sid].pinnedSkillId
+  if (sid) {
+    const sess = state.sessions[sid]
+    if (!sess?.sceneId) return null
+    const pin = sess.pinnedSkillId
     if (pin && pool.includes(pin)) return pin
     return pool[0] || null
-  }
-  if (sid && state.sessions[sid] && state.sessions[sid].pinnedSkillId) {
-    return state.sessions[sid].pinnedSkillId
   }
   return state.pinnedSkillId
 }
@@ -271,6 +272,7 @@ export function publicConnectors(state: EscState) {
       username: row.username,
       enterpriseCode: row.enterpriseCode,
       datasetId: row.datasetId,
+      docTarget: row.docTarget,
       apiKeyConfigured: Boolean(row.apiKey.trim()),
       passwordConfigured: Boolean(row.password.trim()),
       tokenConfigured: Boolean(row.token.trim()),
@@ -409,18 +411,17 @@ export async function applyScene(
     cur.activeExpertId = scene.expertId
     cur.activeSceneId = scene.id
     cur.pinnedSkillId = scene.skillIds[0] || null
-    for (const id of Object.keys(cur.skills)) {
-      cur.skills[id] = { enabled: scene.skillIds.includes(id) }
+    for (const id of scene.skillIds) {
+      if (cur.skills[id] || getSkill(id, dataRoot)) cur.skills[id] = { enabled: true }
     }
     for (const id of Object.keys(cur.connectors)) {
-      let on = scene.connectorIds.includes(id)
-      if (on && OUTBOUND_CONNECTOR_IDS.has(id) && !armOutbound) {
-        on = cur.connectors[id].enabled
-      }
-      const row = { ...cur.connectors[id], enabled: on }
-      if (on && id === 'mes' && readWorkbuddyMes().baseUrl) row.mode = 'http'
-      if (on && HTTP_ON_ENABLE.has(id)) row.mode = 'http'
-      if (OUTBOUND_CONNECTOR_IDS.has(id) && armOutbound) row.outboundArmed = on
+      if (!scene.connectorIds.includes(id)) continue
+      const row = { ...cur.connectors[id] }
+      if (OUTBOUND_CONNECTOR_IDS.has(id) && !armOutbound && !row.enabled) continue
+      row.enabled = true
+      if (id === 'mes' && readWorkbuddyMes().baseUrl) row.mode = 'http'
+      if (HTTP_ON_ENABLE.has(id)) row.mode = 'http'
+      if (OUTBOUND_CONNECTOR_IDS.has(id) && armOutbound) row.outboundArmed = true
       cur.connectors[id] = row
     }
     if (sid) {
@@ -447,10 +448,12 @@ export async function clearSessionScene(dataRoot: string, sessionId: string): Pr
 }
 
 export async function setSkillEnabled(dataRoot: string, skillId: string, enabled: boolean): Promise<EscState> {
+  const id = String(skillId || '').trim()
+  if (!id) throw new Error('技能 id 不能为空')
+  if (!getSkill(id, dataRoot)) throw new Error(`未知技能：${id}`)
   return withLock(() => {
     const cur = readStateFile(dataRoot)
-    if (!cur.skills[skillId]) throw new Error(`未知技能：${skillId}`)
-    cur.skills[skillId] = { enabled }
+    cur.skills[id] = { enabled }
     cur.activeSceneId = null
     return persist(dataRoot, cur)
   })
@@ -477,7 +480,7 @@ export async function setConnectorEnabled(dataRoot: string, connectorId: string,
 }
 
 export async function setActiveExpert(dataRoot: string, expertId: string | null): Promise<EscState> {
-  const catalog = loadCatalog()
+  const catalog = loadCatalog(dataRoot)
   if (expertId && !catalog.experts.some((x) => x.id === expertId)) {
     throw new Error(`未知专家：${expertId}`)
   }

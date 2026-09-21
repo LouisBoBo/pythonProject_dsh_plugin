@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-export const PLUGIN_VERSION = '0.1.21'
+export const PLUGIN_VERSION = '0.1.38'
 export const DEFAULT_PORT = 18786
 export const PRIVATE_DIR_MODE = 0o700
 export const PRIVATE_FILE_MODE = 0o600

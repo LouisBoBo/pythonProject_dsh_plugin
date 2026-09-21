@@ -7,6 +7,7 @@
   "mcpServer": "@antvis/mcp-server-chart",
   "mcpUrl": "https://www.modelscope.cn/mcp/servers/@antvis/mcp-server-chart",
   "kind": "mcp",
+  "role": "tool",
   "avatar": "https://gw.alipayobjects.com/zos/antfincdn/FLrTNDvlna/antv.png",
   "tools": ["zr_esc_mcp_chart"],
   "defaultEnabled": false

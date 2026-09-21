@@ -1,6 +1,7 @@
 /**
- * 飞书知识库新建云文档。凭证只读系统配置 App ID/Secret。不另起 MCP 进程。
- * 对话里用户明确要求落知识库时用；自动化任务定时落库仍走自动化插件。
+ * 飞书云文档：知识库 /wiki/ 链接当父节点，在其下新建一篇（不往父文档正文追加）。
+ * 凭证只读系统配置 App ID/Secret。不另起 MCP 进程。
+ * 对话里用户明确要求落文档时用；自动化任务定时落库仍走自动化插件。
  */
 import type { ConnectorConfig, QueryResult } from '../types.js'
 import { readWorkbuddyIm } from '../workbuddy_im.js'
@@ -9,21 +10,39 @@ const HOST = 'open.feishu.cn'
 
 type FeishuJson = { http: number; code: number; msg: string; data: Record<string, unknown> }
 
-export function normalizeWikiToken(raw: string): string {
+export type FeishuTarget =
+  | { kind: 'docx'; token: string }
+  | { kind: 'folder'; token: string }
+  | { kind: 'wiki'; token: string }
+  | { kind: 'none' }
+
+/** 解析飞书文档 / 文件夹 / 知识库链接。多维表格拒绝。 */
+export function parseFeishuTarget(raw: string): FeishuTarget {
   const text = String(raw || '').trim()
-  if (!text) return ''
-  const wikiMatch = text.match(/(?:^|\/)wiki\/([^/?#]+)/i)
-  if (wikiMatch) return wikiMatch[1].trim()
-  if (text.includes('://') || text.toLowerCase().includes('feishu.cn') || text.toLowerCase().includes('larksuite.com')) {
-    const url = text.includes('://') ? text : `https://${text}`
-    const parsed = new URL(url)
-    const parts = parsed.pathname.split('/').filter(Boolean)
-    if (parts.includes('base') || parts.includes('basex')) {
-      throw new Error('请填知识库 /wiki/… 链接，不是多维表格 /base/')
-    }
-    throw new Error('无法解析知识库节点，请粘贴 /wiki/… 链接或节点 token')
+  if (!text) return { kind: 'none' }
+  const lower = text.toLowerCase()
+  if (lower.includes('/base/') || lower.includes('/basex/')) {
+    throw new Error('请填飞书文档 /docx/…，不是多维表格 /base/')
   }
-  return text
+  const docx = text.match(/(?:^|\/)docx\/([^/?#]+)/i)
+  if (docx) return { kind: 'docx', token: docx[1].trim() }
+  const folder = text.match(/(?:^|\/)(?:drive\/)?folder\/([^/?#]+)/i)
+  if (folder) return { kind: 'folder', token: folder[1].trim() }
+  const wiki = text.match(/(?:^|\/)wiki\/([^/?#]+)/i)
+  if (wiki) return { kind: 'wiki', token: wiki[1].trim() }
+  if (text.includes('://') || lower.includes('feishu.cn') || lower.includes('larksuite.com')) {
+    throw new Error('无法解析飞书链接。请粘贴云文档 /docx/… ，或云空间文件夹 /drive/folder/…')
+  }
+  if (/^fld/i.test(text)) return { kind: 'folder', token: text }
+  return { kind: 'docx', token: text }
+}
+
+/** @deprecated 兼容旧测试：只认 /wiki/ 。新代码用 parseFeishuTarget。 */
+export function normalizeWikiToken(raw: string): string {
+  const hit = parseFeishuTarget(raw)
+  if (hit.kind === 'wiki') return hit.token
+  if (hit.kind === 'none') return ''
+  throw new Error('请填知识库 /wiki/… 链接，或改用飞书文档 /docx/…')
 }
 
 function resolveApp(_cfg: ConnectorConfig | undefined): { appId: string; appSecret: string } {
@@ -34,13 +53,18 @@ function resolveApp(_cfg: ConnectorConfig | undefined): { appId: string; appSecr
   }
 }
 
-async function feishuJson(url: string, token: string | null, body?: unknown): Promise<FeishuJson> {
+async function feishuJson(
+  url: string,
+  token: string | null,
+  init?: { method?: string; body?: unknown },
+): Promise<FeishuJson> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json; charset=utf-8' }
   if (token) headers.Authorization = `Bearer ${token}`
+  const method = init?.method || (init?.body === undefined ? 'GET' : 'POST')
   const res = await fetch(url, {
-    method: body === undefined ? 'GET' : 'POST',
+    method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
     signal: AbortSignal.timeout(30000),
   })
   const raw = (await res.json().catch(() => ({}))) as Record<string, unknown>
@@ -54,8 +78,8 @@ async function feishuJson(url: string, token: string | null, body?: unknown): Pr
 
 async function tenantToken(appId: string, appSecret: string): Promise<string> {
   const out = await feishuJson(`https://${HOST}/open-apis/auth/v3/tenant_access_token/internal`, null, {
-    app_id: appId,
-    app_secret: appSecret,
+    method: 'POST',
+    body: { app_id: appId, app_secret: appSecret },
   })
   const token = String(out.data.tenant_access_token || '')
   if (!token) throw new Error(`飞书 tenant_access_token 失败：${out.msg || out.http}`)
@@ -73,12 +97,121 @@ function stripMergeInfo(node: unknown): unknown {
   return next
 }
 
-export async function probeFeishu(cfg: ConnectorConfig): Promise<QueryResult> {
-  if (cfg.mode === 'mock') {
-    return { ok: true, source: 'mock', detail: 'mock：不写飞书。启用 http 后按系统配置 App 建知识库文档' }
+async function insertConvertedBlocks(token: string, documentId: string, markdown: string): Promise<void> {
+  const converted = await feishuJson(`https://${HOST}/open-apis/docx/v1/documents/blocks/convert`, token, {
+    method: 'POST',
+    body: { content_type: 'markdown', content: markdown.slice(0, 200000) },
+  })
+  if (converted.code !== 0) {
+    throw new Error(
+      `Markdown 转文档失败：${converted.msg || converted.http}。请给系统配置里的飞书应用开通 docx:document.block:convert 并发布。`,
+    )
   }
+  const first = (converted.data.first_level_block_ids as string[]) || []
+  const blocks = stripMergeInfo(converted.data.blocks) as Record<string, unknown>[]
+  if (!first.length || !blocks?.length) throw new Error('转换结果为空')
+  const descendants = blocks.map((b) => {
+    const copy = { ...b }
+    delete copy.revision_id
+    return copy
+  })
+  const written = await feishuJson(
+    `https://${HOST}/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/descendant?document_revision_id=-1`,
+    token,
+    { method: 'POST', body: { index: -1, children_id: first, descendants } },
+  )
+  if (written.code !== 0) throw new Error(`写入正文失败：${written.msg || written.http}`)
+}
+
+async function createCloudDoc(
+  token: string,
+  title: string,
+  folderToken = '',
+): Promise<{ documentId: string; url: string }> {
+  const body: Record<string, string> = { title: title.slice(0, 800) }
+  if (folderToken) body.folder_token = folderToken
+  const created = await feishuJson(`https://${HOST}/open-apis/docx/v1/documents`, token, { method: 'POST', body })
+  if (created.code !== 0) {
+    throw new Error(
+      `创建飞书文档失败：${created.msg || created.http}。请开通 docx:document 或 docx:document:create；` +
+        '或改填已有 /docx/ 链接，并把本应用加为该文档「可编辑」协作者。',
+    )
+  }
+  const doc = (created.data.document && typeof created.data.document === 'object'
+    ? created.data.document
+    : created.data) as Record<string, unknown>
+  const documentId = String(doc.document_id || created.data.document_id || '')
+  if (!documentId) throw new Error('创建成功但未返回 document_id')
+  return { documentId, url: `https://www.feishu.cn/docx/${documentId}` }
+}
+
+async function loadWikiNode(
+  token: string,
+  parent: string,
+): Promise<{ spaceId: string; nodeToken: string; objType: string; objToken: string; title: string }> {
+  const nodeRes = await feishuJson(
+    `https://${HOST}/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(parent)}`,
+    token,
+  )
+  if (nodeRes.code !== 0) {
+    throw new Error(
+      `读不到该飞书链接：${nodeRes.msg || nodeRes.http}。请确认应用已加入该知识库/文档，并有可编辑权限。`,
+    )
+  }
+  const node = (nodeRes.data.node && typeof nodeRes.data.node === 'object' ? nodeRes.data.node : nodeRes.data) as Record<
+    string,
+    unknown
+  >
+  const objType = String(node.obj_type || '')
+  if (objType.toLowerCase() === 'bitable') {
+    throw new Error('该链接是多维表格。请改用飞书文档（地址栏含 /docx/ 或知识库里的文档页 /wiki/）。')
+  }
+  const spaceId = String(node.space_id || '')
+  const nodeToken = String(node.node_token || parent)
+  const objToken = String(node.obj_token || '')
+  const title = String(node.title || '')
+  if (!spaceId) throw new Error('节点未返回 space_id')
+  return { spaceId, nodeToken, objType, objToken, title }
+}
+
+async function createWikiDoc(
+  token: string,
+  parent: string,
+  title: string,
+): Promise<{ documentId: string; url: string }> {
+  const node = await loadWikiNode(token, parent)
+  const created = await feishuJson(
+    `https://${HOST}/open-apis/wiki/v2/spaces/${encodeURIComponent(node.spaceId)}/nodes`,
+    token,
+    {
+      method: 'POST',
+      body: {
+        obj_type: 'docx',
+        node_type: 'origin',
+        title: title.slice(0, 800),
+        parent_node_token: node.nodeToken,
+      },
+    },
+  )
+  if (created.code !== 0) {
+    throw new Error(`在知识库创建失败：${created.msg || created.http}。建议改用云文档 /docx/，不必走知识库。`)
+  }
+  const createdNode = (created.data.node && typeof created.data.node === 'object'
+    ? created.data.node
+    : created.data) as Record<string, unknown>
+  const documentId = String(createdNode.obj_token || '')
+  const nodeToken = String(createdNode.node_token || '')
+  if (!documentId) throw new Error('创建成功但未返回 obj_token')
+  const url = nodeToken ? `https://www.feishu.cn/wiki/${nodeToken}` : `https://www.feishu.cn/docx/${documentId}`
+  return { documentId, url }
+}
+
+export async function probeFeishu(cfg: ConnectorConfig): Promise<QueryResult> {
   const app = resolveApp(cfg)
   if (!app.appId || !app.appSecret) {
+    if (cfg.mode === 'mock') {
+      return { ok: true, source: 'mock', detail: 'mock：不写飞书。系统配置填好 App 后点测通，会验登录和文档链接。' }
+    }
     return {
       ok: false,
       source: 'none',
@@ -87,18 +220,47 @@ export async function probeFeishu(cfg: ConnectorConfig): Promise<QueryResult> {
     }
   }
   try {
-    await tenantToken(app.appId, app.appSecret)
-    return { ok: true, source: 'http', detail: '已用系统配置飞书应用取到 tenant_access_token' }
+    const token = await tenantToken(app.appId, app.appSecret)
+    const raw = String(cfg.docTarget || '').trim()
+    if (!raw) {
+      return {
+        ok: true,
+        source: 'http',
+        detail: '已登录飞书应用。未填文档链接时，写入会新建一篇。测通未写正文。',
+      }
+    }
+    const target = parseFeishuTarget(raw)
+    if (target.kind === 'wiki') {
+      const node = await loadWikiNode(token, target.token)
+      return {
+        ok: true,
+        source: 'http',
+        detail: `已定位知识库节点「${node.title || node.nodeToken}」，测通成功。写入会在其下新建一篇文档，不会改这篇的正文。`,
+      }
+    }
+    if (target.kind === 'docx') {
+      const doc = await feishuJson(
+        `https://${HOST}/open-apis/docx/v1/documents/${encodeURIComponent(target.token)}`,
+        token,
+      )
+      if (doc.code !== 0) {
+        throw new Error(`读不到该云文档：${doc.msg || doc.http}。请把本应用加为文档「可编辑」协作者。`)
+      }
+      const rec = doc.data.document && typeof doc.data.document === 'object' ? (doc.data.document as Record<string, unknown>) : {}
+      const title = String(rec.title || target.token)
+      return { ok: true, source: 'http', detail: `已定位云文档「${title}」，测通成功。写入会追加（未写正文）。` }
+    }
+    return { ok: true, source: 'http', detail: '已登录飞书应用。测通未写正文。' }
   } catch (e) {
     return { ok: false, source: 'http', code: 'connect_failed', detail: e instanceof Error ? e.message : String(e) }
   }
 }
 
-export async function writeFeishuWiki(
+export async function writeFeishuDoc(
   cfg: ConnectorConfig | undefined,
   title: string,
   markdown: string,
-  parentRaw: string,
+  targetRaw = '',
 ): Promise<QueryResult> {
   if (!cfg?.enabled) {
     return {
@@ -112,15 +274,14 @@ export async function writeFeishuWiki(
   const md = String(markdown || '').trim()
   if (!heading) return { ok: false, source: 'none', code: 'invalid_kind', detail: '标题不能为空' }
   if (!md) return { ok: false, source: 'none', code: 'invalid_kind', detail: '正文不能为空' }
-  let parent = ''
+  let target: FeishuTarget
   try {
-    parent = normalizeWikiToken(parentRaw)
+    target = parseFeishuTarget(targetRaw || cfg.docTarget || '')
   } catch (e) {
     return { ok: false, source: 'none', code: 'invalid_kind', detail: e instanceof Error ? e.message : String(e) }
   }
-  if (!parent) return { ok: false, source: 'none', code: 'invalid_kind', detail: '请提供知识库父页面 /wiki/… 链接' }
   if (cfg.mode === 'mock') {
-    return { ok: true, source: 'mock', detail: 'mock：未写入飞书', data: { title: heading, parent } }
+    return { ok: true, source: 'mock', detail: 'mock：未写入飞书', data: { title: heading, target } }
   }
   if (!cfg.outboundArmed) {
     return {
@@ -141,62 +302,39 @@ export async function writeFeishuWiki(
   }
   try {
     const token = await tenantToken(app.appId, app.appSecret)
-    const nodeRes = await feishuJson(
-      `https://${HOST}/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(parent)}`,
-      token,
-    )
-    if (nodeRes.code !== 0) throw new Error(`读取知识库节点失败：${nodeRes.msg || nodeRes.http}`)
-    const node = (nodeRes.data.node && typeof nodeRes.data.node === 'object' ? nodeRes.data.node : nodeRes.data) as Record<
-      string,
-      unknown
-    >
-    const spaceId = String(node.space_id || '')
-    const parentNodeToken = String(node.node_token || parent)
-    if (String(node.obj_type || '').toLowerCase() === 'bitable') {
-      throw new Error('该节点是多维表格，不能当父页面。请改用知识库文档或文件夹 /wiki/…')
+    let documentId = ''
+    let url = ''
+    let action = '写入'
+    if (target.kind === 'docx') {
+      documentId = target.token
+      url = `https://www.feishu.cn/docx/${documentId}`
+      action = '追加写入'
+      await insertConvertedBlocks(token, documentId, md)
+    } else if (target.kind === 'wiki') {
+      const created = await createWikiDoc(token, target.token, heading)
+      documentId = created.documentId
+      url = created.url
+      action = '新建'
+      await insertConvertedBlocks(token, documentId, md)
+    } else {
+      const created = await createCloudDoc(token, heading, target.kind === 'folder' ? target.token : '')
+      documentId = created.documentId
+      url = created.url
+      action = '新建'
+      await insertConvertedBlocks(token, documentId, md)
     }
-    if (!spaceId) throw new Error('节点未返回 space_id')
-    const created = await feishuJson(
-      `https://${HOST}/open-apis/wiki/v2/spaces/${encodeURIComponent(spaceId)}/nodes`,
-      token,
-      {
-        obj_type: 'docx',
-        node_type: 'origin',
-        title: heading,
-        parent_node_token: parentNodeToken,
-      },
-    )
-    if (created.code !== 0) {
-      throw new Error(`创建文档失败：${created.msg || created.http}。请确认应用已开通 wiki 权限并被添加到该知识库。`)
-    }
-    const createdNode = (created.data.node && typeof created.data.node === 'object'
-      ? created.data.node
-      : created.data) as Record<string, unknown>
-    const documentId = String(createdNode.obj_token || '')
-    const nodeToken = String(createdNode.node_token || '')
-    if (!documentId) throw new Error('创建成功但未返回 obj_token')
-    const converted = await feishuJson(`https://${HOST}/open-apis/docx/v1/documents/blocks/convert`, token, {
-      content_type: 'markdown',
-      content: md.slice(0, 200000),
-    })
-    if (converted.code !== 0) throw new Error(`Markdown 转文档失败：${converted.msg || converted.http}`)
-    const first = (converted.data.first_level_block_ids as string[]) || []
-    const blocks = stripMergeInfo(converted.data.blocks) as Record<string, unknown>[]
-    if (!first.length || !blocks?.length) throw new Error('转换结果为空')
-    const descendants = blocks.map((b) => {
-      const copy = { ...b }
-      delete copy.revision_id
-      return copy
-    })
-    const written = await feishuJson(
-      `https://${HOST}/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/descendant?document_revision_id=-1`,
-      token,
-      { index: -1, children_id: first, descendants },
-    )
-    if (written.code !== 0) throw new Error(`写入正文失败：${written.msg || written.http}`)
-    const url = nodeToken ? `https://www.feishu.cn/wiki/${nodeToken}` : `https://www.feishu.cn/docx/${documentId}`
-    return { ok: true, source: 'http', detail: `已写入飞书知识库：${url}`, data: { url, documentId } }
+    return { ok: true, source: 'http', detail: `已${action}飞书文档：${url}`, data: { url, documentId, action } }
   } catch (e) {
     return { ok: false, source: 'http', code: 'connect_failed', detail: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/** @deprecated 用 writeFeishuDoc */
+export async function writeFeishuWiki(
+  cfg: ConnectorConfig | undefined,
+  title: string,
+  markdown: string,
+  parentRaw: string,
+): Promise<QueryResult> {
+  return writeFeishuDoc(cfg, title, markdown, parentRaw)
 }
