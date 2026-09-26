@@ -881,10 +881,14 @@ html,
   padding: 3px 8px 12px;
 }
 .note-tree-group + .note-tree-group { margin-top: 3px; }
+.note-tree-base-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.note-tree-base-row .note-tree-base { flex: 1; min-width: 0; width: auto; }
+.note-tree-base-row .note-tree-base-delete { flex-shrink: 0; min-height: 28px; padding: 2px 8px; font-size: 11px; }
+.mount-list-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .note-tree-base, .note-tree-document, .note-tree-new { width: 100%; display: flex; align-items: center; border: 0; background: transparent; color: var(--text-secondary); text-align: left; }
 .note-tree-base { position: relative; min-height: 36px; gap: 7px; border-radius: 9px; padding: 5px 7px; font-weight: 620; transition: background var(--motion-fast) ease, color var(--motion-fast) ease; }
 .note-tree-base:hover, .note-tree-document:hover, .note-tree-new:hover { background: var(--surface-hover); color: var(--text); }
-.note-tree-group[data-drop-target="true"] > .note-tree-base .tree-count { visibility: hidden; }
+.note-tree-group[data-drop-target="true"] .note-tree-base .tree-count { visibility: hidden; }
 .tree-disclosure { width: 7px; height: 7px; flex: none; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .16s ease; }
 .note-tree-group[data-expanded="true"] .tree-disclosure { transform: rotate(45deg) translate(-1px, -1px); }
 .tree-folder-icon {
@@ -975,10 +979,9 @@ html,
 .notes-tree-item:hover { background: var(--surface-hover); }
 .notes-tree-item[data-selected="true"] { background: var(--material-control); box-shadow: inset 2px 0 0 color-mix(in srgb, var(--text-secondary) 70%, transparent), var(--shadow-control); }
 .notes-tree-item[data-drop-target="true"],
-.note-tree-group[data-drop-target="true"] > .note-tree-base { background: color-mix(in srgb, var(--accent) 13%, var(--surface)); outline: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); outline-offset: -1px; }
+.note-tree-group[data-drop-target="true"] .note-tree-base-row > .note-tree-base { background: color-mix(in srgb, var(--accent) 13%, var(--surface)); outline: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); outline-offset: -1px; }
 .notes-tree-item[data-drop-target="true"]::after,
-.note-tree-group[data-drop-target="true"] > .note-tree-base::after { content: "放入此目录"; position: absolute; right: 6px; z-index: 2; border-radius: 4px; padding: 2px 5px; background: color-mix(in srgb, var(--surface-raised) 92%, transparent); color: var(--accent); font-size: 8px; font-weight: 620; pointer-events: none; }
-.note-tree-group[data-drop-target="true"] > .note-tree-base::after { content: "移入此知识库"; }
+.note-tree-group[data-drop-target="true"] .note-tree-base-row > .note-tree-base::after { content: "移入此知识库"; position: absolute; right: 6px; z-index: 2; border-radius: 4px; padding: 2px 5px; background: color-mix(in srgb, var(--surface-raised) 92%, transparent); color: var(--accent); font-size: 8px; font-weight: 620; pointer-events: none; }
 .notes-tree-item[data-drop-target="true"] .notes-row-actions { opacity: 0; pointer-events: none; }
 .notes-tree-item[data-dragging="true"], .note-tree-document[data-dragging="true"] { opacity: .45; }
 .notes-tree-row { width: 100%; min-width: 0; min-height: 34px; display: flex; align-items: center; flex: 1 1 0; gap: 7px; overflow: hidden; border: 0; padding: 3px 4px; background: transparent; color: var(--text-secondary); font: inherit; text-align: left; }

@@ -1,0 +1,14 @@
+{
+  "id": "mcp-lexiang",
+  "title": "乐享知识库",
+  "summary": "搜索、新建腾讯乐享知识库文档。支持把 Markdown 写入指定知识库（或其下父节点）。凭证填本卡片，不读系统配置。",
+  "vendor": "腾讯乐享",
+  "marketplace": "开放平台",
+  "mcpServer": "lexiang-kb",
+  "mcpUrl": "https://lexiang.tencent.com/wiki/api/",
+  "kind": "mcp",
+  "role": "sink",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=LexiangKB&backgroundColor=d1fae5",
+  "tools": ["zr_esc_lexiang_search", "zr_esc_lexiang_doc"],
+  "defaultEnabled": false
+}

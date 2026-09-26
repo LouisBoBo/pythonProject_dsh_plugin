@@ -2,42 +2,35 @@ import { readFileSync } from 'node:fs';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { DOCX_PREVIEW_STYLE } from './docx-preview-page.js';
 const DOCX_PREVIEW_STYLE_HASH = createHash('sha256').update(DOCX_PREVIEW_STYLE).digest('base64');
-const STATIC_ASSETS = new Map([
+/** 相对 lib/web.js 的静态资源；每次请求从磁盘读取，避免改 web/ 后必须重启宿主。 */
+const STATIC_ASSET_SPECS = new Map([
     ...['model-catalog', 'dialogs', 'select-control', 'document-actions', 'document-sync', 'document-sync-ui', 'writeback-workspace', 'writeback-live', 'base-groups', 'knowledge-import'].map(name => [
-        `${name}.js`, loadAsset(`../web/${name}.js`, 'text/javascript; charset=utf-8'),
+        `${name}.js`, { path: `../web/${name}.js`, contentType: 'text/javascript; charset=utf-8' },
     ]),
-    ['app.js', loadAsset('../web/app.js', 'text/javascript; charset=utf-8')],
-    ['api-client.js', loadAsset('../web/api-client.js', 'text/javascript; charset=utf-8')],
-    ['change-review.js', loadAsset('../web/change-review.js', 'text/javascript; charset=utf-8')],
-    ['host-theme.js', loadAsset('../web/host-theme.js', 'text/javascript; charset=utf-8')],
-    ['markdown-preview.js', loadAsset('../web/markdown-preview.js', 'text/javascript; charset=utf-8')],
-    ['note-editor.js', loadAsset('../web/note-editor.js', 'text/javascript; charset=utf-8')],
-    ['note-history.js', loadAsset('../web/note-history.js', 'text/javascript; charset=utf-8')],
-    ['note-excerpt.js', loadAsset('../web/note-excerpt.js', 'text/javascript; charset=utf-8')],
-    ['ui-primitives.js', loadAsset('../web/ui-primitives.js', 'text/javascript; charset=utf-8')],
-    ['design-tokens.css', loadAsset('../web/design-tokens.css', 'text/css; charset=utf-8')],
-    ['styles.css', loadAsset('../web/styles.css', 'text/css; charset=utf-8')],
+    ['app.js', { path: '../web/app.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['api-client.js', { path: '../web/api-client.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['change-review.js', { path: '../web/change-review.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['host-theme.js', { path: '../web/host-theme.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['markdown-preview.js', { path: '../web/markdown-preview.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['note-editor.js', { path: '../web/note-editor.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['note-history.js', { path: '../web/note-history.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['note-excerpt.js', { path: '../web/note-excerpt.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['ui-primitives.js', { path: '../web/ui-primitives.js', contentType: 'text/javascript; charset=utf-8' }],
+    ['design-tokens.css', { path: '../web/design-tokens.css', contentType: 'text/css; charset=utf-8' }],
+    ['styles.css', { path: '../web/styles.css', contentType: 'text/css; charset=utf-8' }],
 ]);
-const ASSET_VERSION = assetVersion(STATIC_ASSETS.values());
 const INDEX_TEMPLATE = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
 export function registerKnowledgeWeb(ctx, webPath, apiPrefix, authMode = 'bearer', embedToken) {
     const webServer = ctx.webServer ?? ctx.get('webServer');
     if (webServer === undefined)
         throw new Error('exposeWeb requires the DSH webServer service');
-    const indexTemplate = INDEX_TEMPLATE
-        .replaceAll('__DSH_KNOWLEDGE_API_PREFIX__', escapeHtmlAttribute(apiPrefix))
-        .replaceAll('__DSH_KNOWLEDGE_AUTH_MODE__', escapeHtmlAttribute(authMode))
-        .replaceAll('__DSH_KNOWLEDGE_WEB_PATH__', escapeHtmlAttribute(webPath))
-        .replaceAll('__DSH_KNOWLEDGE_ASSET_VERSION__', ASSET_VERSION);
-    const standaloneIndex = Buffer.from(indexTemplate.replaceAll('__DSH_KNOWLEDGE_EMBED_MODE__', 'standalone'));
-    const embeddedIndex = Buffer.from(indexTemplate.replaceAll('__DSH_KNOWLEDGE_EMBED_MODE__', 'embedded'));
     return webServer.register({
         kind: 'prefix',
         path: webPath,
-        handler: (req, res) => serveWeb(req, res, webPath, standaloneIndex, embeddedIndex, embedToken),
+        handler: (req, res) => serveWeb(req, res, webPath, apiPrefix, authMode, embedToken),
     });
 }
-function serveWeb(req, res, webPath, standaloneIndex, embeddedIndex, embedToken) {
+function serveWeb(req, res, webPath, apiPrefix, authMode, embedToken) {
     const method = req.method ?? 'GET';
     if (method !== 'GET' && method !== 'HEAD') {
         res.writeHead(405, { allow: 'GET, HEAD', ...securityHeaders() });
@@ -48,10 +41,11 @@ function serveWeb(req, res, webPath, standaloneIndex, embeddedIndex, embedToken)
     const relative = pathname.slice(webPath.length).replace(/^\/+|\/+$/g, '');
     if (relative.length === 0) {
         const embedded = embedToken !== undefined && hasValidEmbedToken(req.url, embedToken);
-        sendAsset(res, method, { body: embedded ? embeddedIndex : standaloneIndex, contentType: 'text/html; charset=utf-8' }, embedded);
+        const index = buildIndexHtml(webPath, apiPrefix, authMode, embedded ? 'embedded' : 'standalone');
+        sendAsset(res, method, { body: index, contentType: 'text/html; charset=utf-8' }, embedded);
         return;
     }
-    const asset = STATIC_ASSETS.get(relative);
+    const asset = readStaticAsset(relative);
     if (asset === undefined) {
         res.writeHead(404, securityHeaders());
         res.end();
@@ -89,14 +83,27 @@ function hasValidEmbedToken(rawUrl, expected) {
     const expectedBytes = Buffer.from(expected);
     return suppliedBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(suppliedBytes, expectedBytes);
 }
-function loadAsset(path, contentType) {
-    return { body: readFileSync(new URL(path, import.meta.url)), contentType };
+function readStaticAsset(relative) {
+    const spec = STATIC_ASSET_SPECS.get(relative);
+    if (spec === undefined)
+        return undefined;
+    return { body: readFileSync(new URL(spec.path, import.meta.url)), contentType: spec.contentType };
 }
-function assetVersion(assets) {
+function currentAssetVersion() {
     const hash = createHash('sha256');
-    for (const asset of assets)
-        hash.update(asset.body);
+    for (const spec of STATIC_ASSET_SPECS.values()) {
+        hash.update(readFileSync(new URL(spec.path, import.meta.url)));
+    }
     return hash.digest('hex').slice(0, 12);
+}
+function buildIndexHtml(webPath, apiPrefix, authMode, embedMode) {
+    const version = currentAssetVersion();
+    return Buffer.from(INDEX_TEMPLATE
+        .replaceAll('__DSH_KNOWLEDGE_API_PREFIX__', escapeHtmlAttribute(apiPrefix))
+        .replaceAll('__DSH_KNOWLEDGE_AUTH_MODE__', escapeHtmlAttribute(authMode))
+        .replaceAll('__DSH_KNOWLEDGE_WEB_PATH__', escapeHtmlAttribute(webPath))
+        .replaceAll('__DSH_KNOWLEDGE_ASSET_VERSION__', version)
+        .replaceAll('__DSH_KNOWLEDGE_EMBED_MODE__', embedMode));
 }
 function escapeHtmlAttribute(value) {
     return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');

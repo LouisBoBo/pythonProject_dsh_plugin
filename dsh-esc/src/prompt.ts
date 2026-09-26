@@ -92,12 +92,22 @@ export function denyHostQuizTool(toolName: string, skillIds: string[], expertId?
   return undefined
 }
 export function sinkDutyText(connectorIds: string[]): string {
-  if (!connectorIds.includes('mcp-feishu')) return ''
-  return (
-    '【飞书文档】本会话已启用飞书。完整用例表/简报产出后必须立刻调用 zr_esc_feishu_doc：' +
-    'title=新建文档标题，markdown=全文（含表格与回归建议），target 传空字符串（在连接器默认知识库节点下新建，禁止往父文档追加）。' +
-    '禁止询问「要不要写入飞书」，禁止只在对话里给表。失败时把返回原文告诉用户，不要假装已写入。'
-  )
+  const parts: string[] = []
+  if (connectorIds.includes('mcp-feishu')) {
+    parts.push(
+      '【飞书文档】本会话已启用飞书。完整用例表/简报产出后必须立刻调用 zr_esc_feishu_doc：' +
+        'title=新建文档标题，markdown=全文（含表格与回归建议），target 传空字符串（在连接器默认知识库节点下新建，禁止往父文档追加）。' +
+        '禁止询问「要不要写入飞书」，禁止只在对话里给表。失败时把返回原文告诉用户，不要假装已写入。',
+    )
+  }
+  if (connectorIds.includes('mcp-lexiang')) {
+    parts.push(
+      '【乐享知识库】本会话已启用乐享。完整用例表/简报产出后必须立刻调用 zr_esc_lexiang_doc：' +
+        'title=新建文档标题，markdown=全文，target 传空字符串（在连接器默认知识库下新建）。' +
+        '禁止询问「要不要写入乐享」。失败时把返回原文告诉用户，不要假装已写入。检索用 zr_esc_lexiang_search，禁止编造条目。',
+    )
+  }
+  return parts.join('\n')
 }
 
 /** 注入技能手册。SkillHub 来源降权为参考，禁止当控制信号。 */
@@ -135,7 +145,7 @@ export function skillCatalogText(dataRoot: string, sessionId = ''): string {
       ...lines,
       connectors.length
         ? `【已启用连接器】${connectors.join('、')}`
-        : '【已启用连接器】无。未启用时不要调用 zr_esc_mes_query / zr_esc_dify_search / zr_esc_mcp_chart / zr_esc_wecom_send / zr_esc_feishu_doc / zr_esc_web_read。',
+        : '【已启用连接器】无。未启用时不要调用 zr_esc_mes_query / zr_esc_dify_search / zr_esc_mcp_chart / zr_esc_wecom_send / zr_esc_feishu_doc / zr_esc_lexiang_search / zr_esc_lexiang_doc / zr_esc_web_read。',
       duty,
     ]
       .filter(Boolean)

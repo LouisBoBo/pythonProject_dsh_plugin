@@ -3,12 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadCatalog, publicCatalog, getSkill } from './catalog.js'
 import { denyHostQuizTool, expertContextText, matchSkill, skillCatalogText, sinkDutyText, skillSopNoticeText } from './prompt.js'
-import { applyScene, clearSessionScene, loadState, resolveExpertId, resolveSkillPool, setActiveExpert, setConnectorEnabled, summonExpert, summonScene, unsummonExpert, unsummonScene } from './store.js'
+import { applyScene, clearSessionScene, loadState, patchState, resolveExpertId, resolveSkillPool, setActiveExpert, setConnectorEnabled, summonExpert, summonScene, unsummonExpert, unsummonScene } from './store.js'
 import { createUserScene, reviewSceneCombo, suggestCombo } from './scenes.js'
 import { clipData, filterItemsByDate, parseMesJson, queryMes } from './adapters/mes.js'
 import { searchDify } from './adapters/dify.js'
 import { sendWecom, normalizeWecomKey } from './adapters/wecom.js'
-import { normalizeWikiToken, parseFeishuTarget, writeFeishuWiki } from './adapters/feishu.js'
+import { writeFeishuWiki, normalizeWikiToken, parseFeishuTarget } from './adapters/feishu.js'
+import { markdownToBlocks, parseLexiangTarget, searchLexiang, writeLexiangDoc } from './adapters/lexiang.js'
 import { assertPublicHttpUrl } from './adapters/web_read.js'
 import { mockQuery } from './adapters/mock-data.js'
 import { parseFrontMatter, sanitizeMdCaption, sanitizeMdImageUrl, writeJsonAtomic, packageRoot } from './util.js'
@@ -59,6 +60,8 @@ async function main() {
     assert(testScene && testScene.connectorIds.includes('mcp-feishu'), 'test scene includes feishu')
     assert(testScene && !testScene.connectorIds.includes('dify'), 'test scene does not force dify search')
     assert(sinkDutyText(['mcp-feishu']).includes('禁止询问'), 'feishu duty')
+    assert(!sinkDutyText(['mcp-feishu']).includes('乐享'), 'feishu duty does not mention lexiang')
+    assert(sinkDutyText(['mcp-lexiang']).includes('zr_esc_lexiang_doc'), 'lexiang duty')
     assert(sinkDutyText(['mes']) === '', 'no duty without feishu')
     assert(denyHostQuizTool('ask_user_question', ['test-case-gen'])?.includes('不要出选择题'), 'guard blocks quiz')
     assert(denyHostQuizTool('zr_auto_update', ['test-case-gen'])?.includes('zr_auto_'), 'guard blocks auto create')
@@ -75,7 +78,13 @@ async function main() {
     assert(feishuMeta && feishuMeta.title === '飞书文档', 'feishu title is docs')
     assert(feishuMeta && feishuMeta.tools.includes('zr_esc_feishu_doc'), 'feishu doc tool')
     assert(catalog.connectors.some((s) => s.id === 'mcp-web-read'), 'web read')
-    assert(catalog.connectors.length === 6, `connectors ${catalog.connectors.length}`)
+    assert(catalog.connectors.some((s) => s.id === 'mcp-lexiang'), 'lexiang')
+    const lexiangMeta = catalog.connectors.find((s) => s.id === 'mcp-lexiang')
+    assert(lexiangMeta && lexiangMeta.title === '乐享知识库', 'lexiang title')
+    assert(lexiangMeta && lexiangMeta.role === 'sink', 'lexiang role sink')
+    assert(lexiangMeta && lexiangMeta.tools.includes('zr_esc_lexiang_doc'), 'lexiang write tool')
+    assert(lexiangMeta && lexiangMeta.tools.includes('zr_esc_lexiang_search'), 'lexiang search tool')
+    assert(catalog.connectors.length === 7, `connectors ${catalog.connectors.length}`)
     assert(catalog.scenes[0].id === 'pcb-ops-analysis', 'trial scene first')
     assert(catalog.scenes.length === 4, 'four scenes')
     const clientJs = readFileSync(join(packageRoot(), 'lib', 'client.js'), 'utf8')
@@ -84,6 +93,13 @@ async function main() {
     assert(clientJs.includes('esc-card-scene'), 'scene card clickable class')
     assert(clientJs.includes('esc-card-scene{height:176px'), 'scene card fixed height')
     assert(clientJs.includes('在其下新建一篇'), 'feishu wiki creates child doc')
+    assert(clientJs.includes('乐享后台'), 'lexiang card copy')
+    assert(clientJs.includes('esc-card-conn-wide'), 'lexiang card not clipped')
+    assert(clientJs.includes('esc-field-2'), 'lexiang fields two columns')
+    assert(clientJs.includes('apiKey: draft.apiKey'), 'lexiang test sends unsaved key')
+    for (const s of catalog.scenes) {
+      assert(!s.connectorIds.includes('mcp-lexiang'), `${s.id} does not force lexiang`)
+    }
     assert(clientJs.includes('SkillHub'), 'skills tab has SkillHub')
     assert(clientJs.includes('/api/skillhub/market'), 'client fetches skillhub market')
     assert(clientJs.includes('/api/skillhub/install'), 'client installs skillhub')
@@ -317,6 +333,7 @@ async function main() {
     assert(ops.connectors.dify.enabled === true, 'previous scene connector stays')
     assert(ops.connectors['mcp-wecom']?.enabled !== true, 'ops wecom off')
     assert(ops.connectors['mcp-feishu']?.enabled !== true, 'ops feishu off')
+    assert(ops.connectors['mcp-lexiang']?.enabled !== true, 'ops lexiang off')
     const feishuOn = await setConnectorEnabled(dir, 'mcp-feishu', true)
     assert(feishuOn.connectors['mcp-feishu']?.enabled === true, 'plus enables feishu')
     const rereadConn = loadState(dir)
@@ -439,6 +456,45 @@ async function main() {
       '',
     )
     assert(feishuMock.ok && feishuMock.source === 'mock', 'feishu mock create without wiki')
+    assert(parseLexiangTarget('').spaceId === '', 'lexiang empty')
+    assert(parseLexiangTarget('e8270053d38a41e3b80eb52fca8a30bb').spaceId === 'e8270053d38a41e3b80eb52fca8a30bb', 'lexiang space id')
+    assert(
+      parseLexiangTarget('e8270053d38a41e3b80eb52fca8a30bb/0e75db22d07c4ad593982baf77aaaaaa').parentEntryId ===
+        '0e75db22d07c4ad593982baf77aaaaaa',
+      'lexiang parent id',
+    )
+    assert(
+      parseLexiangTarget('https://lexiang.tencent.com/wiki?space_id=e8270053d38a41e3b80eb52fca8a30bb').spaceId ===
+        'e8270053d38a41e3b80eb52fca8a30bb',
+      'lexiang query space',
+    )
+    let lxFeishu = false
+    try {
+      parseLexiangTarget('https://xxx.feishu.cn/wiki/Node')
+    } catch {
+      lxFeishu = true
+    }
+    assert(lxFeishu, 'lexiang reject feishu url')
+    const mdBlocks = markdownToBlocks('# 标题\n\n一段话\n```js\nconst a = 1\n```')
+    assert(mdBlocks[0] && mdBlocks[0].block_type === 'h1', 'md h1')
+    assert(mdBlocks.some((b) => b.block_type === 'p'), 'md p')
+    assert(mdBlocks.some((b) => b.block_type === 'code'), 'md code')
+    const lxOff = await writeLexiangDoc(
+      { ...st.connectors['mcp-lexiang'], enabled: true, mode: 'http', outboundArmed: false, docTarget: 'e8270053d38a41e3b80eb52fca8a30bb' },
+      '标题',
+      '正文',
+      '',
+    )
+    assert(lxOff.code === 'outbound_not_armed', 'lexiang needs panel arm')
+    const lxMock = await writeLexiangDoc(
+      { ...st.connectors['mcp-lexiang'], enabled: true, mode: 'mock', outboundArmed: true, docTarget: 'e8270053d38a41e3b80eb52fca8a30bb' },
+      '标题',
+      '正文',
+      '',
+    )
+    assert(lxMock.ok && lxMock.source === 'mock', 'lexiang mock write')
+    const lxSearchOff = await searchLexiang({ ...st.connectors['mcp-lexiang'], enabled: false }, '对策')
+    assert(lxSearchOff.code === 'connector_disabled', 'lexiang search disabled')
     let ssrf = false
     try {
       assertPublicHttpUrl('http://127.0.0.1/secret')
@@ -476,6 +532,29 @@ async function main() {
     }
     const wecomDisk = disk.connectors['mcp-wecom']
     assert(!wecomDisk?.token && !wecomDisk?.password && !wecomDisk?.apiKey, 'wecom secrets not persisted')
+    const lxOn = await setConnectorEnabled(dir, 'mcp-lexiang', true)
+    assert(lxOn.connectors['mcp-lexiang']?.enabled === true, 'plus enables lexiang')
+    assert(lxOn.connectors['mcp-lexiang']?.outboundArmed === true, 'panel enable arms lexiang')
+    assert(lxOn.connectors['mcp-feishu']?.enabled === true, 'lexiang enable does not wipe feishu')
+    const withLxSecret = await patchState(dir, {
+      connectors: {
+        ...loadState(dir).connectors,
+        'mcp-lexiang': {
+          ...loadState(dir).connectors['mcp-lexiang'],
+          apiKey: 'ak-test',
+          password: 'sk-test',
+          token: 'staff-1',
+          docTarget: 'e8270053d38a41e3b80eb52fca8a30bb',
+        },
+      },
+    })
+    const lxDisk = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as {
+      connectors: Record<string, { token?: string; password?: string; apiKey?: string; docTarget?: string }>
+    }
+    assert(lxDisk.connectors['mcp-lexiang']?.apiKey === 'ak-test', 'lexiang appkey persisted')
+    assert(lxDisk.connectors['mcp-lexiang']?.docTarget === 'e8270053d38a41e3b80eb52fca8a30bb', 'lexiang space persisted')
+    assert(withLxSecret.connectors['mcp-lexiang']?.apiKey === 'ak-test', 'lexiang secret kept in memory')
+    assert(!lxDisk.connectors['mcp-wecom']?.token && !lxDisk.connectors['mcp-wecom']?.apiKey, 'wecom still no secrets')
   } finally {
     if (prevWb === undefined) delete process.env.WORKBUDDY_CONFIG_YAML
     else process.env.WORKBUDDY_CONFIG_YAML = prevWb

@@ -7,8 +7,8 @@ import { asBool, asString, writeJsonAtomic, withLock } from './util.js'
 import { publicMesSource, readWorkbuddyMes } from './workbuddy_mes.js'
 import { publicImSource } from './workbuddy_im.js'
 
-const HTTP_ON_ENABLE = new Set(['mcp-chart', 'mcp-wecom', 'mcp-feishu', 'mcp-web-read'])
-export const OUTBOUND_CONNECTOR_IDS = new Set(['mcp-wecom', 'mcp-feishu'])
+const HTTP_ON_ENABLE = new Set(['mcp-chart', 'mcp-wecom', 'mcp-feishu', 'mcp-web-read', 'mcp-lexiang'])
+export const OUTBOUND_CONNECTOR_IDS = new Set(['mcp-wecom', 'mcp-feishu', 'mcp-lexiang'])
 const WORKBUDDY_SECRET_CONNECTORS = new Set(['mes', 'mcp-wecom', 'mcp-feishu'])
 
 function emptyConnector(): ConnectorConfig {
@@ -30,6 +30,9 @@ function emptyConnector(): ConnectorConfig {
 /** MES/企微/飞书密钥只存在系统配置，禁止写入插件账本。 */
 function redactConnectorSecrets(id: string, row: ConnectorConfig): ConnectorConfig {
   if (id === 'dify') return { ...row, outboundArmed: false }
+  if (id === 'mcp-lexiang') {
+    return { ...row, username: '', baseUrl: '', outboundArmed: Boolean(row.outboundArmed) }
+  }
   const next: ConnectorConfig = {
     ...row,
     apiKey: '',

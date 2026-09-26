@@ -30,6 +30,7 @@ import { probeDify } from './adapters/dify.js'
 import { probeChart } from './adapters/mcp_chart.js'
 import { probeWecom } from './adapters/wecom.js'
 import { parseFeishuTarget, probeFeishu } from './adapters/feishu.js'
+import { parseLexiangTarget, probeLexiang } from './adapters/lexiang.js'
 import { assertPublicHttpUrl, probeWebRead } from './adapters/web_read.js'
 import type { ConnectorConfig, QueryResult, SceneReview } from './types.js'
 import { fetchHubDetail, fetchHubMarket, installHubSkill, loadInstalledHubSkills, uninstallHubSkill } from './skillhub.js'
@@ -445,7 +446,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const enabled = 'enabled' in body ? Boolean(body.enabled) : row.enabled
         let mode = body.mode === 'http' ? 'http' : body.mode === 'mock' ? 'mock' : row.mode
         if (enabled && body.mode !== 'mock') {
-          if (id === 'mes' || id === 'mcp-chart' || id === 'mcp-wecom' || id === 'mcp-feishu' || id === 'mcp-web-read') {
+          if (
+            id === 'mes' ||
+            id === 'mcp-chart' ||
+            id === 'mcp-wecom' ||
+            id === 'mcp-feishu' ||
+            id === 'mcp-web-read' ||
+            id === 'mcp-lexiang'
+          ) {
             mode = 'http'
           }
         }
@@ -480,6 +488,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
               nextRow.baseUrl = url.href.replace(/\/+$/, '')
             }
           }
+        } else if (id === 'mcp-lexiang') {
+          nextRow.baseUrl = ''
+          nextRow.username = ''
+          nextRow.enterpriseCode = row.enterpriseCode
+          nextRow.apiKey = keepOrReplace(body.apiKey, row.apiKey)
+          nextRow.password = keepOrReplace(body.password, row.password)
+          nextRow.token = keepOrReplace(body.token, row.token)
         } else {
           nextRow.baseUrl = ''
           nextRow.username = ''
@@ -494,6 +509,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         if (id === 'mcp-feishu' && 'docTarget' in body) {
           const raw = String(body.docTarget || '').trim()
           if (raw) parseFeishuTarget(raw)
+          nextRow.docTarget = raw
+        }
+        if (id === 'mcp-lexiang' && 'docTarget' in body) {
+          const raw = String(body.docTarget || '').trim()
+          if (raw) parseLexiangTarget(raw)
           nextRow.docTarget = raw
         }
         if (OUTBOUND_CONNECTOR_IDS.has(id) && 'enabled' in body) {
@@ -515,6 +535,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         'mcp-chart': probeChart,
         'mcp-wecom': probeWecom,
         'mcp-feishu': probeFeishu,
+        'mcp-lexiang': probeLexiang,
         'mcp-web-read': probeWebRead,
       }
       const probe = probes[id]
@@ -523,10 +544,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         return
       }
       let probeRow = row
-      if (id === 'mcp-feishu') {
+      if (id === 'mcp-feishu' || id === 'mcp-lexiang') {
         const body = await readJson(req)
+        probeRow = { ...row }
         if ('docTarget' in body) {
-          probeRow = { ...row, docTarget: String(body.docTarget || '').trim() }
+          probeRow.docTarget = String(body.docTarget || '').trim()
+        }
+        if (id === 'mcp-lexiang') {
+          probeRow.apiKey = keepOrReplace(body.apiKey, row.apiKey)
+          probeRow.password = keepOrReplace(body.password, row.password)
+          probeRow.token = keepOrReplace(body.token, row.token)
         }
       }
       const result = await probe(probeRow)

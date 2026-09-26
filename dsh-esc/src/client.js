@@ -87,7 +87,11 @@ window.__ModuleLoader__.load({
       '.esc-card-scene .esc-tags{margin-top:auto;flex-wrap:nowrap}' +
       '.esc-card-scene .esc-actions{margin-top:0;flex-shrink:0}' +
       '.esc-card-conn{height:200px;box-sizing:border-box;gap:6px}' +
+      '.esc-card-conn.esc-card-conn-wide{height:auto;min-height:200px}' +
       '.esc-card-extra{flex:1;min-height:0;overflow:hidden}' +
+      '.esc-card-conn-wide .esc-card-extra{overflow:visible}' +
+      '.esc-field-2{display:grid;grid-template-columns:1fr 1fr;gap:4px}' +
+      '.esc-field-2 input{min-width:0}' +
       '.esc-card-conn .esc-hint{margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.esc-card-conn .esc-actions{margin-top:auto}' +
       '.esc-card-conn .esc-field{gap:4px}' +
@@ -557,9 +561,17 @@ window.__ModuleLoader__.load({
         run(function () {
           var draft = drafts[id] || {}
           var opts = { method: 'POST' }
-          if (id === 'mcp-feishu') {
+          if (id === 'mcp-feishu' || id === 'mcp-lexiang') {
             opts.headers = { 'Content-Type': 'application/json' }
-            opts.body = JSON.stringify({ docTarget: draft.docTarget || '' })
+            opts.body =
+              id === 'mcp-lexiang'
+                ? JSON.stringify({
+                    docTarget: draft.docTarget || '',
+                    apiKey: draft.apiKey || '',
+                    password: draft.password || '',
+                    token: draft.token || '',
+                  })
+                : JSON.stringify({ docTarget: draft.docTarget || '' })
           }
           return fetchJson(serviceBase() + '/api/connectors/' + id + '/test', opts).then(function (r) {
             var detail = (r.d.result && r.d.result.detail) || r.d.detail || ''
@@ -952,7 +964,7 @@ window.__ModuleLoader__.load({
         }
       } else {
         body = h('div', null, [
-          h('p', { className: 'esc-hint' }, '连接器默认关闭。MES / 企微 / 飞书读系统配置；图表与网页阅读免费不必填密钥。定时推送仍走自动化。'),
+          h('p', { className: 'esc-hint' }, '连接器默认关闭。MES / 企微 / 飞书读系统配置；乐享凭证填本卡片；图表与网页阅读免费不必填密钥。定时推送仍走自动化。'),
           h(
             'div',
             { className: 'esc-grid' },
@@ -964,7 +976,7 @@ window.__ModuleLoader__.load({
                 var live = connectors[c.id] || {}
                 var draft = drafts[c.id] || {}
                 var on = !!live.enabled
-                return h('div', { key: c.id, className: 'esc-card esc-card-conn' }, [
+                return h('div', { key: c.id, className: 'esc-card esc-card-conn' + (c.id === 'mcp-lexiang' ? ' esc-card-conn-wide' : '') }, [
                   h('div', { className: 'esc-card-hd' }, [
                     Avatar(c.avatar, (c.title || '?').slice(0, 1), true),
                     h('div', { style: { flex: 1, minWidth: 0 } }, [
@@ -1025,6 +1037,45 @@ window.__ModuleLoader__.load({
                                 : '未读到飞书 App。请到 WorkBuddy 系统配置 → 自动化推送填写 App ID/Secret。',
                             ),
                           ])
+                        : c.id === 'mcp-lexiang'
+                          ? h('div', { className: 'esc-field' }, [
+                              h('div', { className: 'esc-field-2' }, [
+                                h('input', {
+                                  value: draft.apiKey || '',
+                                  placeholder: live.apiKeyConfigured ? 'AppKey 已保存' : 'AppKey',
+                                  onChange: function (ev) {
+                                    setDrafts(Object.assign({}, drafts, { [c.id]: Object.assign({}, draft, { apiKey: ev.target.value }) }))
+                                  },
+                                }),
+                                h('input', {
+                                  type: 'password',
+                                  value: draft.password || '',
+                                  placeholder: live.passwordConfigured ? 'AppSecret 已保存' : 'AppSecret',
+                                  onChange: function (ev) {
+                                    setDrafts(Object.assign({}, drafts, { [c.id]: Object.assign({}, draft, { password: ev.target.value }) }))
+                                  },
+                                }),
+                                h('input', {
+                                  value: draft.token || '',
+                                  placeholder: live.tokenConfigured ? '成员帐号已保存' : '成员帐号',
+                                  onChange: function (ev) {
+                                    setDrafts(Object.assign({}, drafts, { [c.id]: Object.assign({}, draft, { token: ev.target.value }) }))
+                                  },
+                                }),
+                                h('input', {
+                                  value: draft.docTarget || '',
+                                  placeholder: '知识库空间 ID / 链接',
+                                  onChange: function (ev) {
+                                    setDrafts(Object.assign({}, drafts, { [c.id]: Object.assign({}, draft, { docTarget: ev.target.value }) }))
+                                  },
+                                }),
+                              ]),
+                              h(
+                                'p',
+                                { className: 'esc-hint' },
+                                '凭证在乐享后台【开发 → 接口凭证管理】，不读系统配置。',
+                              ),
+                            ])
                         : h(
                             'p',
                             { className: 'esc-hint' },
@@ -1044,7 +1095,7 @@ window.__ModuleLoader__.load({
                           ),
                   ),
                   h('div', { className: 'esc-actions' }, [
-                    c.id === 'dify' || c.id === 'mcp-feishu'
+                    c.id === 'dify' || c.id === 'mcp-feishu' || c.id === 'mcp-lexiang'
                       ? h('button', { type: 'button', className: 'esc-btn primary', disabled: busy, onClick: function () { saveConnector(c.id) } }, '保存')
                       : null,
                     h('button', { type: 'button', className: 'esc-btn', disabled: busy, onClick: function () { testConnector(c.id) } }, '测通'),

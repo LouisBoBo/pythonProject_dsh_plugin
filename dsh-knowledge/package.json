@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-knowledge",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "中软知识库：导入 Markdown / 纯文本 / PDF / Word 为可检索知识文档",
   "dshMarket": {
     "zh": "知识库：挂载召回、文档管理，支持导入 md/txt/pdf/docx",

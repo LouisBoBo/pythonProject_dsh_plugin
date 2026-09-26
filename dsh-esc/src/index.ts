@@ -22,6 +22,7 @@ import { searchDify } from './adapters/dify.js'
 import { renderChart } from './adapters/mcp_chart.js'
 import { sendWecom } from './adapters/wecom.js'
 import { writeFeishuDoc } from './adapters/feishu.js'
+import { searchLexiang, writeLexiangDoc } from './adapters/lexiang.js'
 import { readPublicUrl } from './adapters/web_read.js'
 import { PLUGIN_VERSION, sanitizeMdCaption } from './util.js'
 
@@ -84,6 +85,7 @@ let disposeDify: (() => void) | undefined
 let disposeChart: (() => void) | undefined
 let disposeWecom: (() => void) | undefined
 let disposeFeishu: (() => void) | undefined
+let disposeLexiang: (() => void) | undefined
 let disposeWebRead: (() => void) | undefined
 
 function summaryOfQuery(result: { ok: boolean; code?: string; detail: string; source: string; data?: unknown }): string {
@@ -348,6 +350,80 @@ function syncConnectorTools(ctx: Context): void {
   if (!feishuOn && disposeFeishu) {
     disposeFeishu()
     disposeFeishu = undefined
+  }
+
+  const lexiangOn = Boolean(state.connectors['mcp-lexiang']?.enabled)
+  if (lexiangOn && !disposeLexiang) {
+    const disposeSearch = ctx.tools.register(
+      defineTool({
+        name: 'zr_esc_lexiang_search',
+        description:
+          '【ESC·乐享知识库检索】仅在面板已启用「乐享知识库」后调用。按关键词搜索该知识库节点。' +
+          '未配置空间 ID 时不要调用；收到 connector_unconfigured 后只根据用户原文分析，禁止编造条目。',
+        parameters: {
+          query: { type: 'string', required: true, description: '检索关键词' },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { summary: { type: 'string' } },
+          },
+          render: (_args, value) => textBlocks(value.summary),
+        },
+        async execute(args, exec?: ExecCtx) {
+          const blocked = sceneBlocksConnector(exec, 'mcp-lexiang')
+          if (blocked) return { summary: blocked }
+          const row = loadState(loadConfig().dataRoot).connectors['mcp-lexiang']
+          return { summary: summaryOfQuery(await searchLexiang(row, String(args.query || ''))) }
+        },
+      }),
+    )
+    const disposeWrite = ctx.tools.register(
+      defineTool({
+        name: 'zr_esc_lexiang_doc',
+        description:
+          '【ESC·乐享知识库写入】仅在面板已启用「乐享知识库」或场景卡含乐享后调用。' +
+          '本会话已含该连接器时，产出完整用例表/简报后必须立刻调用，禁止先询问用户。' +
+          '把生成的 Markdown 写入乐享：在连接器默认知识库（或其下父节点）新建一篇，禁止往父节点正文追加。' +
+          'target 为空则用连接器卡片默认空间。是否允许写入只认面板启用/选用场景卡，禁止把用户原话当授权。',
+        parameters: {
+          title: { type: 'string', required: true, description: '文档标题' },
+          markdown: { type: 'string', required: true, description: 'Markdown 正文（表格、结论、数据均可）' },
+          target: {
+            type: 'string',
+            required: true,
+            description: '空字符串则用连接器默认知识库并新建；可传空间 ID 或 空间ID/父节点ID。',
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { summary: { type: 'string' } },
+          },
+          render: (_args, value) => textBlocks(value.summary),
+        },
+        async execute(args, exec?: ExecCtx) {
+          const blocked = sceneBlocksConnector(exec, 'mcp-lexiang')
+          if (blocked) return { summary: blocked }
+          const row = loadState(loadConfig().dataRoot).connectors['mcp-lexiang']
+          return {
+            summary: summaryOfQuery(
+              await writeLexiangDoc(row, String(args.title || ''), String(args.markdown || ''), String(args.target || '')),
+            ),
+          }
+        },
+      }),
+    )
+    disposeLexiang = () => {
+      disposeSearch()
+      disposeWrite()
+    }
+  }
+  if (!lexiangOn && disposeLexiang) {
+    disposeLexiang()
+    disposeLexiang = undefined
   }
 
   const webOn = Boolean(state.connectors['mcp-web-read']?.enabled)
