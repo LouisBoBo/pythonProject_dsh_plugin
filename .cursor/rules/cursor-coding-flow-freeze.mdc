@@ -1,6 +1,6 @@
 ---
 description: Cursor 写码插件主流程已冻结，禁止随意改步骤形态
-globs: dsh-cursor-coding/**/*
+globs: plugins/dsh-cursor-coding/**/*
 alwaysApply: false
 ---
 

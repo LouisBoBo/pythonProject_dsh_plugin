@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # 构建插件并复制 tgz 到 company-registry/artifacts/
 # 用法:
-#   ./pack.sh              # 打包仓库内全部 DSH Bundle（dsh-* 且含 dsh.bundle）
+#   ./pack.sh              # 打包 plugins/ 下全部 DSH Bundle（dsh-* 且含 dsh.bundle）
 #   ./pack.sh dsh-weather  # 只打包指定目录名
 #
-# 新插件要进「发现」：仓库根下 dsh-* / package.json 含 dsh.bundle + dshMarket，
+# 新插件要进「发现」：plugins/dsh-* / package.json 含 dsh.bundle + dshMarket，
 # 然后 pack.sh → upload.sh。不要只靠 `dsh plugin add ./`。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PLUGINS_DIR="$ROOT/plugins"
 REG_DIR="$ROOT/company-registry"
 DIST="$ROOT/dist"
 
 discover_plugin_dirs() {
-  python3 - "$ROOT" <<'PY'
+  python3 - "$PLUGINS_DIR" <<'PY'
 import json, sys
 from pathlib import Path
 
-root = Path(sys.argv[1])
-for p in sorted(root.glob("dsh-*")):
+plugins = Path(sys.argv[1])
+if not plugins.is_dir():
+    raise SystemExit(0)
+for p in sorted(plugins.glob("dsh-*")):
     pkg = p / "package.json"
     if not pkg.is_file():
         continue
@@ -52,11 +55,11 @@ pack_one() {
 if [[ "${1:-}" != "" ]]; then
   case "$1" in
     *..*|*/*|*\\*)
-      echo "错误: 插件目录名非法（只允许仓库根下短名，如 dsh-weather）" >&2
+      echo "错误: 插件目录名非法（只允许 plugins/ 下短名，如 dsh-weather）" >&2
       exit 1
       ;;
   esac
-  TARGET="$ROOT/$1"
+  TARGET="$PLUGINS_DIR/$1"
   [[ -d "$TARGET" ]] || { echo "错误: 找不到插件目录 $TARGET" >&2; exit 1; }
   python3 - "$TARGET" <<'PY' || { echo "错误: $1 不是含 dsh.bundle 的 DSH 插件" >&2; exit 1; }
 import json, sys
@@ -70,10 +73,10 @@ else
   found=0
   while IFS= read -r name; do
     found=1
-    pack_one "$ROOT/$name"
+    pack_one "$PLUGINS_DIR/$name"
   done < <(discover_plugin_dirs)
   if [[ "$found" -eq 0 ]]; then
-    echo "错误: 未发现任何含 dsh.bundle 的 dsh-* 插件" >&2
+    echo "错误: 未发现任何含 dsh.bundle 的 plugins/dsh-* 插件" >&2
     exit 1
   fi
 fi

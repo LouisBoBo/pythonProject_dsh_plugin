@@ -6,7 +6,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PLUGIN="$ROOT/dsh-remote-review"
+PLUGIN="$ROOT/plugins/dsh-remote-review"
 KEY="${SSH_KEY:-$HOME/.ssh/tc_staging_deploy}"
 HOST="${SSH_HOST:-root@175.178.238.31}"
 REMOTE_APP="${REMOTE_APP:-/www/wwwroot/dsh-remote-review}"

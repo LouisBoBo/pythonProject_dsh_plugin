@@ -5,7 +5,7 @@ alwaysApply: true
 
 # 配置只从 WorkBuddy 取
 
-对话模型、智谱/视觉、MES、企微、飞书等 **一律只读** WorkBuddy 引擎 `config.yaml`（界面：系统配置）。`dsh-automations` 对照 `dsh-automations/src/workbuddy_config.ts`。
+对话模型、智谱/视觉、MES、企微、飞书等 **一律只读** WorkBuddy 引擎 `config.yaml`（界面：系统配置）。`dsh-automations` 对照 `plugins/dsh-automations/src/workbuddy_config.ts`。
 
 ## 禁止
 

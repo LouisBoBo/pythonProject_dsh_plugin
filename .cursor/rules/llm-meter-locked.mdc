@@ -13,7 +13,7 @@ alwaysApply: true
 
 ## 禁止改（无允许一律拒绝）
 
-- `dsh-llm-meter/src/usage.ts` 的分项与合计算法  
+- `plugins/dsh-llm-meter/src/usage.ts` 的分项与合计算法  
 - 插件 schema `v:1` 字段名、`source` 枚举、jsonl 路径  
 - waterfall：禁止改写请求、禁止因记账失败打断 `llm/stream`  
 - 引擎 `_event_parts` / `ingest_llm_meter._tokens_from_row` / session 补采 cutoff  

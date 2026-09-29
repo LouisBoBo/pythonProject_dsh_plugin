@@ -4,11 +4,12 @@
 # dshmarket 安全策略：install 只认 GitHub URL + npm 包名 / GitHub Release tarball，
 # 不接受任意 http://...tgz。因此公司内方案 = 私有 npm 作用域 + 占位 GitHub url。
 #
-# 扫描仓库根 dsh-*（package.json 含 dsh.bundle）。市场文案优先读各包 dshMarket。
+# 扫描 plugins/dsh-*（package.json 含 dsh.bundle）。市场文案优先读各包 dshMarket。
 # 只打其中一个插件时：其它已有 artifacts/*.tgz 仍会写入目录，避免把线上包冲掉。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PLUGINS_DIR="$ROOT/plugins"
 REG_DIR="$ROOT/company-registry"
 CONFIG="${REGISTRY_CONFIG:-$REG_DIR/config.env}"
 
@@ -23,7 +24,7 @@ source "$CONFIG"
 : "${OWNER:?config.env 缺少 OWNER}"
 : "${REGISTRY_NAME:?config.env 缺少 REGISTRY_NAME}"
 
-export ROOT REG_DIR BASE_URL OWNER REGISTRY_NAME
+export ROOT PLUGINS_DIR REG_DIR BASE_URL OWNER REGISTRY_NAME
 export TODAY
 TODAY="$(date +%Y-%m-%d)"
 
@@ -100,7 +101,10 @@ def read_pkg_from_tgz(tgz: Path) -> dict:
 
 def discover_plugin_dirs():
     out = []
-    for p in sorted(ROOT.glob("dsh-*")):
+    plugins = Path(os.environ.get("PLUGINS_DIR") or (ROOT / "plugins"))
+    if not plugins.is_dir():
+        return out
+    for p in sorted(plugins.glob("dsh-*")):
         pkg_path = p / "package.json"
         if not pkg_path.is_file():
             continue

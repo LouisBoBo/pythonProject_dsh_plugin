@@ -1,12 +1,12 @@
 ---
 description: ESC 专家简报必须有表有图有真实数据（领导扫读风），禁止大段散文
-globs: dsh-esc/assets/experts/**/*.md,dsh-esc/assets/skills/**/*.md,dsh-esc/assets/scenes/**/*.json,dsh-esc/src/prompt.ts,dsh-esc/src/adapters/mcp_chart.ts
+globs: plugins/dsh-esc/assets/experts/**/*.md,plugins/dsh-esc/assets/skills/**/*.md,plugins/dsh-esc/assets/scenes/**/*.json,plugins/dsh-esc/src/prompt.ts,plugins/dsh-esc/src/adapters/mcp_chart.ts
 alwaysApply: false
 ---
 
 # 专家场景简报风格（已验收，领导喜欢）
 
-改 `dsh-esc` 专家 / 技能 / 场景卡 / 出图时，三层各管一件事。运营简报的「有表有图」口径写在 **技能 SOP**（`mes-ops-analysis`），不要写进专家人设。
+改 `plugins/dsh-esc` 专家 / 技能 / 场景卡 / 出图时，三层各管一件事。运营简报的「有表有图」口径写在 **技能 SOP**（`mes-ops-analysis`），不要写进专家人设。
 
 ## 分层
 
