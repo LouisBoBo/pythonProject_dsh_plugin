@@ -108,8 +108,13 @@ window.__ModuleLoader__.load({
       '.esc-summon{border:0;border-radius:16px;padding:6px 14px;background:#111827;color:#fff;cursor:pointer;font:inherit;font-size:12px;font-weight:600}' +
       '.esc-summon.on{background:#166534;color:#fff}' +
       '.esc-banner{margin:0 0 12px;padding:10px 12px;border-radius:10px;background:#ecfdf3;color:#14532d;font-size:13px;font-weight:600}' +
-      '.esc-plus{width:28px;height:28px;border:0;border-radius:8px;background:#f3f4f6;cursor:pointer;font:inherit;font-size:18px;line-height:1;color:#374151}' +
+      '.esc-plus{width:28px;height:28px;border:0;border-radius:8px;background:#f3f4f6;cursor:pointer;font:inherit;font-size:18px;line-height:1;color:#374151;display:inline-flex;align-items:center;justify-content:center;padding:0}' +
       '.esc-plus.on{background:#dcfce7;color:#166534}' +
+      '.esc-plus.loading{cursor:wait;opacity:.9}' +
+      '.esc-spin{width:14px;height:14px;border:2px solid #d1d5db;border-top-color:#111827;border-radius:50%;animation:esc-spin .7s linear infinite;box-sizing:border-box}' +
+      '.esc-spin.light{border-color:rgba(255,255,255,.35);border-top-color:#fff}' +
+      '@keyframes esc-spin{to{transform:rotate(360deg)}}' +
+      '.esc-detail-install.loading{display:inline-flex;align-items:center;justify-content:center;gap:8px;cursor:wait}' +
       '.esc-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:14px 16px;border:1px solid var(--esc-border);border-radius:var(--esc-radius);background:#fff;margin-bottom:10px}' +
       '.esc-btn{padding:7px 12px;border-radius:8px;border:1px solid var(--esc-border);background:#fff;cursor:pointer;font:inherit}' +
       '.esc-btn.primary{background:#111827;border-color:transparent;color:#fff}' +
@@ -186,6 +191,14 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M8 6h3.5M6 8v3', stroke: 'currentColor', strokeWidth: '1.2', strokeLinecap: 'round' }),
       ])
     }
+    /** 技能下载安装转圈 */
+    function EscSpin(light) {
+      return h('span', {
+        className: 'esc-spin' + (light ? ' light' : ''),
+        role: 'status',
+        'aria-label': '正在下载安装',
+      })
+    }
 
     function activatePluginWorkspace(pluginId) {
       window.dispatchEvent(new CustomEvent(WORKSPACE_EVENT, { detail: { pluginId: pluginId } }))
@@ -260,6 +273,9 @@ window.__ModuleLoader__.load({
       var hubPreviewState = useState(null)
       var hubPreview = hubPreviewState[0]
       var setHubPreview = hubPreviewState[1]
+      var hubBusySlugState = useState('')
+      var hubBusySlug = hubBusySlugState[0]
+      var setHubBusySlug = hubBusySlugState[1]
       var catalogStampState = useState(0)
       var catalogStamp = catalogStampState[0]
       var setCatalogStamp = catalogStampState[1]
@@ -405,10 +421,12 @@ window.__ModuleLoader__.load({
           .then(function () {
             setBusy(false)
             if (okText) toastMsg(true, okText)
+            return true
           })
           .catch(function (e) {
             setBusy(false)
             toastMsg(false, String(e.message || e))
+            return false
           })
       }
 
@@ -519,16 +537,34 @@ window.__ModuleLoader__.load({
       }
 
       function installHub(slug, name) {
-        run(function () {
+        setHubBusySlug(slug)
+        return run(function () {
           return fetchJson(serviceBase() + '/api/skillhub/install', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ slug: slug }),
+            body: JSON.stringify({ slug: slug, enable: true }),
             timeoutMs: 60000,
           }).then(function (r) {
             if (!r.ok) throw new Error(r.d.detail || '安装失败')
+            var skillId = r.d.skill && r.d.skill.id
+            // 安装较慢：先本地勾上，避免等市场列表刷新前仍显示 +
+            setHub(function (prev) {
+              return Object.assign({}, prev, {
+                items: (prev.items || []).map(function (it) {
+                  if (it.slug !== slug) return it
+                  return Object.assign({}, it, {
+                    installed: true,
+                    enabled: true,
+                    id: skillId || it.id,
+                  })
+                }),
+              })
+            })
           })
-        }, '已安装「' + (name || slug) + '」。请点开手册确认后再点 + 启用')
+        }, '已安装并启用「' + (name || slug) + '」').then(function (ok) {
+          setHubBusySlug('')
+          return ok
+        })
       }
 
       function uninstallHub(slug, name) {
@@ -746,7 +782,25 @@ window.__ModuleLoader__.load({
         var companySkills = (catalog.skills || []).filter(function (s) {
           return s.source !== 'skillhub'
         })
+        var mySkillsAll = (catalog.skills || []).filter(function (s) {
+          return skillInUse(s.id)
+        })
+        var mySkillRows = mySkillsAll.filter(function (s) {
+          return hit((s.name || '') + (s.description || '') + ((s.triggers || []).join(' ')))
+        })
         var sourceBar = h('div', { className: 'esc-source' }, [
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'esc-source-btn' + (skillSource === 'mine' ? ' on' : ''),
+              onClick: function () {
+                setSkillSource('mine')
+                setChip('全部')
+              },
+            },
+            '我的技能' + (mySkillsAll.length ? ' · ' + mySkillsAll.length : ''),
+          ),
           h(
             'button',
             {
@@ -773,7 +827,77 @@ window.__ModuleLoader__.load({
             'SkillHub',
           ),
         ])
-        if (skillSource === 'skillhub') {
+        function skillCard(s, opts) {
+          var on = !!(opts && opts.on != null ? opts.on : skillInUse(s.id))
+          var isHub = s.source === 'skillhub' || !!(opts && opts.hub)
+          return h(
+            'div',
+            {
+              key: s.id,
+              className: 'esc-card esc-card-skill' + (on ? ' summoned' : ''),
+              role: 'button',
+              tabIndex: 0,
+              title: isHub ? '查看 SkillHub 技能' : '查看技能详情',
+              onClick: function () {
+                if (opts && opts.onOpen) opts.onOpen()
+                else setSkillDetailId(s.id)
+              },
+              onKeyDown: function (ev) {
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                  ev.preventDefault()
+                  if (opts && opts.onOpen) opts.onOpen()
+                  else setSkillDetailId(s.id)
+                }
+              },
+            },
+            [
+              h('div', { className: 'esc-card-hd' }, [
+                Avatar(s.icon || s.avatar, ((s.name || s.title || '?') + '').slice(0, 1), true),
+                h('div', { style: { flex: 1, minWidth: 0 } }, [
+                  h('h3', null, [
+                    s.name || s.title,
+                    isHub ? h('span', { className: 'esc-hub-badge' }, 'SkillHub') : null,
+                  ]),
+                  h('p', { className: 'esc-desc' }, s.description || s.summary || ''),
+                ]),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'esc-plus' + (on ? ' on' : ''),
+                    disabled: busy,
+                    title: on ? '停用' : '启用',
+                    onClick: function (ev) {
+                      ev.stopPropagation()
+                      if (opts && opts.onToggle) opts.onToggle(on)
+                      else toggleSkill(s.id, !on)
+                    },
+                  },
+                  on ? '✓' : '+',
+                ),
+              ]),
+            ],
+          )
+        }
+        if (skillSource === 'mine') {
+          body = h('div', null, [
+            sourceBar,
+            h(
+              'p',
+              { className: 'esc-hint' },
+              '当前已启用的技能（公司预制 + SkillHub）。点 ✓ 可停用；去「公司预制 / SkillHub」可继续安装。',
+            ),
+            mySkillRows.length
+              ? h(
+                  'div',
+                  { className: 'esc-grid' },
+                  mySkillRows.map(function (s) {
+                    return skillCard(s)
+                  }),
+                )
+              : h('p', { className: 'esc-hint' }, '还没有启用中的技能。到「公司预制」或 SkillHub 点 + 启用后，会出现在这里。'),
+          ])
+        } else if (skillSource === 'skillhub') {
           var hubCats = [{ key: '', label: '全部' }].concat(hub.categories || [])
           var hubPages = Math.max(1, Math.ceil((hub.total || 0) / (hub.pageSize || 12)))
           body = h('div', null, [
@@ -781,7 +905,7 @@ window.__ModuleLoader__.load({
             h(
               'p',
               { className: 'esc-hint' },
-              '对接 SkillHub 公开目录。点 + 只安装到本机，点开手册确认后再点 + 启用。PCB/MES 公司技能仍在「公司预制」。',
+              '对接 SkillHub 公开目录。点 + 将下载并启用（安装中按钮显示 …）。PCB/MES 公司技能仍在「公司预制」。',
             ),
             h(
               'div',
@@ -813,6 +937,7 @@ window.__ModuleLoader__.load({
                     { className: 'esc-grid' },
                     (hub.items || []).map(function (s) {
                       var on = !!(s.enabled || (skills[s.id] && skills[s.id].enabled))
+                      var installing = !!hubBusySlug && hubBusySlug === s.slug
                       return h(
                         'div',
                         {
@@ -822,6 +947,7 @@ window.__ModuleLoader__.load({
                           tabIndex: 0,
                           title: '查看 SkillHub 技能',
                           onClick: function () {
+                            if (installing) return
                             if (s.installed) setSkillDetailId(s.id)
                             else setHubPreview(s)
                           },
@@ -831,22 +957,29 @@ window.__ModuleLoader__.load({
                             Avatar(s.icon, (s.name || '?').slice(0, 1), true),
                             h('div', { style: { flex: 1, minWidth: 0 } }, [
                               h('h3', null, [s.name, h('span', { className: 'esc-hub-badge' }, 'SkillHub')]),
-                              h('p', { className: 'esc-desc' }, s.description),
+                              h('p', { className: 'esc-desc' }, installing ? '正在下载安装…' : s.description),
                             ]),
                             h(
                               'button',
                               {
                                 type: 'button',
-                                className: 'esc-plus' + (on ? ' on' : ''),
-                                disabled: busy,
-                                title: s.installed ? (on ? '停用' : '启用') : '安装到本机',
+                                className: 'esc-plus' + (on ? ' on' : '') + (installing ? ' loading' : ''),
+                                disabled: busy || !!hubBusySlug,
+                                title: installing
+                                  ? '正在下载安装…'
+                                  : s.installed
+                                    ? on
+                                      ? '停用'
+                                      : '启用'
+                                    : '下载并启用',
                                 onClick: function (ev) {
                                   ev.stopPropagation()
+                                  if (installing || hubBusySlug) return
                                   if (s.installed) toggleSkill(s.id, !on)
                                   else installHub(s.slug, s.name)
                                 },
                               },
-                              on ? '✓' : '+',
+                              on ? '✓' : installing ? EscSpin(false) : '+',
                             ),
                           ]),
                         ],
@@ -915,49 +1048,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'esc-grid' },
               skillRows.map(function (s) {
-                var on = skillInUse(s.id)
-                return h(
-                  'div',
-                  {
-                    key: s.id,
-                    className: 'esc-card esc-card-skill' + (on ? ' summoned' : ''),
-                    role: 'button',
-                    tabIndex: 0,
-                    title: '查看技能详情',
-                    onClick: function () {
-                      setSkillDetailId(s.id)
-                    },
-                    onKeyDown: function (ev) {
-                      if (ev.key === 'Enter' || ev.key === ' ') {
-                        ev.preventDefault()
-                        setSkillDetailId(s.id)
-                      }
-                    },
-                  },
-                  [
-                    h('div', { className: 'esc-card-hd' }, [
-                      Avatar(s.icon, (s.name || '?').slice(0, 1), true),
-                      h('div', { style: { flex: 1, minWidth: 0 } }, [
-                        h('h3', null, s.name),
-                        h('p', { className: 'esc-desc' }, s.description),
-                      ]),
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'esc-plus' + (on ? ' on' : ''),
-                          disabled: busy,
-                          title: on ? '停用' : '启用',
-                          onClick: function (ev) {
-                            ev.stopPropagation()
-                            toggleSkill(s.id, !on)
-                          },
-                        },
-                        on ? '✓' : '+',
-                      ),
-                    ]),
-                  ],
-                )
+                return skillCard(s)
               }),
             ),
           ])
@@ -972,7 +1063,18 @@ window.__ModuleLoader__.load({
               .filter(function (c) {
                 return hit(c.title + c.summary + (c.marketplace || '') + (c.mcpServer || ''))
               })
-              .map(function (c) {
+              .map(function (c, i) {
+                return { c: c, i: i }
+              })
+              .sort(function (a, b) {
+                // 已启用的永远排在前面；同组内保持目录原序
+                var aOn = !!(connectors[a.c.id] && connectors[a.c.id].enabled)
+                var bOn = !!(connectors[b.c.id] && connectors[b.c.id].enabled)
+                if (aOn !== bOn) return aOn ? -1 : 1
+                return a.i - b.i
+              })
+              .map(function (item) {
+                var c = item.c
                 var live = connectors[c.id] || {}
                 var draft = drafts[c.id] || {}
                 var on = !!live.enabled
@@ -1311,14 +1413,21 @@ window.__ModuleLoader__.load({
                       'button',
                       {
                         type: 'button',
-                        className: 'esc-detail-install',
-                        disabled: busy,
+                        className:
+                          'esc-detail-install' +
+                          (hubBusySlug && preview && hubBusySlug === preview.slug ? ' loading' : ''),
+                        disabled: busy || !!hubBusySlug,
                         onClick: function () {
-                          installHub(preview.slug, preview.name)
-                          closeDetail()
+                          var slug = preview.slug
+                          var nm = preview.name
+                          installHub(slug, nm).then(function (ok) {
+                            if (ok) closeDetail()
+                          })
                         },
                       },
-                      '安装',
+                      hubBusySlug && preview && hubBusySlug === preview.slug
+                        ? [EscSpin(true), '正在下载安装…']
+                        : '下载并启用',
                     ),
                 detail && detail.source === 'skillhub' && detail.slug
                   ? h(

@@ -1,0 +1,5 @@
+# 安装后注入 DSH 组合树。id 在全机唯一；name 必须等于 package.json 的 name。
+- insert:
+    - id: hello
+      name: '@zhongruan/dsh-hello'
+      config: {}

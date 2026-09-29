@@ -25,15 +25,17 @@ docs/
 
 | 文档 | 说明 |
 | --- | --- |
+| [**同事开发插件指南.md**](./01-插件开发与市场/同事开发插件指南.md) | **新人主入口**：大白话全流程 + 模板；开发 → 联调 → pack → upload → 市场验收 |
 | [dsh插件开发.md](./01-插件开发与市场/dsh插件开发.md) | DSH Bundle 插件开发基础（以 pcb-helper 为例） |
 | [dsh-插件发现与调用说明.md](./01-插件开发与市场/dsh-插件发现与调用说明.md) | 市场如何发现可装插件；装完如何被对话调用 |
-| [dsh-pcb-helper-公司插件全流程实施方案.md](./01-插件开发与市场/dsh-pcb-helper-公司插件全流程实施方案.md) | **主文档**：开发 → 打包 → 私有 npm → 市场 → WorkBuddy 安装 |
+| [dsh-pcb-helper-公司插件全流程实施方案.md](./01-插件开发与市场/dsh-pcb-helper-公司插件全流程实施方案.md) | 公司市场架构与运维细节（开发 → 私有 npm → WorkBuddy） |
 | [dsh-pcb-helper-公司内网插件市场.md](./01-插件开发与市场/dsh-pcb-helper-公司内网插件市场.md) | 内网市场方案与脚本说明 |
 | [dsh-pcb-helper-WorkBuddy安装.md](./01-插件开发与市场/dsh-pcb-helper-WorkBuddy安装.md) | 开发机手动 `dsh plugin add`（早期路径） |
 | [dsh-pcb-helper-上线安装设计.md](./01-插件开发与市场/dsh-pcb-helper-上线安装设计.md) | 预装/清单型方案（与市场方案互补） |
 | [workbuddy-插件安装卡在gh-proxy.md](./01-插件开发与市场/workbuddy-插件安装卡在gh-proxy.md) | 市场安装卡在 gh-proxy 的原因与修复 |
 
-**仓库内示例插件：** `dsh-pcb-8d`、`dsh-remote-review`、`dsh-cursor-coding`、`dsh-knowledge`、`dsh-llm-meter`（`dsh-pcb-helper` / `dsh-weather` 已下架删除）  
+**起步模板：** [`templates/dsh-plugin-starter/`](../templates/dsh-plugin-starter/)（复制到 `plugins/dsh-<短名>/`，勿直接 pack）  
+**仓库内插件：** `plugins/dsh-*`（如 esc、cursor-coding、knowledge、automations、llm-meter、pcb-8d、remote-review）  
 **发布脚本：** `scripts/internal-market/`（`pack.sh` / `upload.sh` / …）
 
 ---

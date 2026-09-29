@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-esc",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "description": "DSH 专家·技能·连接器：PCB 数据分析师、MES 运营分析、AntV 图表与 Excel 出图",
   "dshMarket": {
     "zh": "专家·技能·连接器：岗位人设、公司 SOP，并对接 SkillHub 公开技能目录；MES 取数、AntV 与 Excel 出图",

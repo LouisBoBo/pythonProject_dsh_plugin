@@ -112,9 +112,12 @@ async function main() {
       assert(!s.connectorIds.includes('mcp-lexiang'), `${s.id} does not force lexiang`)
     }
     assert(clientJs.includes('SkillHub'), 'skills tab has SkillHub')
+    assert(clientJs.includes('我的技能'), 'skills tab has mine filter')
     assert(clientJs.includes('/api/skillhub/market'), 'client fetches skillhub market')
     assert(clientJs.includes('/api/skillhub/install'), 'client installs skillhub')
-    assert(clientJs.includes('请点开手册确认后再点 + 启用'), 'hub install does not auto-enable')
+    assert(clientJs.includes('enable: true') || clientJs.includes('"enable": true'), 'hub install auto-enable')
+    assert(clientJs.includes('正在下载安装'), 'hub install shows loading')
+    assert(clientJs.includes('esc-spin') && clientJs.includes('@keyframes esc-spin'), 'hub install spinner css')
     for (const s of catalog.scenes) {
       assert(s.skillIds.length <= 3, `${s.id} skills cap`)
       assert(s.connectorIds.length <= 3, `${s.id} connectors cap`)

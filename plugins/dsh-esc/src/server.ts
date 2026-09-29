@@ -229,14 +229,24 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return
   }
 
-  // 从 SkillHub 下载 zip，只落 SKILL.md；不自动启用，须用户点开手册后再 +
+  // 从 SkillHub 下载 zip，只落 SKILL.md；body.enable === true 时安装后直接启用
   if (method === 'POST' && path === '/api/skillhub/install') {
     try {
       const body = await readJson(req)
+      const enable = body.enable === true
       const skill = await installHubSkill(cfg.dataRoot, String(body.slug || ''))
-      const state = await setSkillEnabled(cfg.dataRoot, skill.id, false)
+      const state = await setSkillEnabled(cfg.dataRoot, skill.id, enable)
       notify()
-      send(res, 200, { ok: true, skill: { id: skill.id, name: skill.name, slug: skill.slug }, state: publicState(state) }, req)
+      send(
+        res,
+        200,
+        {
+          ok: true,
+          skill: { id: skill.id, name: skill.name, slug: skill.slug, enabled: enable },
+          state: publicState(state),
+        },
+        req,
+      )
     } catch (e) {
       send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
     }

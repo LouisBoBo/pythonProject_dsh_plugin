@@ -1,0 +1,30 @@
+---
+description: 插件改完必须同步到浏览器宿主（~/.dsh），禁止只改仓库就当验收完成
+alwaysApply: true
+---
+
+# 插件开发验收 = 浏览器宿主（必同步）
+
+日常验收入口是 **浏览器**（WorkBuddy 网页壳，默认 `http://127.0.0.1:3081`，`DSH_HOME=~/.dsh`）。  
+改完 `plugins/dsh-*` **不等于**浏览器已更新：浏览器读的是 Profile 里已装包。
+
+## 硬要求（每次改插件 UI / 客户端 / 运行时代码后）
+
+1. 改仓库 `plugins/dsh-<name>/`（`src` → `build` / 同步 `lib`）。
+2. **立刻同步**到浏览器宿主安装目录，至少：
+   - `~/.dsh/profiles/web/node_modules/@zhongruan/dsh-<name>/`
+   - 若改了 `client.js`：覆盖该包下的 `lib/client.js`（及同路径 `src/client.js` 若存在）
+3. 需要整包覆盖时可用：
+   `PREFER_LOCAL=1 ./scripts/internal-market/install-latest.sh dsh-<name>`
+   （脚本会优先装到已检测到的 WorkBuddy / `~/.dsh` Profile）
+4. 告知用户：**⌘⇧R** 强刷；客户端仍旧则 `scripts/host.sh restart-web`。
+5. **未同步到 `~/.dsh` 不得说「已好」「刷新即可」**。
+
+## 禁止
+
+```text
+❌ 只改 plugins/dsh-xxx 源码 → 让用户浏览器刷新
+✅ 改源码 → 同步 ~/.dsh 已装包 → 再让用户 ⌘⇧R / 必要时重启 3081
+```
+
+桌面一体包（Application Support / :13080）若本次也在用，一并同步；**默认以浏览器 :3081 / `~/.dsh` 为准**。
