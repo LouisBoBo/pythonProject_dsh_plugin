@@ -15,6 +15,8 @@ import { mockQuery } from './adapters/mock-data.js'
 import { parseFrontMatter, sanitizeMdCaption, sanitizeMdImageUrl, writeJsonAtomic, packageRoot } from './util.js'
 import { emptyState } from './store.js'
 import { parseChartSeries, normalizeChartType, buildGptVisPayload, parseGptVisBody } from './adapters/mcp_chart.js'
+import { excelToChart, readExcelSeries, resolveExcelPath } from './adapters/excel.js'
+import ExcelJS from 'exceljs'
 import { assertSlug, hubSkillId, loadInstalledHubSkills, parseSkillsListPayload, publicHttpsUrl } from './skillhub.js'
 import { extractSkillMarkdown, makeStoredZip } from './zip_skill.js'
 
@@ -79,15 +81,24 @@ async function main() {
     assert(feishuMeta && feishuMeta.tools.includes('zr_esc_feishu_doc'), 'feishu doc tool')
     assert(catalog.connectors.some((s) => s.id === 'mcp-web-read'), 'web read')
     assert(catalog.connectors.some((s) => s.id === 'mcp-lexiang'), 'lexiang')
+    assert(catalog.connectors.some((s) => s.id === 'excel'), 'excel')
+    const excelMeta = catalog.connectors.find((s) => s.id === 'excel')
+    assert(excelMeta && excelMeta.title === 'Excel 表格出图', 'excel title')
+    assert(excelMeta && excelMeta.role === 'tool', 'excel role tool')
+    assert(excelMeta && excelMeta.tools.includes('zr_esc_excel_to_chart'), 'excel tool')
     const lexiangMeta = catalog.connectors.find((s) => s.id === 'mcp-lexiang')
     assert(lexiangMeta && lexiangMeta.title === '乐享知识库', 'lexiang title')
     assert(lexiangMeta && lexiangMeta.role === 'sink', 'lexiang role sink')
     assert(lexiangMeta && lexiangMeta.tools.includes('zr_esc_lexiang_doc'), 'lexiang write tool')
     assert(lexiangMeta && lexiangMeta.tools.includes('zr_esc_lexiang_search'), 'lexiang search tool')
-    assert(catalog.connectors.length === 7, `connectors ${catalog.connectors.length}`)
+    assert(catalog.connectors.length === 8, `connectors ${catalog.connectors.length}`)
+    for (const s of catalog.scenes) {
+      assert(!s.connectorIds.includes('excel'), `${s.id} does not force excel`)
+    }
     assert(catalog.scenes[0].id === 'pcb-ops-analysis', 'trial scene first')
     assert(catalog.scenes.length === 4, 'four scenes')
     const clientJs = readFileSync(join(packageRoot(), 'lib', 'client.js'), 'utf8')
+    assert(clientJs.includes('Excel 出图'), 'excel card copy')
     assert(clientJs.includes('setSceneDetailId'), 'scene card opens detail')
     assert(clientJs.includes('能处理什么'), 'scene detail handles section')
     assert(clientJs.includes('esc-card-scene'), 'scene card clickable class')
@@ -306,6 +317,65 @@ async function main() {
     assert(sanitizeMdImageUrl('https://a.com/x.png) ') === '', 'image url paren')
   }
 
+  {
+    assert(typeof resolveExcelPath('relative.xlsx') !== 'string', 'excel reject relative')
+    assert(typeof resolveExcelPath('') !== 'string', 'excel reject empty')
+    const xdir = mkdtempSync(join(tmpdir(), 'dsh-esc-xlsx-'))
+    const xlsxPath = join(xdir, 'sample.xlsx')
+    const wb = new ExcelJS.Workbook()
+    const sheet = wb.addWorksheet('产量')
+    sheet.addRow(['工序', '良率', '计划'])
+    sheet.addRow(['贴片', 97.8, 100])
+    sheet.addRow(['焊接', 97.9, 100])
+    sheet.addRow(['AOI', 98.1, 100])
+    await wb.xlsx.writeFile(xlsxPath)
+    const series = await readExcelSeries(xlsxPath, '', '', '', '')
+    assert(!('error' in series), 'excel read ok')
+    if ('error' in series) throw new Error('excel read failed')
+    assert(series.pointCount === 3, 'excel read default cols')
+    assert(series.labels === '贴片,焊接,AOI', 'excel labels')
+    assert(series.sheet === '产量', 'excel first sheet')
+    const named = await readExcelSeries(xlsxPath, '产量', '工序', '良率', '计划')
+    assert(!('error' in named), 'excel named cols ok')
+    if ('error' in named) throw new Error('excel named failed')
+    assert(named.values2.split(',').length === 3, 'excel value2')
+    const miss = await readExcelSeries(xlsxPath, '没有这张表', '', '', '')
+    assert('error' in miss, 'excel missing sheet')
+    const off = await excelToChart(
+      { enabled: false, outboundArmed: false, mode: 'http', baseUrl: '', apiKey: '', username: '', password: '', token: '', enterpriseCode: '', datasetId: '', docTarget: '' },
+      undefined,
+      xlsxPath,
+      'bar',
+      '良率',
+    )
+    assert(!off.ok && off.code === 'connector_disabled', 'excel disabled')
+    const mockOn = await excelToChart(
+      { enabled: true, outboundArmed: false, mode: 'mock', baseUrl: '', apiKey: '', username: '', password: '', token: '', enterpriseCode: '', datasetId: '', docTarget: '' },
+      undefined,
+      xlsxPath,
+      'bar',
+      '良率',
+    )
+    assert(mockOn.ok && mockOn.source === 'mock', 'excel mock chart')
+    const httpNoArm = await excelToChart(
+      { enabled: true, outboundArmed: false, mode: 'http', baseUrl: '', apiKey: '', username: '', password: '', token: '', enterpriseCode: '', datasetId: '', docTarget: '' },
+      { enabled: true, outboundArmed: false, mode: 'http', baseUrl: '', apiKey: '', username: '', password: '', token: '', enterpriseCode: '', datasetId: '', docTarget: '' },
+      xlsxPath,
+      'bar',
+      '良率',
+    )
+    assert(!httpNoArm.ok && httpNoArm.code === 'connector_disabled', 'excel http needs arm')
+    const httpNoChart = await excelToChart(
+      { enabled: true, outboundArmed: true, mode: 'http', baseUrl: '', apiKey: '', username: '', password: '', token: '', enterpriseCode: '', datasetId: '', docTarget: '' },
+      { enabled: false, outboundArmed: false, mode: 'http', baseUrl: '', apiKey: '', username: '', password: '', token: '', enterpriseCode: '', datasetId: '', docTarget: '' },
+      xlsxPath,
+      'bar',
+      '良率',
+    )
+    assert(!httpNoChart.ok && httpNoChart.code === 'connector_disabled', 'excel http needs antv')
+    rmSync(xdir, { recursive: true, force: true })
+  }
+
   const dir = mkdtempSync(join(tmpdir(), 'dsh-esc-'))
   const prevWb = process.env.WORKBUDDY_CONFIG_YAML
   process.env.WORKBUDDY_CONFIG_YAML = '-'
@@ -313,6 +383,7 @@ async function main() {
     const before = emptyState()
     assert(before.connectors.mes.enabled === false, 'mes default off')
     assert(before.connectors['mcp-chart']?.enabled === false, 'chart default off')
+    assert(before.connectors.excel?.enabled === false, 'excel default off')
     const applied = await applyScene(dir, 'after-sales-ticket')
     assert(applied.activeExpertId === 'after-sales-expert', 'scene expert')
     assert(applied.skills['after-sales-ticket']?.enabled === true, 'scene skill')

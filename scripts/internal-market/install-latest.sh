@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 强制把公司市场「当前最新」插件装进本机 dsh Profile（覆盖旧版缓存）
+# 【开发机逃生舱】强制把公司市场「当前最新」插件装进本机 dsh Profile（覆盖旧版缓存）。
 #
-# 解决问题：市场已是新版本，但 ~/.dsh/profiles/web 里仍锁在旧 ^x.y.z，
-# 「重装」不升级 → 设置页仍是旧界面。
+# 终端用户正常路径：upload 后 → 设置 → 插件市场 → 点「更新」。
+# 本脚本仅用于：联调 link、市场更新异常、或要跳过 UI 立刻覆盖本机。
 #
 # 安装安全：先备份旧目录再替换；解压/版本校验失败 → 自动回退旧版（无旧版则保持未装）。
 #
@@ -21,7 +21,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REG_DIR="$ROOT/company-registry"
 PROFILE="${DSH_PROFILE:-web}"
-WEB="${DSH_PROFILE_DIR:-$HOME/.dsh/profiles/$PROFILE}"
+# WorkBuddy 桌面端装在 Application Support，不是 ~/.dsh/profiles/web
+WB_WEB="$HOME/Library/Application Support/zr-workbuddy-desktop/dsh-home/profiles/$PROFILE"
+if [[ -z "${DSH_PROFILE_DIR:-}" && -d "$WB_WEB/node_modules/@zhongruan" ]]; then
+  WEB="$WB_WEB"
+  echo "==> 检测到 WorkBuddy Profile，安装目标: $WEB"
+else
+  WEB="${DSH_PROFILE_DIR:-$HOME/.dsh/profiles/$PROFILE}"
+fi
 NPM_REG="${COMPANY_NPM_REGISTRY:-http://175.178.238.31/dsh-plugins/npm/}"
 MARKET_URL="${DSHM_REGISTRY_URL:-http://175.178.238.31/dsh-plugins/plugins.json}"
 PREFER_LOCAL="${PREFER_LOCAL:-0}"

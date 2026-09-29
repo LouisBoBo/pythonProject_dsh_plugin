@@ -221,10 +221,27 @@ for plugin_dir, src_meta in discover_plugin_dirs():
         "versions": versions,
         "time": time_map,
     }
+    pkg_dir = REG_DIR / "npm" / f"@{scope}" / short
+    pkg_dir.mkdir(parents=True, exist_ok=True)
     idx_path.write_text(
         json.dumps(packument, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    # dshmarket 更新检测走 GET {registry}/{pkg}/latest（npm 协议），
+    # 静态站必须落盘，否则市场永远看不到新版本、用户点不了「更新」。
+    for ver, ver_meta in versions.items():
+        if not is_artifact_version(ver):
+            continue
+        (pkg_dir / ver).write_text(
+            json.dumps(ver_meta, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    latest_meta = versions.get(version)
+    if latest_meta is not None:
+        (pkg_dir / "latest").write_text(
+            json.dumps(latest_meta, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     if len(versions) > 1:
         print(f"  保留历史版本: {', '.join(versions)}", flush=True)
 

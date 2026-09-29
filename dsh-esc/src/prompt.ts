@@ -145,7 +145,7 @@ export function skillCatalogText(dataRoot: string, sessionId = ''): string {
       ...lines,
       connectors.length
         ? `【已启用连接器】${connectors.join('、')}`
-        : '【已启用连接器】无。未启用时不要调用 zr_esc_mes_query / zr_esc_dify_search / zr_esc_mcp_chart / zr_esc_wecom_send / zr_esc_feishu_doc / zr_esc_lexiang_search / zr_esc_lexiang_doc / zr_esc_web_read。',
+        : '【已启用连接器】无。未启用时不要调用 zr_esc_mes_query / zr_esc_dify_search / zr_esc_mcp_chart / zr_esc_excel_to_chart / zr_esc_wecom_send / zr_esc_feishu_doc / zr_esc_lexiang_search / zr_esc_lexiang_doc / zr_esc_web_read。',
       duty,
     ]
       .filter(Boolean)

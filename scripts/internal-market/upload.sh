@@ -60,9 +60,45 @@ scp -i "$KEY" "$REG_DIR/plugins.json" "$HOST:$REMOTE_ROOT/plugins.json"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/artifacts/" "$HOST:$REMOTE_ROOT/artifacts/"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/npm/" "$HOST:$REMOTE_ROOT/npm/"
 
-echo "上传完成。验证:"
+echo "上传完成。验证 npm /latest（市场「更新」按钮依赖）…"
+export REG_DIR MARKET_URL
+python3 <<'PY'
+import json, os, sys, urllib.request
+from pathlib import Path
+from urllib.parse import urlparse
+
+reg = Path(os.environ["REG_DIR"])
+base = os.environ["MARKET_URL"].rsplit("/", 1)[0]  # …/dsh-plugins
+doc = json.loads((reg / "plugins.json").read_text(encoding="utf-8"))
+failed = []
+for p in doc.get("plugins") or []:
+    name = str(p.get("npm") or p.get("name") or "")
+    want = str(p.get("version") or "")
+    if not name.startswith("@") or "/" not in name or not want:
+        continue
+    url = f"{base}/npm/{name}/latest"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            body = json.loads(r.read().decode())
+        got = str(body.get("version") or "")
+        if got != want:
+            failed.append(f"{name}: latest={got or '?'} want={want} ({url})")
+        else:
+            print(f"  OK {name}@latest → {got}", flush=True)
+    except Exception as e:
+        failed.append(f"{name}: {e} ({url})")
+if failed:
+    print("错误: 私服未提供可用的 /latest，用户市场无法点「更新」:", file=sys.stderr)
+    for line in failed:
+        print(f"  - {line}", file=sys.stderr)
+    sys.exit(2)
+print("npm /latest 全部通过", flush=True)
+PY
+
+echo ""
+echo "其它核对:"
 echo "  curl -sS http://175.178.238.31/dsh-plugins/plugins.json"
 echo "  # 若 npm 目录 URL 仍 500：检查服务器 extension 里 dsh-plugins.conf 是否用 rewrite→index.json"
 echo ""
-echo "本机要立刻用上新包（覆盖旧缓存 / 本地 link）:"
-echo "  ./scripts/internal-market/install-latest.sh"
+echo "终端用户：设置 → 插件市场 → 对该插件点「更新」（不必跑 install-latest）。"
+echo "开发机绕过市场强制覆盖（可选）: ./scripts/internal-market/install-latest.sh"

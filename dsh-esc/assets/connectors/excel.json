@@ -1,0 +1,14 @@
+{
+  "id": "excel",
+  "title": "Excel 表格出图",
+  "summary": "本机读取桌面/文档/下载等目录下的 .xlsx/.csv，抽出最多 12 点后走 GPT-Vis 出图。默认关闭；http 需同时开 AntV，分类/数值会发往图表服务。",
+  "vendor": "ESC",
+  "marketplace": "本机读表",
+  "mcpServer": "excel-local-read",
+  "mcpUrl": "",
+  "kind": "mcp",
+  "role": "tool",
+  "avatar": "https://api.dicebear.com/9.x/icons/svg?seed=ExcelChart&backgroundColor=d1fae5",
+  "tools": ["zr_esc_excel_to_chart"],
+  "defaultEnabled": false
+}

@@ -20,6 +20,7 @@ import { getAnyScene, publicScenes } from './scenes.js'
 import { queryMes, MES_KIND_HELP } from './adapters/mes.js'
 import { searchDify } from './adapters/dify.js'
 import { renderChart } from './adapters/mcp_chart.js'
+import { excelToChart } from './adapters/excel.js'
 import { sendWecom } from './adapters/wecom.js'
 import { writeFeishuDoc } from './adapters/feishu.js'
 import { searchLexiang, writeLexiangDoc } from './adapters/lexiang.js'
@@ -83,6 +84,7 @@ function registerHarnessHandlers(): void {
 let disposeMes: (() => void) | undefined
 let disposeDify: (() => void) | undefined
 let disposeChart: (() => void) | undefined
+let disposeExcel: (() => void) | undefined
 let disposeWecom: (() => void) | undefined
 let disposeFeishu: (() => void) | undefined
 let disposeLexiang: (() => void) | undefined
@@ -270,6 +272,83 @@ function syncConnectorTools(ctx: Context): void {
   if (!chartOn && disposeChart) {
     disposeChart()
     disposeChart = undefined
+  }
+
+  const excelOn = Boolean(state.connectors.excel?.enabled)
+  if (excelOn && !disposeExcel) {
+    disposeExcel = ctx.tools.register(
+      defineTool({
+        name: 'zr_esc_excel_to_chart',
+        description:
+          '【ESC·Excel 表格出图】仅在面板已启用「Excel 表格出图」且已启用「AntV 图表」时调用。' +
+          '只读桌面/文档/下载（或 ESC_EXCEL_ROOTS）下的 .xlsx/.csv（绝对路径或 ~/…），首行表头；默认第 1 列分类、第 2 列数值，最多 12 点。' +
+          '会把拆好的 labels/values 发往 GPT-Vis（非整本文件）。chart_type：bar | column | line | pie | area | funnel | radar | dual-axes。' +
+          'dual-axes 必须填 value2_column。禁止编造路径或数值；读表失败把 error.code 原样告知用户。',
+        parameters: {
+          file_path: {
+            type: 'string',
+            required: true,
+            description: '允许目录内的表格绝对路径，如 ~/Desktop/xxx.xlsx',
+          },
+          chart_type: {
+            type: 'string',
+            required: true,
+            description: 'bar | column | line | pie | area | funnel | radar | dual-axes',
+          },
+          title: { type: 'string', required: true, description: '图表标题，不超过 80 字' },
+          sheet: {
+            type: 'string',
+            required: true,
+            description: '工作表名；不确定则传空字符串用第一张表',
+          },
+          label_column: {
+            type: 'string',
+            required: true,
+            description: '分类列名；传空字符串则用第 1 列',
+          },
+          value_column: {
+            type: 'string',
+            required: true,
+            description: '数值列名；传空字符串则用第 2 列',
+          },
+          value2_column: {
+            type: 'string',
+            required: true,
+            description: '仅 dual-axes 第二轴数值列名；其它类型传空字符串',
+          },
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { summary: { type: 'string' } },
+          },
+          render: (_args, value) => textBlocks(value.summary),
+        },
+        async execute(args, exec?: ExecCtx) {
+          const blocked = sceneBlocksConnector(exec, 'excel')
+          if (blocked) return { summary: blocked }
+          const st = loadState(loadConfig().dataRoot)
+          const title = String(args.title || '')
+          const result = await excelToChart(
+            st.connectors.excel,
+            st.connectors['mcp-chart'],
+            String(args.file_path || ''),
+            String(args.chart_type || ''),
+            title,
+            String(args.sheet || ''),
+            String(args.label_column || ''),
+            String(args.value_column || ''),
+            String(args.value2_column || ''),
+          )
+          return { summary: summaryOfChart(title, result) }
+        },
+      }),
+    )
+  }
+  if (!excelOn && disposeExcel) {
+    disposeExcel()
+    disposeExcel = undefined
   }
 
   const wecomOn = Boolean(state.connectors['mcp-wecom']?.enabled)

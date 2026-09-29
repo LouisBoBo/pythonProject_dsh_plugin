@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-esc",
-  "version": "0.1.40",
-  "description": "DSH 专家·技能·连接器：PCB 数据分析师、MES 运营分析、AntV 图表 MCP",
+  "version": "0.1.41",
+  "description": "DSH 专家·技能·连接器：PCB 数据分析师、MES 运营分析、AntV 图表与 Excel 出图",
   "dshMarket": {
-    "zh": "专家·技能·连接器：岗位人设、公司 SOP，并对接 SkillHub 公开技能目录；MES 取数与图表 MCP",
-    "en": "Experts, skills and connectors: PCB analyst, MES ops SOP, ModelScope chart MCP"
+    "zh": "专家·技能·连接器：岗位人设、公司 SOP，并对接 SkillHub 公开技能目录；MES 取数、AntV 与 Excel 出图",
+    "en": "Experts, skills and connectors: PCB analyst, MES ops SOP, AntV and Excel charts"
   },
   "type": "module",
   "main": "lib/index.js",
@@ -41,7 +41,8 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "exceljs": "^4.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

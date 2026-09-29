@@ -964,7 +964,7 @@ window.__ModuleLoader__.load({
         }
       } else {
         body = h('div', null, [
-          h('p', { className: 'esc-hint' }, '连接器默认关闭。MES / 企微 / 飞书读系统配置；乐享凭证填本卡片；图表与网页阅读免费不必填密钥。定时推送仍走自动化。'),
+          h('p', { className: 'esc-hint' }, '连接器默认关闭。MES / 企微 / 飞书读系统配置；乐享凭证填本卡片；AntV 图表、Excel 出图与网页阅读免费不必填密钥。定时推送仍走自动化。'),
           h(
             'div',
             { className: 'esc-grid' },
@@ -1085,13 +1085,15 @@ window.__ModuleLoader__.load({
                                 : '未读到系统配置 MES。可 mock 演示，或到 WorkBuddy 系统配置填写访问地址。'
                               : c.id === 'mcp-chart'
                                 ? '默认对接 AntV GPT-Vis，不必再填密钥。'
-                                : c.id === 'mcp-wecom'
-                                  ? live.wecomFromWorkbuddy
-                                    ? '已从系统配置读取企微群机器人。测通不往群里发消息。'
-                                    : '未读到企微 Webhook。请到 WorkBuddy 系统配置 → 自动化推送填写。'
-                                  : c.id === 'mcp-web-read'
-                                    ? '免费 Jina Reader，不必填密钥。只读公开 URL，不访问内网。'
-                                    : '',
+                                : c.id === 'excel'
+                                  ? '只读桌面/文档/下载下的 .xlsx/.csv；http 出图需同时开 AntV，分类/数值会发往 GPT-Vis。不必填密钥。'
+                                  : c.id === 'mcp-wecom'
+                                    ? live.wecomFromWorkbuddy
+                                      ? '已从系统配置读取企微群机器人。测通不往群里发消息。'
+                                      : '未读到企微 Webhook。请到 WorkBuddy 系统配置 → 自动化推送填写。'
+                                    : c.id === 'mcp-web-read'
+                                      ? '免费 Jina Reader，不必填密钥。只读公开 URL，不访问内网。'
+                                      : '',
                           ),
                   ),
                   h('div', { className: 'esc-actions' }, [

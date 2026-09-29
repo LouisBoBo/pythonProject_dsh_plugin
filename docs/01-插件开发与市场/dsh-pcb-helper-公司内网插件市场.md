@@ -361,13 +361,15 @@ dshmarket **不允许**直接安装 `http://服务器/...tgz`（安全限制，�
 strict-ssl=false
 ```
 
-发版：`./scripts/internal-market/pack.sh` → `./scripts/internal-market/upload.sh` → **`./scripts/internal-market/install-latest.sh`**（本机强制覆盖旧版）
+发版：`./scripts/internal-market/pack.sh` → `./scripts/internal-market/upload.sh`。
 
-`install-latest.sh` 会：
+**终端用户路径（成熟机制）**：上传后打开 **设置 → 插件市场**，对已装插件点 **「更新」**。dshmarket 会请求私服 `GET …/npm/@zhongruan/<包>/latest` 与本机版本比对；`generate-registry` 会为每个包落盘 `latest` 与各版本号文件（缺了则市场永远不提示更新）。
+
+`install-latest.sh` **仅开发机逃生舱**（联调 / 市场异常时强制覆盖），不是用户日常路径：
 
 1. 读本地/线上 `plugins.json` 的最新 `version`  
 2. 用制品 tgz **直接覆盖** `~/.dsh/profiles/web/node_modules/@zhongruan/...`  
-3. 把 Profile `package.json` 依赖钉成**精确版本**（去掉 `^0.1.1` 这种锁死升级）  
+3. 把 Profile `package.json` 依赖钉成精确版本  
 4. 写入 `@zhongruan:registry=...` 到 Profile `.npmrc`  
 
 市场 `install` 字段也会带 `@version`，例如：`dsh plugin --profile web add @zhongruan/dsh-remote-review@0.1.5`。

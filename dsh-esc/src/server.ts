@@ -32,6 +32,7 @@ import { probeWecom } from './adapters/wecom.js'
 import { parseFeishuTarget, probeFeishu } from './adapters/feishu.js'
 import { parseLexiangTarget, probeLexiang } from './adapters/lexiang.js'
 import { assertPublicHttpUrl, probeWebRead } from './adapters/web_read.js'
+import { probeExcel } from './adapters/excel.js'
 import type { ConnectorConfig, QueryResult, SceneReview } from './types.js'
 import { fetchHubDetail, fetchHubMarket, installHubSkill, loadInstalledHubSkills, uninstallHubSkill } from './skillhub.js'
 
@@ -452,7 +453,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             id === 'mcp-wecom' ||
             id === 'mcp-feishu' ||
             id === 'mcp-web-read' ||
-            id === 'mcp-lexiang'
+            id === 'mcp-lexiang' ||
+            id === 'excel'
           ) {
             mode = 'http'
           }
@@ -537,6 +539,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         'mcp-feishu': probeFeishu,
         'mcp-lexiang': probeLexiang,
         'mcp-web-read': probeWebRead,
+        excel: probeExcel,
       }
       const probe = probes[id]
       if (!probe) {

@@ -7,8 +7,8 @@ import { asBool, asString, writeJsonAtomic, withLock } from './util.js'
 import { publicMesSource, readWorkbuddyMes } from './workbuddy_mes.js'
 import { publicImSource } from './workbuddy_im.js'
 
-const HTTP_ON_ENABLE = new Set(['mcp-chart', 'mcp-wecom', 'mcp-feishu', 'mcp-web-read', 'mcp-lexiang'])
-export const OUTBOUND_CONNECTOR_IDS = new Set(['mcp-wecom', 'mcp-feishu', 'mcp-lexiang'])
+const HTTP_ON_ENABLE = new Set(['mcp-chart', 'mcp-wecom', 'mcp-feishu', 'mcp-web-read', 'mcp-lexiang', 'excel'])
+export const OUTBOUND_CONNECTOR_IDS = new Set(['mcp-wecom', 'mcp-feishu', 'mcp-lexiang', 'excel'])
 const WORKBUDDY_SECRET_CONNECTORS = new Set(['mes', 'mcp-wecom', 'mcp-feishu'])
 
 function emptyConnector(): ConnectorConfig {
