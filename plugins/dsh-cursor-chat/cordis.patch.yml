@@ -1,0 +1,3 @@
+- insert:
+    - id: cursor-chat
+      name: '@zhongruan/dsh-cursor-chat'
