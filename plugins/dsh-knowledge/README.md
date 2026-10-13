@@ -71,6 +71,10 @@ dsh plugin --profile web add @zhongruan/dsh-knowledge@1.0.1
 
 **1.0.10**：侧栏区分本机 / 公司共享；管理员自动召回走引擎 `/api/cli company-knowledge-cite`（绑定本机 active，不依赖浏览器 localStorage）；拖放到共享库走公司导入。
 
+**1.0.11**：侧栏「共享知识库」**仅管理员**可见；普通用户不展示（含只读）。成员如需公司库内容，用对话工具 `mes_company_knowledge`，不走侧栏。
+
+**1.0.12**：非管理员打开公司库正文/深链一律拒绝；管理员标志严格判定；引擎地址仅允许本机回环，降低 token 外泄风险。
+
 ## 开发
 
 要求 Node.js `^22.19.0 || >=24.0.0`。交付物含上游 2.9.6 预构建 `lib/`；`web/` 为管理台源码。

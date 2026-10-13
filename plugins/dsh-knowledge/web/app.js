@@ -822,12 +822,25 @@ async function loadDocumentEditor(workspace, id, signal) {
   workspace.view.loadRevision = revision
   const companyDoc = state.workbuddyCompany.documents.find(item => item.id === id)
   if (companyDoc || isWorkbuddyCompanyBase(workspace.view.knowledgeBaseId)) {
+    // 打开正文前再探一次角色：非管理员不得拉取/展示公司库内容（含深链、残留 knowledgeBaseId）
+    const optionsProbe = await fetchCompanyUploadOptions()
+    const allowCompanyUi = isCompanyKnowledgeAdmin(optionsProbe)
+    state.workbuddyCompany.canManage = allowCompanyUi
+    state.workbuddyCompany.configured = allowCompanyUi
+    if (!allowCompanyUi) {
+      state.workbuddyCompany.documents = []
+      workspace.view.knowledgeBaseId = state.knowledgeBases.find(item => item.status === 'active')?.id || ''
+      workspace.view.documentId = ''
+      workspace.view.editor = null
+      workspace.view.mode = 'preview'
+      showToast('共享知识库仅管理员可查看。', 'error')
+      return false
+    }
     const entry = await fetchCompanyKnowledgeEntry(id)
     if (workspace.view.loadRevision !== revision || workspace.view.documentId !== id) return false
     revokeKnowledgeOriginalUrl()
     const title = String(entry.title || '').trim() || '未命名'
-    const manage = canManageSharedKnowledge()
-    workspace.view.mode = manage ? 'edit' : 'preview'
+    workspace.view.mode = 'edit'
     workspace.view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
     workspace.view.editor = {
       id: String(entry.id || id),
@@ -846,7 +859,7 @@ async function loadDocumentEditor(workspace, id, signal) {
       noteReferences: [],
       dirty: false,
       isNew: false,
-      saveState: manage ? '已保存（共享）' : '共享 · 只读',
+      saveState: '已保存（共享）',
       workbuddyCompany: true,
       originalUrl: '',
       originalError: '',
@@ -968,7 +981,11 @@ function workbuddyEngineBaseUrl() {
     const host = (localStorage.getItem('dsh-mes-engine-host') || '127.0.0.1').trim() || '127.0.0.1'
     let port = (localStorage.getItem('dsh-mes-engine-port') || '8000').trim() || '8000'
     if (!/^\d+$/.test(port)) port = '8000'
-    return `http://${host}:${port}`
+    const portNum = Number(port)
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) port = '8000'
+    // 仅本机回环，避免被污染的 localStorage host 把 Bearer 打到外网
+    const safeHost = /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(host) ? host : '127.0.0.1'
+    return `http://${safeHost}:${port}`
   } catch {
     return 'http://127.0.0.1:8000'
   }
@@ -980,10 +997,24 @@ function workbuddyAuthHeaders() {
     if (!raw) return {}
     const session = JSON.parse(raw)
     const token = session && session.access_token
-    return token ? { Authorization: `Bearer ${token}` } : {}
+    return typeof token === 'string' && token.trim() ? { Authorization: `Bearer ${token.trim()}` } : {}
   } catch {
     return {}
   }
+}
+
+/** 仅认定明确为真的管理员/上传权；字符串 "false" 不得当作真。 */
+function isTrustedTrueFlag(value) {
+  if (value === true || value === 1) return true
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'admin'
+  }
+  return false
+}
+
+function isCompanyKnowledgeAdmin(optionsProbe) {
+  return isTrustedTrueFlag(optionsProbe?.is_admin) || isTrustedTrueFlag(optionsProbe?.can_upload_company)
 }
 
 async function fetchCompanyUploadOptions() {
@@ -1027,12 +1058,10 @@ async function refreshWorkbuddyCompanyDocuments(options = {}) {
   page.error = ''
   try {
     const optionsProbe = await fetchCompanyUploadOptions()
-    // 侧栏「共享知识库」仅管理员；成员不展示（召回仍走 cite / mes_company_knowledge）
-    const canManage = Boolean(
-      optionsProbe.show_company_sidebar
-      || (optionsProbe.configured && optionsProbe.is_admin)
-      || optionsProbe.can_upload_company,
-    )
+    // 侧栏「共享知识库」只给管理员：普通用户绝不展示（含只读）。
+    // 勿用 show_company_sidebar / can_read_company——引擎可能对全员可读置 true。
+    // 成员召回仍走 mes_company_knowledge；管理员自动双源见 company-shared-recall。
+    const canManage = isCompanyKnowledgeAdmin(optionsProbe)
     bucket.canManage = canManage
     bucket.configured = canManage
     if (!canManage) {

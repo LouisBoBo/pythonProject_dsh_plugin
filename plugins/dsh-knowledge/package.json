@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-knowledge",
-  "version": "1.0.10",
-  "description": "中软知识库：侧栏区分本机/公司共享；公司库免挂载可召回；导入 md/txt/pdf/docx；管理员可选上传目标",
+  "version": "1.0.12",
+  "description": "中软知识库：导入 md/txt/pdf/docx；公司共享库仅管理员可见（侧栏与正文）",
   "dshMarket": {
-    "zh": "知识库：侧栏本机+公司共享标识；公司库免挂载召回；导入；管理员可选上传本机/公司",
-    "en": "Knowledge: sidebar local vs company badges; company recall without mount; import; admin upload target"
+    "zh": "知识库：导入文档；公司共享库仅管理员可见，普通用户不显示",
+    "en": "Knowledge: import docs; company shared library for admins only (hidden from regular users)"
   },
   "keywords": [
     "deepseek-harness",

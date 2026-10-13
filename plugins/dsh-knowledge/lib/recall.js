@@ -57,7 +57,7 @@ export function registerKnowledgeCatalog(ctx, provider, config) {
             ]);
             let text = formatMountCatalog(mounts, Math.min(config.recallMaxChars, 6000), settings.writebackPolicy);
             if (config.workbuddyCompanyCite !== false) {
-                const tip = 'WorkBuddy：公司共享库免挂载，任意会话/项目均可召回（管理员自动双源；成员用 mes_company_knowledge）。本机库仍按挂载。上传目标（本机/公司）仅管理员可选。';
+                const tip = 'WorkBuddy：公司共享库侧栏仅管理员可见。管理员可自动双源召回；普通成员侧栏不显示共享库，需公司内容时用 mes_company_knowledge。本机库仍按挂载。上传目标仅管理员可选。';
                 text = text.length === 0 ? tip : `${text}\n\n${tip}`;
             }
             if (text.length === 0)
