@@ -4,14 +4,15 @@ import { assertExplicitKnowledgeBaseManagementRequest } from './tool-authorizati
 import { registerKnowledgeNoteReferenceTools } from './note-reference-tools.js';
 import { registerKnowledgeNoteTools } from './note-tools.js';
 import { documentLifecycleTool } from './document-lifecycle-tool.js';
+import { fetchCompanySharedRecall, mergeLocalAndCompanyRecall, } from './company-shared-recall.js';
 const textOutput = {
     schema: { type: 'string' },
     render: (_args, value) => [{ type: 'text', text: String(value) }],
 };
 /** Register scoped retrieval tools and explicit knowledge-base management tools. */
-export function registerKnowledgeTools(ctx, provider, codec, noteCodec) {
-    ctx.tools.register(searchKnowledgeBaseTool(provider));
-    ctx.tools.register(searchTool(provider, codec));
+export function registerKnowledgeTools(ctx, provider, codec, noteCodec, config = {}) {
+    ctx.tools.register(searchKnowledgeBaseTool(provider, config));
+    ctx.tools.register(searchTool(provider, codec, config));
     ctx.tools.register(readTool(provider, codec));
     ctx.tools.register(documentLifecycleTool(provider, codec));
     ctx.tools.register(createKnowledgeBaseTool(provider, ctx.llm));
@@ -19,10 +20,10 @@ export function registerKnowledgeTools(ctx, provider, codec, noteCodec) {
     registerKnowledgeNoteTools(ctx, provider, noteCodec, codec);
     registerKnowledgeNoteReferenceTools(ctx, provider, codec, noteCodec);
 }
-function searchKnowledgeBaseTool(provider) {
+function searchKnowledgeBaseTool(provider, config) {
     return {
         name: 'knowledge_base_search',
-        description: 'First-stage knowledge discovery and the preferred first lookup for the user\'s projects, preferences, prior decisions, workflows, installed tools, or mounted topics. Search only knowledge bases mounted for recall in THIS session by their name, routing description, and tags. Call this before workspace-file or web discovery when durable user-managed knowledge may apply, then use knowledge_search. It returns metadata only, never knowledge document content. If nothing matches, continue to the next appropriate source.',
+        description: 'First-stage knowledge discovery for mounted knowledge bases in THIS session. In WorkBuddy, only admin accounts auto-merge company shared knowledge on recall/search; members see local mounts here — use mes_company_knowledge for company shared. Call before workspace-file or web discovery when durable knowledge may apply, then knowledge_search.',
         parameters: {
             type: 'object',
             additionalProperties: false,
@@ -40,9 +41,13 @@ function searchKnowledgeBaseTool(provider) {
             const query = requireNonEmptyString(args.query, 'query', 2000);
             const limit = optionalInteger(args.limit, 'limit', 1, 10) ?? 5;
             const mounts = await resolveRecallMounts(provider, agent, exec.signal);
-            if (mounts.length === 0)
-                return 'No knowledge bases are mounted for recall in this session.';
-            return formatKnowledgeBaseMatches(query, searchMountedKnowledgeBases(mounts, query, limit));
+            const local = mounts.length === 0
+                ? 'No local knowledge bases are mounted for recall in this session.'
+                : formatKnowledgeBaseMatches(query, searchMountedKnowledgeBases(mounts, query, limit));
+            const company = await fetchCompanySharedRecall(query, config, exec.signal);
+            if (!company)
+                return local;
+            return mergeLocalAndCompanyRecall(local, '公司共享库已接入：内容见自动召回或 knowledge_search / mes_company_knowledge。\n' + company, 8000);
         },
     };
 }
@@ -167,10 +172,10 @@ function updateKnowledgeBaseTool(provider, llm) {
         },
     };
 }
-function searchTool(provider, codec) {
+function searchTool(provider, codec, config) {
     return {
         name: 'knowledge_search',
-        description: 'Second-stage knowledge retrieval. Search one exact knowledge base returned by knowledge_base_search. The base must still be mounted for recall in THIS session. Returns ranked snippets and signed opaque handles; call knowledge_read with an exact handle to open a result. Never invent a base id or handle.',
+        description: 'Second-stage knowledge retrieval on one mounted base from knowledge_base_search. For WorkBuddy admin accounts, company shared hits are auto-appended; for members, only the mounted base (use mes_company_knowledge for company shared). Call knowledge_read with an exact local handle to open a mounted result. Never invent a base id or handle.',
         parameters: {
             type: 'object',
             additionalProperties: false,
@@ -190,10 +195,11 @@ function searchTool(provider, codec) {
             const base = requireNonEmptyString(args.base, 'base', 200);
             const limit = optionalInteger(args.limit, 'limit', 1, 20) ?? 8;
             const mounts = selectMounts(await resolveRecallMounts(provider, agent, exec.signal), base);
-            if (mounts.length === 0)
-                return 'No knowledge bases are mounted for recall in this session.';
-            const hits = await searchMountedKnowledge(provider, agent, mounts, query, limit, codec, exec.signal);
-            return formatSearchResults(query, hits);
+            const local = mounts.length === 0
+                ? 'No knowledge bases are mounted for recall in this session.'
+                : formatSearchResults(query, await searchMountedKnowledge(provider, agent, mounts, query, limit, codec, exec.signal));
+            const company = await fetchCompanySharedRecall(query, config, exec.signal);
+            return mergeLocalAndCompanyRecall(local, company, 12000) || local;
         },
     };
 }

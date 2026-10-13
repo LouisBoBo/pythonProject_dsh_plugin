@@ -1,9 +1,12 @@
 import { formatAutomaticRecall, formatMountCatalog, resolveKnowledgeMounts, resolveRecallMounts, searchMountedKnowledge, selectAutomaticRecallHits, } from './retrieval.js';
 import { createRecallMessage, messageText, } from './runtime.js';
+import { fetchCompanySharedRecall, mergeLocalAndCompanyRecall, } from './company-shared-recall.js';
 /**
  * Sanitize prior plugin surface messages, then perform bounded first-step
  * retrieval for the current direct user request. The injected recall snapshot
  * is discarded from later model steps and never becomes write-back evidence.
+ *
+ * WorkBuddy：本机挂载召回 + 公司共享库旁路自动合并（全员可读公司库时生效）。
  */
 export function registerKnowledgeRecall(ctx, provider, config, codec) {
     return ctx.on('agent/pre-step', async (payload, next) => {
@@ -20,12 +23,15 @@ export function registerKnowledgeRecall(ctx, provider, config, codec) {
         if (!shouldRecall(query))
             return sanitized;
         try {
+            let localText = '';
             const mounts = await resolveRecallMounts(provider, payload.agent, payload.signal);
-            if (mounts.length === 0)
-                return sanitized;
-            const searched = await searchMountedKnowledge(provider, payload.agent, mounts, query, Math.min(config.autoRecallLimit * 3, 20), codec, payload.signal);
-            const hits = selectAutomaticRecallHits(searched, config.autoRecallLimit, config.autoRecallMinScore);
-            const text = formatAutomaticRecall(hits, config.recallMaxChars);
+            if (mounts.length > 0) {
+                const searched = await searchMountedKnowledge(provider, payload.agent, mounts, query, Math.min(config.autoRecallLimit * 3, 20), codec, payload.signal);
+                const hits = selectAutomaticRecallHits(searched, config.autoRecallLimit, config.autoRecallMinScore);
+                localText = formatAutomaticRecall(hits, config.recallMaxChars);
+            }
+            const companyText = await fetchCompanySharedRecall(query, config, payload.signal);
+            const text = mergeLocalAndCompanyRecall(localText, companyText, config.recallMaxChars);
             if (text.length === 0)
                 return sanitized;
             return { kind: 'enter', messages: [...messages, createRecallMessage(text)] };
@@ -49,7 +55,11 @@ export function registerKnowledgeCatalog(ctx, provider, config) {
                 resolveKnowledgeMounts(provider, context.agent, context.signal),
                 provider.getSettings(context.signal),
             ]);
-            const text = formatMountCatalog(mounts, Math.min(config.recallMaxChars, 6000), settings.writebackPolicy);
+            let text = formatMountCatalog(mounts, Math.min(config.recallMaxChars, 6000), settings.writebackPolicy);
+            if (config.workbuddyCompanyCite !== false) {
+                const tip = 'WorkBuddy：公司共享库免挂载，任意会话/项目均可召回（管理员自动双源；成员用 mes_company_knowledge）。本机库仍按挂载。上传目标（本机/公司）仅管理员可选。';
+                text = text.length === 0 ? tip : `${text}\n\n${tip}`;
+            }
             if (text.length === 0)
                 return transformed;
             return {

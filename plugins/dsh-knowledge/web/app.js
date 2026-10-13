@@ -94,6 +94,15 @@ const state = {
   nextCursor: null,
   entryFilters: { query: '', type: '', status: 'active', projectId: '', knowledgeBaseId: '' },
   documents: [],
+  /** WorkBuddy 公司共享库旁路目录（中央库；免挂载；与本机库分开展示） */
+  workbuddyCompany: {
+    configured: false,
+    canManage: false,
+    documents: [],
+    loading: false,
+    loaded: false,
+    error: '',
+  },
   documentView: createDocumentViewState({
     knowledgeBaseId: initialKnowledgeBaseId,
     documentId: initialDocumentId,
@@ -481,32 +490,49 @@ async function loadDocuments(signal, onPhase = () => {}) {
   state.knowledgeBases = bases
   state.resolvedMounts = resolved
   state.stats = stats
+  onPhase('正在同步公司共享库', .4)
+  await refreshWorkbuddyCompanyDocuments({ signal })
   onPhase('正在建立文档索引', .56)
   const visibleBaseIds = new Set(documentKnowledgeBases(bases).map(base => base.id))
   state.documents = state.documents.filter(document => visibleBaseIds.has(document.knowledgeBaseId))
   const workspace = sessionDocumentWorkspace()
   const view = workspace.view
-  const availableBaseIds = visibleBaseIds
+  const availableBaseIds = new Set(visibleBaseIds)
+  if (state.workbuddyCompany.configured) availableBaseIds.add(WORKBUDDY_COMPANY_BASE_ID)
   if (!view.knowledgeBaseId || !availableBaseIds.has(view.knowledgeBaseId)) {
-    view.knowledgeBaseId = state.entryFilters.knowledgeBaseId && availableBaseIds.has(state.entryFilters.knowledgeBaseId)
-      ? state.entryFilters.knowledgeBaseId
-      : documentKnowledgeBases(bases)[0]?.id || ''
+    const preferCompany = state.workbuddyCompany.configured && state.workbuddyCompany.documents.length > 0
+    view.knowledgeBaseId = preferCompany
+      ? WORKBUDDY_COMPANY_BASE_ID
+      : (state.entryFilters.knowledgeBaseId && availableBaseIds.has(state.entryFilters.knowledgeBaseId)
+        ? state.entryFilters.knowledgeBaseId
+        : documentWorkspaceBases(workspace)[0]?.id || '')
   }
   if (view.knowledgeBaseId) {
     view.expandedBases.add(view.knowledgeBaseId)
     await loadDocumentPage(workspace, view.knowledgeBaseId, { signal })
   }
-  if (view.documentId && !state.documents.some(document => document.id === view.documentId)) {
-    try {
-      const document = await api(`documents/${encodeURIComponent(view.documentId)}`, { signal })
-      if (visibleBaseIds.has(document.knowledgeBaseId)) {
-        view.knowledgeBaseId = document.knowledgeBaseId
-        view.expandedBases.add(document.knowledgeBaseId)
-        mergeDocumentSummaries(workspace, [documentSummary(document)], document.knowledgeBaseId, false)
-      } else view.documentId = ''
-    } catch (error) {
-      if (error.name === 'AbortError') throw error
-      view.documentId = ''
+  // 公司库始终预加载进侧栏（免挂载），即使用户当前停在本机库
+  if (state.workbuddyCompany.configured && view.knowledgeBaseId !== WORKBUDDY_COMPANY_BASE_ID) {
+    view.expandedBases.add(WORKBUDDY_COMPANY_BASE_ID)
+  }
+  if (view.documentId) {
+    const companyDoc = state.workbuddyCompany.documents.find(document => document.id === view.documentId)
+    if (companyDoc) {
+      // 深链 documentId 在公司库：勿打本机 documents API，否则会清空深链
+      view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
+      view.expandedBases.add(WORKBUDDY_COMPANY_BASE_ID)
+    } else if (!state.documents.some(document => document.id === view.documentId)) {
+      try {
+        const document = await api(`documents/${encodeURIComponent(view.documentId)}`, { signal })
+        if (visibleBaseIds.has(document.knowledgeBaseId)) {
+          view.knowledgeBaseId = document.knowledgeBaseId
+          view.expandedBases.add(document.knowledgeBaseId)
+          mergeDocumentSummaries(workspace, [documentSummary(document)], document.knowledgeBaseId, false)
+        } else view.documentId = ''
+      } catch (error) {
+        if (error.name === 'AbortError') throw error
+        view.documentId = ''
+      }
     }
   }
   selectDefaultDocument(workspace)
@@ -563,7 +589,11 @@ function activeDocumentWorkspace() {
 }
 
 function documentWorkspaceDocuments(workspace) {
-  return workspace.kind === 'library' ? state.libraryDetail.documents : state.documents
+  if (workspace.kind === 'library') return state.libraryDetail.documents
+  const local = state.documents.filter(document => !document.workbuddyCompany && !isWorkbuddyCompanyBase(document.knowledgeBaseId))
+  return state.workbuddyCompany.configured
+    ? [...state.workbuddyCompany.documents, ...local]
+    : local
 }
 
 function setDocumentWorkspaceDocuments(workspace, documents) {
@@ -589,6 +619,13 @@ function mergeDocumentSummaries(workspace, items, knowledgeBaseId, reset) {
 
 async function loadDocumentPage(workspace, knowledgeBaseId, options = {}) {
   if (!knowledgeBaseId) return
+  if (isWorkbuddyCompanyBase(knowledgeBaseId)) {
+    const page = documentPageState(workspace, knowledgeBaseId)
+    if (page.loading || (!options.reset && !options.append && page.loaded && state.workbuddyCompany.loaded)) return
+    await refreshWorkbuddyCompanyDocuments({ force: Boolean(options.reset), signal: options.signal })
+    if (options.throwOnError && page.error) throw new Error(page.error)
+    return
+  }
   const page = documentPageState(workspace, knowledgeBaseId)
   if (page.loading || (!options.reset && !options.append && page.loaded)) return
   if (options.append && !page.nextCursor) return
@@ -691,13 +728,22 @@ async function loadDocumentSearch(workspace, reset = false) {
   }
   if (!reset && view.searchNextCursor) params.set('cursor', view.searchNextCursor)
   try {
+    const needle = query.toLocaleLowerCase()
+    const companyHits = (reset && state.workbuddyCompany.configured)
+      ? state.workbuddyCompany.documents.filter(doc =>
+        String(doc.title || '').toLocaleLowerCase().includes(needle)
+        || String(doc.relPath || '').toLocaleLowerCase().includes(needle))
+      : []
     const result = await api(`document-index?${params}`, { signal: controller.signal })
     if (request !== view.searchRequest || query !== view.query.trim()) return
+    const localItems = Array.isArray(result.items) ? result.items : []
+    const localTotal = Number(result.total) || localItems.length
     const merged = new Map((reset ? [] : view.searchResults).map(document => [document.id, document]))
-    for (const item of result.items) merged.set(item.id, item)
+    for (const item of companyHits) merged.set(item.id, item)
+    for (const item of localItems) merged.set(item.id, item)
     view.searchResults = [...merged.values()]
     view.searchNextCursor = result.nextCursor || ''
-    view.searchTotal = result.total
+    view.searchTotal = reset ? companyHits.length + localTotal : Math.max(view.searchTotal, view.searchResults.length)
   } catch (error) {
     if (controller.signal.aborted) return
     if (request !== view.searchRequest) return
@@ -716,11 +762,21 @@ function documentWorkspaceBases(workspace) {
     const base = state.knowledgeBases.find(item => item.id === state.libraryDetail.knowledgeBaseId)
     return base ? [base] : []
   }
-  return documentKnowledgeBases()
+  const local = documentKnowledgeBases()
+  return state.workbuddyCompany.configured ? [workbuddyCompanyBase(), ...local] : local
 }
 
 function documentWorkspaceReadOnly(workspace) {
+  if (workspace.view?.editor?.workbuddyCompany && !state.workbuddyCompany.canManage) return true
   return workspace.kind === 'library' && documentWorkspaceBases(workspace)[0]?.status === 'archived'
+}
+
+function documentWorkspaceCompanySelected(workspace) {
+  return isWorkbuddyCompanyBase(workspace.view?.knowledgeBaseId)
+}
+
+function canManageSharedKnowledge() {
+  return Boolean(state.workbuddyCompany.canManage)
 }
 
 async function reloadDocumentWorkspace(workspace) {
@@ -764,6 +820,40 @@ function knowledgeOriginalFormatLabel(kind) {
 async function loadDocumentEditor(workspace, id, signal) {
   const revision = (workspace.view.loadRevision || 0) + 1
   workspace.view.loadRevision = revision
+  const companyDoc = state.workbuddyCompany.documents.find(item => item.id === id)
+  if (companyDoc || isWorkbuddyCompanyBase(workspace.view.knowledgeBaseId)) {
+    const entry = await fetchCompanyKnowledgeEntry(id)
+    if (workspace.view.loadRevision !== revision || workspace.view.documentId !== id) return false
+    revokeKnowledgeOriginalUrl()
+    const title = String(entry.title || '').trim() || '未命名'
+    const manage = canManageSharedKnowledge()
+    workspace.view.mode = manage ? 'edit' : 'preview'
+    workspace.view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
+    workspace.view.editor = {
+      id: String(entry.id || id),
+      knowledgeBaseId: WORKBUDDY_COMPANY_BASE_ID,
+      title,
+      body: String(entry.body || ''),
+      type: entry.type || 'fact',
+      tags: Array.isArray(entry.tags) ? entry.tags : [],
+      tagsText: (Array.isArray(entry.tags) ? entry.tags : []).join(', '),
+      scope: { kind: 'global' },
+      confidence: 0.9,
+      status: entry.status || 'active',
+      documentState: entry.document_state || entry.documentState || 'open',
+      version: Number(entry.version) || 1,
+      source: { kind: 'company-shared', evidence: 'explicit' },
+      noteReferences: [],
+      dirty: false,
+      isNew: false,
+      saveState: manage ? '已保存（共享）' : '共享 · 只读',
+      workbuddyCompany: true,
+      originalUrl: '',
+      originalError: '',
+      updatedAt: entry.updated_at || entry.updatedAt || '',
+    }
+    return true
+  }
   const [entry, noteReferences] = await Promise.all([
     api(`entries/${encodeURIComponent(id)}`, { signal }),
     api(`entries/${encodeURIComponent(id)}/note-references`, { signal }),
@@ -806,6 +896,25 @@ async function loadDocumentEditor(workspace, id, signal) {
 }
 
 function createBlankDocument(workspace, baseId) {
+  if (isWorkbuddyCompanyBase(baseId)) {
+    if (!state.workbuddyCompany.canManage) {
+      return showToast('仅管理员可在共享知识库新建文档。', 'error')
+    }
+    const view = workspace.view
+    view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
+    view.documentId = ''
+    view.mode = 'edit'
+    view.treeOpen = false
+    view.expandedBases.add(WORKBUDDY_COMPANY_BASE_ID)
+    view.editor = {
+      id: '', knowledgeBaseId: WORKBUDDY_COMPANY_BASE_ID, title: '', body: '', type: 'fact', tags: [], tagsText: '',
+      scope: { kind: 'global' }, confidence: .8, noteReferences: [], dirty: true, isNew: true,
+      saveState: '新文档（共享）', workbuddyCompany: true, version: 1, documentState: 'open',
+    }
+    renderShell()
+    document.querySelector('.note-title-input')?.focus()
+    return
+  }
   const base = state.knowledgeBases.find(item => item.id === baseId && item.status === 'active')
   if (!base) return showToast('请先选择一个可用知识库。', 'error')
   const view = workspace.view
@@ -830,8 +939,233 @@ async function startBlankDocument(workspace, baseId) {
 }
 
 function resolveImportBase(workspace, preferredId) {
-  const bases = documentWorkspaceBases(workspace).filter(item => item.status === 'active')
-  return bases.find(item => item.id === preferredId) || bases.find(item => item.id === workspace.view.knowledgeBaseId) || bases[0]
+  // 伪库 __workbuddy_company__ 不能当本机 import 目标
+  const bases = documentWorkspaceBases(workspace).filter(item => item.status === 'active' && !item.workbuddyCompany)
+  const preferred = isWorkbuddyCompanyBase(preferredId) ? '' : preferredId
+  const selected = isWorkbuddyCompanyBase(workspace.view.knowledgeBaseId) ? '' : workspace.view.knowledgeBaseId
+  return bases.find(item => item.id === preferred) || bases.find(item => item.id === selected) || bases[0]
+}
+
+/** WorkBuddy 公司共享库：未配置/非管理员时永不弹选，本机导入行为与上游一致。 */
+let pendingKnowledgeImportTarget = 'local'
+const WORKBUDDY_COMPANY_BASE_ID = '__workbuddy_company__'
+
+function isWorkbuddyCompanyBase(baseId) {
+  return String(baseId || '') === WORKBUDDY_COMPANY_BASE_ID
+}
+
+function workbuddyCompanyBase() {
+  return {
+    id: WORKBUDDY_COMPANY_BASE_ID,
+    name: '共享知识库',
+    status: 'active',
+    workbuddyCompany: true,
+  }
+}
+
+function workbuddyEngineBaseUrl() {
+  try {
+    const host = (localStorage.getItem('dsh-mes-engine-host') || '127.0.0.1').trim() || '127.0.0.1'
+    let port = (localStorage.getItem('dsh-mes-engine-port') || '8000').trim() || '8000'
+    if (!/^\d+$/.test(port)) port = '8000'
+    return `http://${host}:${port}`
+  } catch {
+    return 'http://127.0.0.1:8000'
+  }
+}
+
+function workbuddyAuthHeaders() {
+  try {
+    const raw = localStorage.getItem('mes_auth_session')
+    if (!raw) return {}
+    const session = JSON.parse(raw)
+    const token = session && session.access_token
+    return token ? { Authorization: `Bearer ${token}` } : {}
+  } catch {
+    return {}
+  }
+}
+
+async function fetchCompanyUploadOptions() {
+  try {
+    const response = await fetch(`${workbuddyEngineBaseUrl()}/api/company-knowledge/upload-options`, {
+      headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' },
+    })
+    if (!response.ok) return { can_upload_company: false, configured: false, can_read_company: false }
+    const data = await response.json()
+    return data && typeof data === 'object'
+      ? data
+      : { can_upload_company: false, configured: false, can_read_company: false }
+  } catch {
+    return { can_upload_company: false, configured: false, can_read_company: false }
+  }
+}
+
+function companyEntryToDocument(item) {
+  const title = String(item?.title || '').trim() || '未命名'
+  const id = String(item?.id || '').trim()
+  return {
+    id,
+    knowledgeBaseId: WORKBUDDY_COMPANY_BASE_ID,
+    title,
+    relPath: String(item?.rel_path || item?.relPath || `共享/${title}`),
+    updatedAt: String(item?.updated_at || item?.updatedAt || ''),
+    createdAt: String(item?.created_at || item?.createdAt || ''),
+    documentState: String(item?.document_state || item?.documentState || 'open'),
+    workbuddyCompany: true,
+    source: 'company',
+  }
+}
+
+async function refreshWorkbuddyCompanyDocuments(options = {}) {
+  const bucket = state.workbuddyCompany
+  if (bucket.loading && !options.force) return bucket
+  bucket.loading = true
+  bucket.error = ''
+  const page = documentPageState(sessionDocumentWorkspace(), WORKBUDDY_COMPANY_BASE_ID)
+  page.loading = true
+  page.error = ''
+  try {
+    const optionsProbe = await fetchCompanyUploadOptions()
+    // 侧栏「共享知识库」仅管理员；成员不展示（召回仍走 cite / mes_company_knowledge）
+    const canManage = Boolean(
+      optionsProbe.show_company_sidebar
+      || (optionsProbe.configured && optionsProbe.is_admin)
+      || optionsProbe.can_upload_company,
+    )
+    bucket.canManage = canManage
+    bucket.configured = canManage
+    if (!canManage) {
+      bucket.documents = []
+      bucket.loaded = true
+      page.loaded = true
+      page.total = 0
+      page.nextCursor = ''
+      page.error = ''
+      return bucket
+    }
+    const response = await fetch(`${workbuddyEngineBaseUrl()}/api/company-knowledge/entries?limit=100`, {
+      headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' },
+      signal: options.signal,
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      throw new Error((data && (data.detail || data.message)) || `读取公司库失败 HTTP ${response.status}`)
+    }
+    const items = Array.isArray(data.items) ? data.items : []
+    bucket.documents = items.map(companyEntryToDocument).filter(item => item.id)
+    bucket.loaded = true
+    page.loaded = true
+    page.total = bucket.documents.length
+    page.nextCursor = ''
+    page.error = ''
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
+    bucket.error = friendlyError(error)
+    page.error = bucket.error
+    if (!bucket.loaded) bucket.documents = []
+  } finally {
+    bucket.loading = false
+    page.loading = false
+  }
+  return bucket
+}
+
+async function fetchCompanyKnowledgeEntry(entryId) {
+  const response = await fetch(
+    `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries/${encodeURIComponent(entryId)}`,
+    { headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' } },
+  )
+  const data = await response.json().catch(() => null)
+  if (!response.ok || !data?.ok || !data.entry) {
+    throw new Error((data && (data.detail || data.message)) || `读取公司文档失败 HTTP ${response.status}`)
+  }
+  return data.entry
+}
+
+/** @returns {Promise<boolean>} */
+function promptKnowledgeYesNo({ title, message, confirmLabel }) {
+  return new Promise(resolve => {
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    openModal({
+      title,
+      body: element('p', {}, message),
+      primaryLabel: confirmLabel || '确认',
+      onPrimary: async () => {
+        finish(true)
+        return true
+      },
+      onClose: () => finish(false),
+    })
+  })
+}
+
+/** @returns {Promise<'local'|'company'|null>} */
+async function resolveKnowledgeImportTarget(forcedTarget) {
+  const options = await fetchCompanyUploadOptions()
+  if (!options.can_upload_company) return 'local'
+  if (forcedTarget === 'company') {
+    const confirmed = await promptKnowledgeYesNo({
+      title: '确认上传到共享知识库？',
+      message: '上传后全员可检索该文档。未定稿或敏感草稿请点取消。',
+      confirmLabel: '确认上传到共享库',
+    })
+    return confirmed ? 'company' : null
+  }
+  return promptKnowledgeImportTarget()
+}
+
+/** @returns {Promise<'local'|'company'|null>} */
+async function promptKnowledgeImportTarget() {
+  const selected = await new Promise(resolve => {
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    let choice = ''
+    const makeRow = (value, title, hint) => {
+      const input = element('input', {
+        type: 'radio', name: 'wb-kb-import-target', value,
+        onChange: () => { choice = value },
+      })
+      return element('label', {
+        class: 'dialog-choice-row',
+        style: 'display:flex;gap:10px;align-items:flex-start;margin:10px 0;cursor:pointer;',
+      }, input, element('span', {}, element('strong', {}, title), element('div', { style: 'opacity:.75;font-size:12px;margin-top:2px;' }, hint)))
+    }
+    openModal({
+      title: '选择上传目标',
+      description: '请显式选择；不会默认进入公司共享库。',
+      body: element('div', {},
+        makeRow('local', '本机知识库', '仅本机使用，其他同事不可见。'),
+        makeRow('company', '公司共享知识库', '上传后全员可检索；请确认内容已定版。'),
+      ),
+      primaryLabel: '继续',
+      onPrimary: async () => {
+        if (choice !== 'local' && choice !== 'company') {
+          showToast('请先选择上传目标（本机或公司共享）。', 'error')
+          return false
+        }
+        finish(choice)
+        return true
+      },
+      onClose: () => finish(null),
+    })
+  })
+  if (selected !== 'company') return selected
+  const confirmed = await promptKnowledgeYesNo({
+    title: '确认上传到公司共享知识库？',
+    message: '上传后全员可检索该文档。未定稿或敏感草稿请点取消，改选「本机知识库」。',
+    confirmLabel: '确认上传到公司',
+  })
+  return confirmed ? 'company' : null
 }
 
 function knowledgeImportInput(workspace, preferredId) {
@@ -842,7 +1176,9 @@ function knowledgeImportInput(workspace, preferredId) {
     onChange: event => {
       const files = [...(event.target.files || [])]
       event.target.value = ''
-      void importKnowledgeFiles(workspace, preferredId, files)
+      const target = pendingKnowledgeImportTarget || 'local'
+      pendingKnowledgeImportTarget = 'local'
+      void importKnowledgeFiles(workspace, preferredId, files, target)
     },
   })
 }
@@ -859,24 +1195,58 @@ function knowledgeCreateControl(workspace, preferredId, options = {}) {
 function knowledgeImportControl(workspace, preferredId, options = 'small') {
   const settings = typeof options === 'string' ? { variant: options } : options
   const input = knowledgeImportInput(workspace, preferredId)
-  const open = () => input.click()
+  const open = async () => {
+    const forceCompany = isWorkbuddyCompanyBase(preferredId)
+      || documentWorkspaceCompanySelected(workspace)
+    const target = await resolveKnowledgeImportTarget(forceCompany ? 'company' : undefined)
+    if (!target) return
+    if (target === 'local') {
+      const base = resolveImportBase(workspace, preferredId)
+      if (!base) return showToast('请先选/建知识库后再导入文件。', 'error')
+    }
+    pendingKnowledgeImportTarget = target
+    input.click()
+  }
   const trigger = settings.appearance === 'tree'
     ? element('button', {
         type: 'button', class: 'note-tree-new',
         title: '导入 Markdown / 纯文本 / PDF / Word 为可检索知识文档',
-        onClick: open,
+        onClick: () => { void open() },
       }, element('span', { class: 'note-tree-new-mark', 'aria-hidden': 'true' }, '+'), '导入文件')
-    : actionButton('导入文件', open, settings.variant || 'small', { title: '导入 Markdown / 纯文本 / PDF / Word 为可检索知识文档' })
+    : actionButton('导入文件', () => { void open() }, settings.variant || 'small', { title: '导入 Markdown / 纯文本 / PDF / Word 为可检索知识文档' })
   return element('div', { class: 'knowledge-import-control' }, trigger, input)
 }
 
-async function importKnowledgeFiles(workspace, preferredId, files) {
-  if (documentWorkspaceReadOnly(workspace)) return showToast('归档知识库不能导入文档。', 'error')
-  const base = resolveImportBase(workspace, preferredId)
-  if (!base) return showToast('请先选/建知识库后再导入文件。', 'error')
+async function importKnowledgeFiles(workspace, preferredId, files, target) {
   const list = [...(files || [])]
   if (!list.length) return
   if (knowledgeImportBusy) return showToast('正在导入，请稍候。')
+
+  let importTarget = target === 'local' || target === 'company' ? target : ''
+  // 拖到「共享知识库」或当前选中公司库：必须走公司导入（与导入按钮一致）
+  const dropOnCompany = isWorkbuddyCompanyBase(preferredId) || documentWorkspaceCompanySelected(workspace)
+  if (!importTarget) {
+    const chosen = await resolveKnowledgeImportTarget(dropOnCompany ? 'company' : undefined)
+    if (!chosen) return
+    importTarget = chosen
+  } else if (importTarget === 'local' && dropOnCompany) {
+    const chosen = await resolveKnowledgeImportTarget('company')
+    if (!chosen) return
+    importTarget = chosen
+  }
+
+  if (documentWorkspaceReadOnly(workspace) && importTarget !== 'company') {
+    return showToast('归档知识库不能导入文档。', 'error')
+  }
+
+  let base = null
+  if (importTarget === 'local') {
+    base = resolveImportBase(workspace, preferredId)
+    if (!base || isWorkbuddyCompanyBase(base.id)) {
+      return showToast('请先选/建本机知识库后再导入文件。', 'error')
+    }
+  }
+
   knowledgeImportBusy = true
   let created = 0
   let failed = 0
@@ -884,22 +1254,37 @@ async function importKnowledgeFiles(workspace, preferredId, files) {
   try {
     for (let index = 0; index < list.length; index += 1) {
       const file = list[index]
-      showToast(`正在导入 ${index + 1}/${list.length}`)
+      showToast(`正在导入 ${index + 1}/${list.length}${importTarget === 'company' ? '（公司共享）' : ''}`)
       try {
-        created += await importOneKnowledgeFile(base.id, file)
+        if (importTarget === 'company') created += await importOneCompanyKnowledgeFile(file)
+        else created += await importOneKnowledgeFile(base.id, file)
       } catch (error) {
         failed += 1
         reasons.push(`${file.name}：${friendlyError(error)}`)
       }
     }
-    await reloadDocumentWorkspace(workspace)
-    if (workspace.view.knowledgeBaseId !== base.id) {
-      workspace.view.knowledgeBaseId = base.id
-      workspace.view.expandedBases.add(base.id)
+    if (importTarget === 'local' && base) {
+      await reloadDocumentWorkspace(workspace)
+      if (workspace.view.knowledgeBaseId !== base.id) {
+        workspace.view.knowledgeBaseId = base.id
+        workspace.view.expandedBases.add(base.id)
+      }
+      renderShell()
     }
-    renderShell()
+    if (importTarget === 'company' && created) {
+      await refreshWorkbuddyCompanyDocuments({ force: true })
+      workspace.view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
+      workspace.view.expandedBases.add(WORKBUDDY_COMPANY_BASE_ID)
+      workspace.view.documentId = state.workbuddyCompany.documents[0]?.id || ''
+      if (workspace.view.documentId) await selectDocument(workspace, workspace.view.documentId)
+      else renderShell()
+    }
     const detail = reasons.length ? `。${reasons.slice(0, 3).join('；')}${reasons.length > 3 ? '…' : ''}` : ''
-    showToast(`成功 ${created}，失败 ${failed}${detail}`, failed && !created ? 'error' : undefined)
+    const prefix = importTarget === 'company' ? '公司共享库：' : ''
+    showToast(`${prefix}成功 ${created}，失败 ${failed}${detail}`, failed && !created ? 'error' : undefined)
+    if (importTarget === 'company' && created && !failed) {
+      showToast('已对公司可见（写入公司共享知识库）；侧栏「公司共享」可查看')
+    }
   } catch (error) {
     showToast(friendlyError(error), 'error')
   } finally {
@@ -918,6 +1303,26 @@ async function importOneKnowledgeFile(knowledgeBaseId, file) {
     { method: 'POST', contentType: file.type || 'application/octet-stream' },
   )
   return Number(result?.created) || 0
+}
+
+async function importOneCompanyKnowledgeFile(file) {
+  if (knowledgeImportExtension(file.name) === '.doc') throw new Error('旧版 Word（.doc）请另存为 .docx 后再导入')
+  if (!isAllowedKnowledgeImportName(file.name)) throw new Error('仅支持 .md / .txt / .pdf / .docx')
+  if (file.size > KNOWLEDGE_IMPORT_FILE_MAX_BYTES) throw new Error('文件过大（上限 16MB）')
+  const body = new FormData()
+  body.append('file', file, file.name)
+  body.append('filename', file.name)
+  const response = await fetch(`${workbuddyEngineBaseUrl()}/api/company-knowledge/import`, {
+    method: 'POST',
+    headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' },
+    body,
+  })
+  let data = null
+  try { data = await response.json() } catch { data = null }
+  if (!response.ok || !data?.ok) {
+    throw new Error((data && (data.detail || data.message)) || `上传公司库失败 HTTP ${response.status}`)
+  }
+  return Number(data.created) || 0
 }
 
 async function downloadKnowledgeOriginal(editor) {
@@ -970,6 +1375,43 @@ function editorDraft(editor) {
   }
 }
 
+async function saveCompanyDocumentEditor(workspace, editor) {
+  const payload = {
+    title: editor.title.trim(),
+    body: editor.body.trim(),
+    tags: parseTags(editor.tagsText),
+    type: editor.type || 'fact',
+    confidence: editor.confidence,
+    ...(!editor.isNew && editor.version ? { expectedVersion: editor.version } : {}),
+  }
+  const url = editor.isNew
+    ? `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries`
+    : `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries/${encodeURIComponent(editor.id)}`
+  const response = await fetch(url, {
+    method: editor.isNew ? 'POST' : 'PUT',
+    headers: { ...workbuddyAuthHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const data = await response.json().catch(() => null)
+  if (!response.ok || !data?.ok || !data.entry) {
+    throw Object.assign(new Error((data && (data.detail || data.message)) || `保存共享文档失败 HTTP ${response.status}`), { status: response.status })
+  }
+  const entry = data.entry
+  editor.id = String(entry.id || editor.id)
+  editor.isNew = false
+  editor.dirty = false
+  editor.version = Number(entry.version) || editor.version || 1
+  editor.documentState = entry.document_state || entry.documentState || 'open'
+  editor.updatedAt = entry.updated_at || entry.updatedAt || ''
+  editor.saveState = '已保存（共享）'
+  editor.workbuddyCompany = true
+  workspace.view.documentId = editor.id
+  workspace.view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
+  updateEditorSaveState(editor.saveState)
+  await refreshWorkbuddyCompanyDocuments({ force: true })
+  return true
+}
+
 async function saveDocumentEditor(workspace = activeDocumentWorkspace()) {
   if (!workspace) return false
   const editor = workspace.view.editor
@@ -987,6 +1429,13 @@ async function saveDocumentEditor(workspace = activeDocumentWorkspace()) {
   editor.saving = true
   updateEditorSaveState(editor.saveState)
   try {
+    if (editor.workbuddyCompany || isWorkbuddyCompanyBase(editor.knowledgeBaseId)) {
+      if (!canManageSharedKnowledge()) {
+        showToast('仅管理员可编辑共享知识库。', 'error')
+        return false
+      }
+      return await saveCompanyDocumentEditor(workspace, editor)
+    }
     const draft = editorDraft(editor)
     const saved = editor.isNew
       ? await api('entries', { method: 'POST', body: { draft } })
@@ -1057,12 +1506,20 @@ function dropKnowledgeDocument(event, workspace, targetBaseId) {
 }
 
 async function moveKnowledgeDocument(workspace, documentId, targetBaseId) {
+  if (isWorkbuddyCompanyBase(targetBaseId)) {
+    showToast('不能拖到共享知识库；请用「导入文件」上传到公司共享。', 'error')
+    return false
+  }
   const bases = documentWorkspaceBases(workspace)
-  const target = bases.find(base => base.id === targetBaseId && base.status === 'active')
+  const target = bases.find(base => base.id === targetBaseId && base.status === 'active' && !base.workbuddyCompany)
   const summaries = documentWorkspaceDocuments(workspace)
   const current = summaries.find(document => document.id === documentId)
   const sourceBaseId = current?.knowledgeBaseId
     || (workspace.view.editor?.id === documentId ? workspace.view.editor.knowledgeBaseId : '')
+  if (current?.workbuddyCompany || isWorkbuddyCompanyBase(sourceBaseId)) {
+    showToast('共享知识库文档不能拖到本机库。', 'error')
+    return false
+  }
   if (!target || !sourceBaseId || sourceBaseId === targetBaseId || movingDocumentId) return false
   const editor = workspace.view.editor
   if (editor?.id === documentId && editor.dirty && !await saveDocumentEditor(workspace)) return false
@@ -1830,8 +2287,11 @@ function renderDocumentWorkspace(workspace, options = {}) {
   const query = view.query.trim().toLocaleLowerCase()
   const activeBases = documentWorkspaceBases(workspace)
   const workspaceDocuments = documentWorkspaceDocuments(workspace)
+  const companySelected = documentWorkspaceCompanySelected(workspace)
+  // 共享库：成员只读；管理员可新建/导入/编辑（本机库逻辑不变）
   const readOnly = documentWorkspaceReadOnly(workspace)
-  const canOrganize = !readOnly && activeBases.length > 1
+    || (companySelected && !canManageSharedKnowledge())
+  const canOrganize = !readOnly && !companySelected && activeBases.filter(base => !base.workbuddyCompany).length > 1
   const selectedBase = activeBases.find(base => base.id === view.knowledgeBaseId)
   const search = element('input', {
     class: 'note-tree-search', type: 'search', value: view.query, placeholder: '搜索文档', 'aria-label': '搜索知识库文档',
@@ -1872,11 +2332,16 @@ function renderDocumentWorkspace(workspace, options = {}) {
         element('span', { class: 'tree-disclosure', 'aria-hidden': 'true' }),
         element('span', { class: 'tree-folder-icon', 'aria-hidden': 'true' }),
         element('span', { class: 'tree-base-name' }, base.name),
-        state.mountContext.sessionId && !isKnowledgeBaseMountedOnSession(base.id)
-          ? badge('未挂载', 'accent')
-          : null,
+        isWorkbuddyCompanyBase(base.id)
+          ? badge('共享', 'accent')
+          : (state.workbuddyCompany.configured ? badge('本机', 'success') : null),
+        isWorkbuddyCompanyBase(base.id)
+          ? badge('免挂载', '')
+          : (state.mountContext.sessionId && !isKnowledgeBaseMountedOnSession(base.id)
+            ? badge('未挂载', 'accent')
+            : null),
         element('span', { class: 'tree-count' }, query ? documents.length : page.loaded ? page.total : '—')),
-        !readOnly && base.id !== 'default'
+        !readOnly && !isWorkbuddyCompanyBase(base.id) && base.id !== 'default'
           ? actionButton('删除', () => confirmRemoveKnowledgeBase(base), 'ghost small note-tree-base-delete', { title: `删除「${base.name}」` })
           : null,
       ),
@@ -1887,11 +2352,14 @@ function renderDocumentWorkspace(workspace, options = {}) {
           actionButton('重试', () => { void loadDocumentPage(workspace, base.id, { reset: true }).then(renderShell) }, 'ghost small')) : null,
         documents.map(document => element('button', {
           type: 'button', class: 'note-tree-document', 'aria-current': document.id === view.documentId ? 'page' : undefined,
-          draggable: canOrganize && movingDocumentId !== document.id ? 'true' : undefined,
+          draggable: canOrganize && !document.workbuddyCompany && movingDocumentId !== document.id ? 'true' : undefined,
           'aria-busy': movingDocumentId === document.id ? 'true' : undefined,
-          title: canOrganize ? `${document.title} · 拖到其他知识库以移动` : document.title,
+          title: document.workbuddyCompany
+            ? `${document.title} · 共享知识库${canManageSharedKnowledge() ? '' : '（只读）'}`
+            : (canOrganize ? `${document.title} · 拖到其他知识库以移动` : document.title),
           'data-document-id': document.id,
           onDragStart: event => {
+            if (document.workbuddyCompany) return
             knowledgeDocumentDrag = { documentId: document.id, sourceBaseId: base.id, workspaceKind: workspace.kind }
             event.dataTransfer.effectAllowed = 'move'
             event.dataTransfer.setData(KNOWLEDGE_DOCUMENT_DRAG_TYPE, document.id)
@@ -1901,12 +2369,16 @@ function renderDocumentWorkspace(workspace, options = {}) {
           onClick: () => { view.knowledgeBaseId = base.id; void selectDocument(workspace, document.id) },
         }, element('span', { class: 'tree-document-icon', 'aria-hidden': 'true' }), element('span', { class: 'tree-document-copy' },
           element('strong', { title: document.title }, document.title), element('small', { title: knowledgeDocumentPathLabel(document) }, knowledgeDocumentPathLabel(document))),
-        document.documentState !== 'open' ? badge(DOCUMENT_STATE_LABELS[document.documentState] || '已结束', 'success') : null)),
+        document.workbuddyCompany ? badge('共享', 'accent') : null,
+        !document.workbuddyCompany && document.documentState !== 'open' ? badge(DOCUMENT_STATE_LABELS[document.documentState] || '已结束', 'success') : null)),
         !query && page.nextCursor ? element('button', {
           type: 'button', class: 'note-tree-more', disabled: page.loading,
           onClick: () => { void loadDocumentPage(workspace, base.id, { append: true }).then(renderShell) },
         }, page.loading ? '正在加载…' : `继续加载（已显示 ${documents.length} / ${page.total}）`) : null,
-        !query && page.loaded && documents.length === 0 ? element('div', { class: 'note-tree-status' }, '这个知识库还没有文档。') : null,
+        !query && page.loaded && documents.length === 0 ? element('div', { class: 'note-tree-status' },
+          isWorkbuddyCompanyBase(base.id)
+            ? (canManageSharedKnowledge() ? '共享知识库还没有文档。可用右上角「新建文档」或「导入文件」。' : '共享知识库暂无文档。')
+            : '这个知识库还没有文档。') : null,
       ) : null,
     )
   })
@@ -1940,8 +2412,20 @@ function renderDocumentWorkspace(workspace, options = {}) {
       element('header', { class: 'note-tree-header' },
         element('div', {}, element('h2', { id: `${workspace.kind}-documents-heading` }, options.heading || '知识目录'), element('span', {}, query ? `${view.searchTotal} 条搜索结果` : `${workspaceDocuments.length} 篇已加载`)),
         !readOnly ? element('div', { class: 'note-tree-header-actions note-tree-new-row' },
-          knowledgeCreateControl(workspace, view.knowledgeBaseId || activeBases[0]?.id, { appearance: 'tree' }),
-          knowledgeImportControl(workspace, view.knowledgeBaseId || activeBases[0]?.id, { appearance: 'tree' }),
+          knowledgeCreateControl(
+            workspace,
+            companySelected
+              ? WORKBUDDY_COMPANY_BASE_ID
+              : (view.knowledgeBaseId || activeBases.find(item => !item.workbuddyCompany)?.id),
+            { appearance: 'tree' },
+          ),
+          knowledgeImportControl(
+            workspace,
+            companySelected
+              ? WORKBUDDY_COMPANY_BASE_ID
+              : (view.knowledgeBaseId || activeBases[0]?.id),
+            { appearance: 'tree' },
+          ),
         ) : null,
       ),
       element('div', { class: 'note-tree-search-wrap' }, interfaceIcon('search', 'search-symbol'), search),
@@ -2035,15 +2519,20 @@ function renderNoteEditor(workspace, editor, base) {
         !readOnly && !finalized ? element('span', { class: 'editor-save-status', role: 'status' }, editor.saveState) : null,
         finalized && !readOnly ? actionButton('重新打开', () => reopenDocument(workspace, editor), 'small') : null,
         !readOnly && !finalized ? actionButton(editor.isNew ? '创建文档' : '保存', () => { void saveDocumentEditor(workspace).then(saved => { if (saved) renderShell() }) }, 'primary small') : null,
-        !readOnly && !editor.isNew ? renderDocumentMenu(editor.title || '知识文档', [
-          [
-            ...(viewOriginal ? [{ label: '下载原文件', icon: 'download', run: () => { void downloadKnowledgeOriginal(editor) } }] : []),
-            ...(documentWorkspaceBases(workspace).some(item => item.id !== editor.knowledgeBaseId)
-              ? [{ label: '移动到…', icon: 'move', run: () => openMoveKnowledgeDocument(workspace, editor) }] : []),
-            ...(!finalized ? [{ label: '标记结束', icon: 'check', run: () => openFinalizeDocument(workspace, editor) }] : []),
-          ],
-          !finalized ? [{ label: '删除文档', icon: 'trash', danger: true, run: () => confirmDeleteDocument(workspace, editor) }] : [],
-        ]) : null,
+        !readOnly && !editor.isNew ? renderDocumentMenu(editor.title || '知识文档', editor.workbuddyCompany
+          ? [
+              // 共享库：与本机同一「⋯ → 删除文档」入口；无移动/标记结束（中央库语义不同）
+              [{ label: '删除文档', icon: 'trash', danger: true, run: () => confirmDeleteDocument(workspace, editor) }],
+            ]
+          : [
+              [
+                ...(viewOriginal ? [{ label: '下载原文件', icon: 'download', run: () => { void downloadKnowledgeOriginal(editor) } }] : []),
+                ...(documentWorkspaceBases(workspace).some(item => item.id !== editor.knowledgeBaseId)
+                  ? [{ label: '移动到…', icon: 'move', run: () => openMoveKnowledgeDocument(workspace, editor) }] : []),
+                ...(!finalized ? [{ label: '标记结束', icon: 'check', run: () => openFinalizeDocument(workspace, editor) }] : []),
+              ],
+              !finalized ? [{ label: '删除文档', icon: 'trash', danger: true, run: () => confirmDeleteDocument(workspace, editor) }] : [],
+            ]) : null,
       ),
     ),
     element('div', { class: 'note-editor-scroll', 'data-scroll-key': 'note-editor' },
@@ -2062,13 +2551,15 @@ function renderNoteEditor(workspace, editor, base) {
     ),
     renderDocumentReferenceBar(workspace, editor, editable && !viewOriginal),
     element('footer', { class: 'note-inspector' },
-      viewOriginal ? element('span', { class: 'note-format-hint' }, knowledgeOriginalFormatLabel(originalKind)) : finalized || readOnly ? element('span', { class: 'note-format-hint' }, readOnly ? '知识库已归档 · 只读' : '只读封存 · 重新打开后才能编辑') : element('label', {}, element('span', {}, '类型'), element('select', {
+      viewOriginal ? element('span', { class: 'note-format-hint' }, knowledgeOriginalFormatLabel(originalKind)) : finalized || readOnly ? element('span', { class: 'note-format-hint' }, editor.workbuddyCompany ? '共享知识库 · 只读' : (readOnly ? '知识库已归档 · 只读' : '只读封存 · 重新打开后才能编辑')) : element('label', {}, element('span', {}, '类型'), element('select', {
         class: 'note-meta-select', onChange: event => update('type', event.target.value),
       }, TYPES.map(type => element('option', { value: type, selected: type === editor.type }, TYPE_LABELS[type])))),
       viewOriginal || finalized || readOnly ? null : element('label', { class: 'note-tags-field' }, element('span', {}, '标签'), element('input', {
         value: editor.tagsText, placeholder: '用逗号分隔', onInput: event => update('tagsText', event.target.value),
       })),
-      editable ? element('span', { class: 'note-format-hint' }, 'Markdown · Ctrl/⌘ S 保存') : null,
+      editable
+        ? element('span', { class: 'note-format-hint' }, editor.workbuddyCompany ? '共享库 · Markdown · Ctrl/⌘ S 保存' : 'Markdown · Ctrl/⌘ S 保存')
+        : (editor.workbuddyCompany && readOnly ? element('span', { class: 'note-format-hint' }, '共享知识库 · 只读') : null),
     ),
   )
 }
@@ -2259,12 +2750,48 @@ function reopenDocument(workspace, editor) {
   })
 }
 
+async function deleteCompanyKnowledgeEntry(entryId) {
+  const response = await fetch(
+    `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries/${encodeURIComponent(entryId)}`,
+    { method: 'DELETE', headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' } },
+  )
+  const data = await response.json().catch(() => null)
+  if (!response.ok || !data?.ok) {
+    throw Object.assign(
+      new Error((data && (data.detail || data.message)) || `删除共享文档失败 HTTP ${response.status}`),
+      { status: response.status },
+    )
+  }
+  return data
+}
+
 function confirmDeleteDocument(workspace, editor) {
+  const company = Boolean(editor.workbuddyCompany || isWorkbuddyCompanyBase(editor.knowledgeBaseId))
+  if (company && !canManageSharedKnowledge()) {
+    return showToast('仅管理员可删除共享知识库文档。', 'error')
+  }
   openConfirm({
     title: `删除“${editor.title}”？`,
-    message: '文档和对应的召回知识会被永久删除，此操作无法撤销。',
+    message: company
+      ? '文档将从共享知识库删除，全员不可再检索；此操作无法撤销。'
+      : '文档和对应的召回知识会被永久删除，此操作无法撤销。',
     confirmLabel: '永久删除', danger: true,
     onConfirm: async () => {
+      if (company) {
+        await deleteCompanyKnowledgeEntry(editor.id)
+        workspace.view.documentId = ''
+        workspace.view.editor = null
+        await refreshWorkbuddyCompanyDocuments({ force: true })
+        const next = state.workbuddyCompany.documents[0]
+        if (next) {
+          workspace.view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
+          workspace.view.documentId = next.id
+          await loadDocumentEditor(workspace, next.id)
+        }
+        renderShell()
+        showToast('文档已删除。')
+        return
+      }
       await api(`entries/${encodeURIComponent(editor.id)}`, { method: 'DELETE' })
       workspace.view.documentId = ''
       workspace.view.editor = null
@@ -4875,6 +5402,8 @@ function currentSyncTarget() {
   const workspace = activeDocumentWorkspace()
   const editor = workspace?.view.editor
   if (!editor?.id || editor.isNew || workspace.view.editorLoading) return null
+  // 共享库走中央 API，不参与本机 entries/revision 同步（避免误报「已删除」）
+  if (editor.workbuddyCompany || isWorkbuddyCompanyBase(editor.knowledgeBaseId)) return null
   return { key: `${workspace.kind}:${editor.id}`, id: editor.id, kind: 'knowledge', identity: editor, workspace,
     version: editor.version, updatedAt: editor.updatedAt,
     busy: () => editor.dirty || editor.saving || focused() }

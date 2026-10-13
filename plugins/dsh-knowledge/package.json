@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-knowledge",
-  "version": "1.0.6",
-  "description": "中软知识库：导入 Markdown / 纯文本 / PDF / Word 为可检索知识文档",
+  "version": "1.0.10",
+  "description": "中软知识库：侧栏区分本机/公司共享；公司库免挂载可召回；导入 md/txt/pdf/docx；管理员可选上传目标",
   "dshMarket": {
-    "zh": "知识库：挂载召回、文档管理，支持导入 md/txt/pdf/docx",
-    "en": "Knowledge base with recall, plus md/txt/pdf/docx import into searchable entries"
+    "zh": "知识库：侧栏本机+公司共享标识；公司库免挂载召回；导入；管理员可选上传本机/公司",
+    "en": "Knowledge: sidebar local vs company badges; company recall without mount; import; admin upload target"
   },
   "keywords": [
     "deepseek-harness",
@@ -67,20 +67,30 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "node --check web/app.js && node --check web/knowledge-import.js && node --check web/api-client.js && node --check lib/knowledge-file-extract.js && node --check lib/knowledge-originals.js && node --check lib/docx-preview-page.js",
+    "build": "node --check web/app.js && node --check web/knowledge-import.js && node --check web/api-client.js && node --check lib/knowledge-file-extract.js && node --check lib/knowledge-originals.js && node --check lib/docx-preview-page.js && node --check lib/company-shared-recall.js && node --check lib/recall.js && node --check lib/tools.js",
     "test": "node --test test/*.test.mjs",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@xmldom/xmldom": "0.8.10",
     "mammoth": "^1.12.3",
     "marked": "^18.0.10",
     "pdfjs-dist": "^6.3.289",
     "yaml": "^2.9.0"
   },
+  "overrides": {
+    "@xmldom/xmldom": "0.8.10"
+  },
+  "pnpm": {
+    "overrides": {
+      "@xmldom/xmldom": "0.8.10"
+    }
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },
+
   "publishConfig": {
     "access": "restricted",
     "registry": "http://175.178.238.31/dsh-plugins/npm/"

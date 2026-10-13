@@ -58,6 +58,19 @@ dsh plugin --profile web add @zhongruan/dsh-knowledge@1.0.1
 
 不要改 SQLite schema，除非做迁移。
 
+## WorkBuddy 公司共享上传（1.0.8+）
+
+在 WorkBuddy（3081）里、引擎已配置 `company_knowledge` 且当前登录为**管理员**时，「导入文件」会先让用户选择：
+
+- **本机知识库**：仍走本机 sqlite（与原先一致）
+- **公司共享知识库**：二次确认后，文件经 WorkBuddy 引擎写入中央 `exposeApi` 服务
+
+成员或未配置公司库时：**不弹选择**，行为与 1.0.6 完全相同。不依赖改 `backend: remote`。
+
+**1.0.8**：管理台 CSP `connect-src` 放行本机引擎回环，否则上传目标探测被拦截、永不弹窗；钉死 `@xmldom/xmldom@0.8.10` 修复 Word 导入（0.9 与 mammoth 不兼容）。
+
+**1.0.10**：侧栏区分本机 / 公司共享；管理员自动召回走引擎 `/api/cli company-knowledge-cite`（绑定本机 active，不依赖浏览器 localStorage）；拖放到共享库走公司导入。
+
 ## 开发
 
 要求 Node.js `^22.19.0 || >=24.0.0`。交付物含上游 2.9.6 预构建 `lib/`；`web/` 为管理台源码。
