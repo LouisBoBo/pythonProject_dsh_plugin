@@ -26,6 +26,10 @@ export const Config = Schema.object({
     autoRecallLimit: Schema.number().min(0).max(10).default(3),
     autoRecallMinScore: Schema.number().min(0).max(1).default(0.2),
     recallMaxChars: Schema.number().min(500).max(20_000).default(5000),
+    /** WorkBuddy：自动召回是否合并公司共享库（旁路 /api/cli cite）。false 关闭。 */
+    workbuddyCompanyCite: Schema.boolean().default(true),
+    /** 可选引擎 Origin 或任意该引擎下的 URL；空则依次试 :8000 / :18000 */
+    workbuddyCompanyCiteUrl: Schema.string(),
     trustedShareOrigins: Schema.array(Schema.string()).default([]).description('允许分享导入在指定的精确 Origin 上使用内网 DNS 回流。不支持通配符；已安装远程访问插件时会自动合并其可信 Origin。'),
 });
 export function resolveConfig(config) {
@@ -46,6 +50,8 @@ export function resolveConfig(config) {
         autoRecallLimit: config.autoRecallLimit ?? 3,
         autoRecallMinScore: config.autoRecallMinScore ?? 0.2,
         recallMaxChars: config.recallMaxChars ?? 5000,
+        workbuddyCompanyCite: config.workbuddyCompanyCite !== false,
+        workbuddyCompanyCiteUrl: String(config.workbuddyCompanyCiteUrl || '').trim(),
         trustedShareOrigins: normalizeTrustedShareOrigins(config.trustedShareOrigins ?? []),
     };
     if (resolved.backend === 'local' && (resolved.databasePath === undefined || resolved.databasePath.trim().length === 0)) {

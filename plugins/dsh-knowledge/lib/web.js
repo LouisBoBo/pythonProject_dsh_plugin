@@ -66,7 +66,9 @@ function securityHeaders(embedded = false) {
     // The editor and workspace effects position their own controls and expose
     // validated host-theme tokens through element.style. Keep stylesheet
     // sources locked to this origin while allowing those style attributes.
-    const policy = `default-src 'self'; script-src 'self'; style-src 'self' 'sha256-PlumsSlvJ7vvWzjqibGAYKq92O3y/4JTxWWsWJvyUYA=' 'sha256-${DOCX_PREVIEW_STYLE_HASH}'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; frame-src blob:; connect-src 'self'; font-src 'self'; object-src blob:; base-uri 'none'; form-action 'self'`;
+    // connect-src 须放行本机 WorkBuddy 引擎（默认 :8000 / 桌面 :18000），
+    // 否则管理员「本机/公司共享」上传探测被 CSP 静默拦截，永远不弹窗。
+    const policy = `default-src 'self'; script-src 'self'; style-src 'self' 'sha256-PlumsSlvJ7vvWzjqibGAYKq92O3y/4JTxWWsWJvyUYA=' 'sha256-${DOCX_PREVIEW_STYLE_HASH}'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; frame-src blob:; connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:*; font-src 'self'; object-src blob:; base-uri 'none'; form-action 'self'`;
     return {
         'content-security-policy': embedded ? policy : `${policy}; frame-ancestors 'self'`,
         'referrer-policy': 'no-referrer',

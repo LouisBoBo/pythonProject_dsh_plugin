@@ -125,7 +125,7 @@ export function apply(ctx, config) {
     const managementEmbedToken = randomBytes(32).toString('base64url');
     registerKnowledgeRecall(runtime, provider, resolved, handleCodec);
     registerKnowledgeCatalog(runtime, provider, resolved);
-    registerKnowledgeTools(runtime, provider, handleCodec, noteHandleCodec);
+    registerKnowledgeTools(runtime, provider, handleCodec, noteHandleCodec, resolved);
     runtime.provide?.(KNOWLEDGE_TRACKING_SERVICE, createKnowledgeTrackingService(provider));
     runtime.provide?.(KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE, createKnowledgeMountManagement(provider, () => providerRouter.revision));
     runtime.provide?.('dshKnowledgeNoteRecording', createNoteRecording(provider));

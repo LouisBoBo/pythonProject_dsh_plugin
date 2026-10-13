@@ -92,15 +92,17 @@ function clipTitle(title) {
   return value.length > KNOWLEDGE_TITLE_MAX ? value.slice(0, KNOWLEDGE_TITLE_MAX) : value
 }
 
-const CJK_CHAR = /[\u3400-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/u
+// 含康熙部首等兼容字形（PDF 常抽成 ⼆/⼒ 而非 二/力），否则空格压合失效
+const CJK_CHAR = /[\u2E80-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/u
 
 /**
- * PDF 常把每个汉字抽成独立 item，再被空格拼开。
+ * PDF 常把每个汉字抽成独立 item，再被空格拼开；并混入 SOH 等控制符。
  * 只清检索/入库正文，不改界面。Markdown 源文件不要走这里。
  */
 export function normalizeImportedKnowledgeText(text) {
-  let value = String(text ?? '').replace(/\r\n?/g, '\n').replaceAll('\u0000', '')
-  value = value.replace(new RegExp(`(${CJK_CHAR.source})[ \\t\\u00a0]+(?=${CJK_CHAR.source})`, 'gu'), '$1')
+  let value = String(text ?? '').replace(/\r\n?/g, '\n')
+  value = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+  value = value.replace(new RegExp(`(${CJK_CHAR.source})[ \\t\\u00a0\\u3000]+(?=${CJK_CHAR.source})`, 'gu'), '$1')
   value = value.replace(/[ \t]+/g, ' ')
   value = value.replace(/[ \t]*\n[ \t]*/g, '\n')
   value = value.replace(/\n{3,}/g, '\n\n')
