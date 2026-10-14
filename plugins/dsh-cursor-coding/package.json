@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-cursor-coding",
-  "version": "0.6.55",
+  "version": "0.6.56",
   "description": "主流程冻结；会话认 DSH、执行认本机 Job（见 docs/架构与选型/DSH会话与记忆分层.md）",
   "dshMarket": {
     "zh": "写码：澄清需求、确认后沙箱改代码、同步回工程、正文结论",
@@ -44,7 +44,7 @@
     }
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.31",
+    "@cursor/sdk": "1.0.31",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
   },

@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-cursor-chat",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "对话式多轮写码：用户原话+截图进 Cursor 多模态，确认后改盘，续改优先 Agent.resume",
   "dshMarket": {
     "zh": "对话写码：像跟 Cursor 聊（可贴图），确认后改代码，同会话可多轮续改",
@@ -43,7 +43,7 @@
     }
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.31",
+    "@cursor/sdk": "1.0.31",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
   },

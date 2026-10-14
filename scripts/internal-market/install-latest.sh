@@ -41,13 +41,21 @@ fi
 mkdir -p "$WEB/node_modules/@zhongruan"
 
 NPMRC="$WEB/.npmrc"
-if [[ ! -f "$NPMRC" ]] || ! grep -q '^@zhongruan:registry=' "$NPMRC" 2>/dev/null; then
-  {
-    echo "@zhongruan:registry=${NPM_REG%/}/"
-    echo "strict-ssl=false"
-  } >>"$NPMRC"
-  echo "==> 已写入 $NPMRC（@zhongruan 走公司私服）"
-fi
+# 只补缺的源，不覆盖已有 .npmrc（里面可能有其它 scope / token）
+append_npmrc_line() {
+  local key="$1" line="$2"
+  if [[ -f "$NPMRC" ]] && grep -q "^${key}=" "$NPMRC" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -s "$NPMRC" ]] && [[ -n "$(tail -c 1 "$NPMRC" || true)" ]]; then
+    printf '\n' >>"$NPMRC"
+  fi
+  printf '%s\n' "$line" >>"$NPMRC"
+  echo "==> 已补 ${key} → $NPMRC"
+}
+append_npmrc_line "@zhongruan:registry" "@zhongruan:registry=${NPM_REG%/}/"
+append_npmrc_line "@cursor:registry" "@cursor:registry=${NPM_REG%/}/"
+append_npmrc_line "strict-ssl" "strict-ssl=false"
 
 FILTER="${1:-}"
 export ROOT REG_DIR MARKET_URL FILTER PREFER_LOCAL

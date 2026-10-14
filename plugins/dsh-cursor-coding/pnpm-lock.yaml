@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@cursor/sdk':
-        specifier: ^1.0.31
+        specifier: 1.0.31
         version: 1.0.31
       '@deepseek-ai/cordis':
         specifier: ^4.0.2
