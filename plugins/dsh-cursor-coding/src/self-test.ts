@@ -49,6 +49,7 @@ import {
 import { decideCodingGate, readAskUserAfterLastUser } from './clarifyFlow.js'
 import {
   expandWriteScopeWithCompanions,
+  isStuckEmptyPendingReview,
   selectCompanionPromotions,
 } from './scopeCompanions.js'
 import { formatChatConclusion } from './conclusion.js'
@@ -581,6 +582,18 @@ async function main() {
       ['backend/app/routers/'],
     )
     assert(byScope.includes('backend/app/schemas.py'), '仅写范围含 routers 也应提升 schemas')
+    assert(
+      !isStuckEmptyPendingReview('自动同步失败，请手动同步', 2, 'auto_failed'),
+      'auto_failed 不得当卡死治愈',
+    )
+    assert(
+      !isStuckEmptyPendingReview('自动同步中…', 2, 'auto_applying'),
+      'auto_applying 不得当卡死治愈',
+    )
+    assert(
+      isStuckEmptyPendingReview('待审：范围内无可同步项（均在范围外）。', 0, 'await_user'),
+      'await_user 空范围可治愈',
+    )
     console.log('ok: scope companions')
   }
 

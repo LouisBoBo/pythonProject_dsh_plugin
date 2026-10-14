@@ -36,11 +36,12 @@ export function resolveWecomSettings(): {
 } {
   const cfg = loadConfig()
   const wb = readWorkbuddyCreds()
+  const wbKey = wb.wecomWebhookKey.trim()
   const pluginKey = cfg.wecomWebhookKey.trim()
-  const key = pluginKey || wb.wecomWebhookKey
-  const fromWorkbuddy = !pluginKey && Boolean(wb.wecomWebhookKey)
-  const enabled = pluginKey ? cfg.wecomPushEnabled : Boolean(cfg.wecomPushEnabled || wb.wecomPushEnabled)
-  const dryRun = pluginKey ? cfg.wecomDryRun : wb.wecomDryRun
+  const key = wbKey || pluginKey
+  const fromWorkbuddy = Boolean(wbKey)
+  const enabled = wbKey ? wb.wecomPushEnabled : cfg.wecomPushEnabled
+  const dryRun = wbKey ? wb.wecomDryRun : cfg.wecomDryRun
   return { enabled, key, dryRun, fromWorkbuddy }
 }
 

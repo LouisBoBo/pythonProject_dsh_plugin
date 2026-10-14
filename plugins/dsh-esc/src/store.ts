@@ -372,7 +372,7 @@ export async function unsummonScene(dataRoot: string, sceneId: string): Promise<
 
 export async function summonExpert(dataRoot: string, expertId: string): Promise<EscState> {
   const id = String(expertId || '').trim()
-  if (!loadCatalog().experts.some((x) => x.id === id)) throw new Error(`未知专家：${id}`)
+  if (!loadCatalog(dataRoot).experts.some((x) => x.id === id)) throw new Error(`未知专家：${id}`)
   return withLock(() => {
     const cur = readStateFile(dataRoot)
     cur.summonedExpertIds = uniqueIds([...cur.summonedExpertIds, id])

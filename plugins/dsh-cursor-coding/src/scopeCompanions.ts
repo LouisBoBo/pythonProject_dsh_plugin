@@ -137,21 +137,32 @@ export function criticalDeferredFiles(deferred: string[]): string[] {
     })
 }
 
-/** 卡死的空范围 pending_review（FINISHED 却永久转圈）——可治愈为终态 */
-export function isStuckEmptyPendingReview(detail: string, inScopeLen: number): boolean {
+/**
+ * 卡死的空范围 pending_review（FINISHED 却永久转圈）——可治愈为终态。
+ * 优先认 review_gate；无 gate 的旧账本才用 inScopeLen + 编排器固定 detail 全等（不扫用户正文）。
+ */
+export function isStuckEmptyPendingReview(
+  detail: string,
+  inScopeLen: number,
+  reviewGate?: string | null,
+): boolean {
+  const gate = String(reviewGate || '').trim()
+  // 自动同步进行中 / 失败待手工：禁止当「卡死空范围」治愈成 succeeded
+  if (gate === 'auto_applying' || gate === 'auto_failed') return false
+  if (gate === 'await_user') return inScopeLen <= 0
+  // 旧账本：仅认编排器写入的固定 detail，禁止宽正则扫用户可见长文
   const d = String(detail || '')
-  if (/自动同步中|同步中…|正在同步/.test(d) && !/无可同步|均在范围外|自动同步失败|写码已结束/.test(d)) {
-    return false
-  }
-  // 人工待审（有范围内文件需勾选）不是卡死，禁止自动改成 succeeded
-  if (inScopeLen > 0 && /请勾选后同步/.test(d)) return false
-  return (
-    /无可同步项|均在范围外|契约文件未进范围|写码已结束|自动同步失败/.test(d) ||
-    (inScopeLen === 0 && /待审|范围外/.test(d))
-  )
+  if (d === '自动同步中…') return false
+  if (d === '自动同步失败，请手动同步') return false
+  if (inScopeLen > 0) return false
+  return inScopeLen === 0
 }
 
 /** @deprecated 使用 isStuckEmptyPendingReview；保留别名避免旧引用 */
-export function isIdlePendingReview(detail: string, inScopeLen: number): boolean {
-  return isStuckEmptyPendingReview(detail, inScopeLen)
+export function isIdlePendingReview(
+  detail: string,
+  inScopeLen: number,
+  reviewGate?: string | null,
+): boolean {
+  return isStuckEmptyPendingReview(detail, inScopeLen, reviewGate)
 }

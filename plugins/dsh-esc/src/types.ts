@@ -5,6 +5,13 @@ export type MesKind = 'work_order' | 'yield' | 'scrap' | 'wip' | 'oee' | 'invent
 export const SCENE_MAX_SKILLS = 3
 export const SCENE_MAX_CONNECTORS = 3
 export const USER_SCENE_MAX = 8
+export const USER_EXPERT_MAX = 20
+export const USER_SKILL_MAX = 30
+export const USER_EXPERT_BODY_MAX = 4000
+export const USER_SKILL_BODY_MAX = 8000
+export const USER_TRIGGER_MAX = 8
+
+export type ExpertSource = 'builtin' | 'user'
 
 export type ExpertMeta = {
   id: string
@@ -16,9 +23,10 @@ export type ExpertMeta = {
   preferredSkillIds: string[]
   preferredConnectorIds: string[]
   body: string
+  source?: ExpertSource
 }
 
-export type SkillSource = 'builtin' | 'skillhub'
+export type SkillSource = 'builtin' | 'skillhub' | 'user'
 
 export type SkillMeta = {
   id: string

@@ -31,10 +31,11 @@ type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string }
 function resolveLlm(): { base: string; key: string; model: string } {
   const cfg = loadConfig()
   const wb = readWorkbuddyCreds()
+  // 业务凭证优先 WorkBuddy 系统配置；插件磁盘/环境仅作空缺兜底（测试与迁移）。
   return {
-    base: (cfg.llmBaseUrl.trim() || wb.llmBaseUrl).replace(/\/+$/, ''),
-    key: cfg.llmApiKey.trim() || wb.llmApiKey,
-    model: cfg.llmModel.trim() || wb.llmModel || 'deepseek-chat',
+    base: (wb.llmBaseUrl || cfg.llmBaseUrl.trim()).replace(/\/+$/, ''),
+    key: wb.llmApiKey || cfg.llmApiKey.trim(),
+    model: wb.llmModel || cfg.llmModel.trim() || 'deepseek-chat',
   }
 }
 

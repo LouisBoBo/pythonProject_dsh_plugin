@@ -139,6 +139,7 @@ function buildConclusionToolResult(opts: {
       review_in_scope: fresh.review_in_scope || [],
       review_deleted: fresh.review_deleted || [],
       review_deferred: fresh.review_deferred || fresh.deferred_files || [],
+      review_gate: fresh.review_gate ?? null,
     },
   })
 }
@@ -160,7 +161,8 @@ async function waitJobUntilConclusion(
     const st = job.status || ''
     const detail = String(job.detail || '')
     const inScopeLen = (job.review_in_scope || []).length
-    if (FINISH_DONE.has(st) || isStuckEmptyPendingReview(detail, inScopeLen)) {
+    const gate = job.review_gate || null
+    if (FINISH_DONE.has(st) || isStuckEmptyPendingReview(detail, inScopeLen, gate)) {
       // 终态已落盘：让 SSE 把带 job_id 的 done 送到进度卡。工具一返回宿主可能冻住 toolview。
       const updated = Date.parse(String(job.updated_at || '')) || 0
       const age = updated ? Date.now() - updated : 0
@@ -170,14 +172,14 @@ async function waitJobUntilConclusion(
     if (st === 'pending_review') {
       const autoRaw = String(process.env.CURSOR_CHAT_AUTO_APPLY || '1').trim().toLowerCase()
       const autoOn = !(autoRaw === '0' || autoRaw === 'false' || autoRaw === 'off' || autoRaw === 'no')
-      const syncFailed = /自动同步失败|同步失败|apply 失败|手动同步/.test(detail)
-      const syncing = /自动同步中|同步中/.test(detail) && !syncFailed
+      const syncFailed = gate === 'auto_failed' || detail === '自动同步失败，请手动同步'
+      const syncing = gate === 'auto_applying' || detail === '自动同步中…'
       if (syncFailed) return loadJob(jobId)
-      if (autoOn && syncing) {
-        pendingSince = 0
-      } else if (!autoOn) {
+      if (gate === 'await_user' || (!gate && !autoOn)) {
         if (!pendingSince) pendingSince = Date.now()
         if (Date.now() - pendingSince > 12_000) return loadJob(jobId)
+      } else if (autoOn && syncing) {
+        pendingSince = 0
       } else {
         if (!pendingSince) pendingSince = Date.now()
         if (Date.now() - pendingSince > 8_000) return loadJob(jobId)

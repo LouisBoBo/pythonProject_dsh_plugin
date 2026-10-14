@@ -687,45 +687,20 @@ window.__ModuleLoader__.load({
           },
           [
             h('h3', null, '推送配置'),
-            h('p', { className: 'za-hint' }, 'MES、对话模型、智谱、企微以 WorkBuddy「系统配置」为准。MES 只从系统配置读取，本页不再填写。'),
-            field('llmBaseUrl', 'LLM Base URL', { placeholder: 'https://api.deepseek.com/v1' }),
-            field('llmApiKey', 'LLM API Key', { type: 'password', placeholder: '未改则保留已保存密钥' }),
-            field('llmModel', '模型名'),
-            field('zhipuApiKey', '智谱 API Key（联网检索）', { type: 'password', placeholder: '新闻任务必需；未改则保留已保存密钥' }),
-            field('zhipuBaseUrl', '智谱 Base URL', { placeholder: 'https://open.bigmodel.cn/api/paas/v4' }),
-            h('div', { className: 'za-field' }, [
-              h('label', null, '开启企微推送'),
-              h('div', { className: 'za-switch-row' }, [
-                h('input', {
-                  type: 'checkbox',
-                  checked: !!cfg.wecomPushEnabled,
-                  onChange: function (e) {
-                    setCfg(Object.assign({}, cfg, { wecomPushEnabled: e.target.checked }))
-                  },
-                }),
-                h('span', null, '任务成功后可推送到企微群'),
-              ]),
-            ]),
-            field('wecomWebhookKey', '企微 Webhook Key', { placeholder: '只填 key，或完整 URL' }),
-            h('div', { className: 'za-field' }, [
-              h('label', null, '推送联调模式'),
-              h('div', { className: 'za-switch-row' }, [
-                h('input', {
-                  type: 'checkbox',
-                  checked: cfg.wecomDryRun !== false,
-                  onChange: function (e) {
-                    setCfg(Object.assign({}, cfg, { wecomDryRun: e.target.checked }))
-                  },
-                }),
-                h('span', null, '仅打日志，不真正发送'),
-              ]),
-            ]),
             h(
               'p',
               { className: 'za-hint' },
-              cfg.mesConfigured
-                ? 'MES 地址已从 WorkBuddy 系统配置读取，生产日报不再要求本页填写。'
-                : '未读取到 MES 地址。请到 WorkBuddy「系统配置」填写，不要在本页重复配置。',
+              '对话模型、智谱、企微、MES、飞书一律到 WorkBuddy「系统配置」填写。本页只调调度器，不再保存任何业务密钥。',
+            ),
+            h(
+              'p',
+              { className: 'za-hint' },
+              [
+                cfg.llmApiKeyConfigured ? '对话模型：已配置' : '对话模型：未配置',
+                cfg.zhipuApiKeyConfigured ? '智谱：已配置' : '智谱：未配置',
+                cfg.wecomWebhookKeyConfigured ? '企微：已配置' : '企微：未配置',
+                cfg.mesConfigured ? 'MES：已配置' : 'MES：未配置',
+              ].join(' · '),
             ),
             h('div', { className: 'za-field' }, [
               h('label', null, '调度器'),

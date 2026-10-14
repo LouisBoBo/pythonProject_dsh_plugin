@@ -51,6 +51,11 @@ export type CursorCodingJob = {
   review_in_scope?: string[]
   review_deleted?: string[]
   review_deferred?: string[]
+  /**
+   * pending_review 子态（权威字段，供 UI 相位；禁止用 detail 正文猜）。
+   * await_user=人工勾选；auto_applying=自动同步中；auto_failed=自动同步失败待手工。
+   */
+  review_gate?: 'await_user' | 'auto_applying' | 'auto_failed' | null
   assistant_text: string
   thinking_text: string
   transcript: TranscriptItem[]

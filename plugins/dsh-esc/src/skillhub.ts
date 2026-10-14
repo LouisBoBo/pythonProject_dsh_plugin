@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { SkillMeta } from './types.js'
-import { parseFrontMatter, strList } from './util.js'
+import { PLUGIN_VERSION, parseFrontMatter, strList } from './util.js'
 import { extractSkillMarkdown } from './zip_skill.js'
 
 export const SKILLHUB_API = 'https://api.skillhub.cn'
@@ -116,7 +116,10 @@ async function skillhubGet(pathAndQuery: string, maxBytes: number, timeoutMs: nu
   const res = await fetch(url, {
     method: 'GET',
     redirect: follow ? 'follow' : 'manual',
-    headers: { Accept: 'application/json, application/zip, */*', 'User-Agent': 'dsh-esc-skillhub/0.1.38' },
+    headers: {
+      Accept: 'application/json, application/zip, */*',
+      'User-Agent': `dsh-esc-skillhub/${PLUGIN_VERSION || '0'}`,
+    },
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!follow && res.status >= 300 && res.status < 400) throw new Error('SkillHub 返回了重定向，已拒绝')

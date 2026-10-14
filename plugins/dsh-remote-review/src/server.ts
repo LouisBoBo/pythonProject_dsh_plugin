@@ -40,11 +40,21 @@ function corsHeaders(req?: IncomingMessage): Record<string, string> {
   return {}
 }
 
-/** 管理接口鉴权：已配置 secret 时必须带密钥；未配置时仍拒绝非本机浏览器 Origin */
+function isLoopbackRemoteAddress(req: IncomingMessage): boolean {
+  const raw = String(req.socket?.remoteAddress || '')
+    .trim()
+    .toLowerCase()
+  return raw === '127.0.0.1' || raw === '::1' || raw === '::ffff:127.0.0.1'
+}
+
+/** 管理接口鉴权：仅本机 remote；已配置 secret 时必须带密钥；未配置时仍拒绝非本机浏览器 Origin */
 function requireAdmin(
   req: IncomingMessage,
   cfg: ReturnType<typeof loadConfig>,
 ): { ok: boolean; detail?: string } {
+  if (!isLoopbackRemoteAddress(req)) {
+    return { ok: false, detail: '管理接口仅允许本机访问' }
+  }
   const origin = requestOrigin(req)
   if (origin && !isLoopbackBrowserOrigin(origin)) {
     return { ok: false, detail: '拒绝非本机 Origin 跨域访问管理接口' }

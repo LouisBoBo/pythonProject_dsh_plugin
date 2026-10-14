@@ -207,11 +207,20 @@ export function applyConfigFromUi(body: Record<string, unknown>): RemoteReviewCo
   if (!feishu.wikiSpaceId.trim() && !feishu.folderToken.trim()) {
     throw new Error('请填写文档库 space_id（推荐）或云盘文件夹 Token（至少一项）')
   }
+  const listen =
+    typeof body.listen === 'string' && body.listen.trim() ? body.listen.trim() : current.listen
+  const secret = keepOrReplace(body.secret, current.secret)
+  // 非本机监听时必须配置 Secret，避免裸口暴露管理/Webhook
+  const host = listen.trim().toLowerCase()
+  const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1'
+  if (!loopback && !secret.trim()) {
+    throw new Error('监听非本机地址时必须配置 Webhook Secret')
+  }
   return saveConfig({
     engine: typeof body.engine === 'string' && body.engine.trim() ? body.engine.trim() : current.engine,
-    listen: typeof body.listen === 'string' && body.listen.trim() ? body.listen.trim() : current.listen,
+    listen,
     port,
-    secret: keepOrReplace(body.secret, current.secret),
+    secret,
     feishu,
   })
 }

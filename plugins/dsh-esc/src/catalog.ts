@@ -1,7 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ConnectorMeta, ExpertMeta, SceneMeta, SkillMeta } from './types.js'
+import { USER_EXPERT_MAX, USER_SCENE_MAX, USER_SKILL_MAX } from './types.js'
+import { EXPERT_BODY_FRAMEWORK, llmConfiguredForEsc } from './expert_framework.js'
 import { loadInstalledHubSkills } from './skillhub.js'
+import { loadUserExperts, loadUserSkills } from './user_catalog.js'
 import { assetsRoot, parseFrontMatter, PLUGIN_VERSION, strList, truncate } from './util.js'
 
 function readDirMarkdown(dir: string, fileName: string): string[] {
@@ -29,6 +32,7 @@ function loadExperts(root: string): ExpertMeta[] {
       preferredSkillIds: strList(meta.preferredSkillIds),
       preferredConnectorIds: strList(meta.preferredConnectorIds),
       body,
+      source: 'builtin',
     })
   }
   return out.sort((a, b) => a.id.localeCompare(b.id))
@@ -103,17 +107,23 @@ function loadBuiltinCatalog(root = assetsRoot()): Catalog {
   return catalog
 }
 
-/** dataRoot 有值时合并本机已安装的 SkillHub 技能；自测不传则仍是公司预制 9 条。 */
+/** dataRoot 有值时合并本机自建专家/技能与已安装 SkillHub；不传则仍是公司预制。 */
 export function loadCatalog(dataRoot?: string): Catalog {
   const builtin = loadBuiltinCatalog()
   if (!dataRoot) return builtin
   const hub = loadInstalledHubSkills(dataRoot)
-  if (!hub.length) return builtin
-  return { ...builtin, skills: [...builtin.skills, ...hub] }
+  const userExperts = loadUserExperts(dataRoot)
+  const userSkills = loadUserSkills(dataRoot)
+  if (!hub.length && !userExperts.length && !userSkills.length) return builtin
+  return {
+    ...builtin,
+    experts: [...builtin.experts, ...userExperts],
+    skills: [...builtin.skills, ...hub, ...userSkills],
+  }
 }
 
-export function getExpert(id: string): ExpertMeta | null {
-  return loadBuiltinCatalog().experts.find((x) => x.id === id) || null
+export function getExpert(id: string, dataRoot?: string): ExpertMeta | null {
+  return loadCatalog(dataRoot).experts.find((x) => x.id === id) || null
 }
 
 export function getSkill(id: string, dataRoot?: string): SkillMeta | null {
@@ -137,6 +147,8 @@ export function publicCatalog(scenes?: SceneMeta[], dataRoot?: string) {
       preferredSkillIds: x.preferredSkillIds,
       preferredConnectorIds: x.preferredConnectorIds,
       preview: x.body.slice(0, 180),
+      body: x.source === 'user' ? x.body : undefined,
+      source: x.source || 'builtin',
     })),
     pluginVersion: PLUGIN_VERSION,
     skills: c.skills.map((x) => ({
@@ -164,6 +176,14 @@ export function publicCatalog(scenes?: SceneMeta[], dataRoot?: string) {
       connectorIds: s.connectorIds,
       source: s.source || 'builtin',
     })),
-    limits: { maxSkills: 3, maxConnectors: 3, maxUserScenes: 8 },
+    limits: {
+      maxSkills: 3,
+      maxConnectors: 3,
+      maxUserScenes: USER_SCENE_MAX,
+      maxUserExperts: USER_EXPERT_MAX,
+      maxUserSkills: USER_SKILL_MAX,
+    },
+    expertBodyFramework: EXPERT_BODY_FRAMEWORK,
+    llmExpandReady: llmConfiguredForEsc(),
   }
 }

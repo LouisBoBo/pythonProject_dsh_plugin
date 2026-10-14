@@ -976,18 +976,68 @@ function workbuddyCompanyBase() {
   }
 }
 
-function workbuddyEngineBaseUrl() {
+const WORKBUDDY_ENGINE_ORIGIN_KEY = 'dsh-knowledge.workbuddy-engine-origin'
+
+function workbuddyEngineHost() {
   try {
     const host = (localStorage.getItem('dsh-mes-engine-host') || '127.0.0.1').trim() || '127.0.0.1'
-    let port = (localStorage.getItem('dsh-mes-engine-port') || '8000').trim() || '8000'
-    if (!/^\d+$/.test(port)) port = '8000'
-    const portNum = Number(port)
-    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) port = '8000'
     // 仅本机回环，避免被污染的 localStorage host 把 Bearer 打到外网
-    const safeHost = /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(host) ? host : '127.0.0.1'
-    return `http://${safeHost}:${port}`
+    return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(host) ? host : '127.0.0.1'
   } catch {
-    return 'http://127.0.0.1:8000'
+    return '127.0.0.1'
+  }
+}
+
+/** 候选引擎 Origin：优先会话已探活 → localStorage 端口 → :8000 / :18000（仅回环 host） */
+function workbuddyEngineOrigins() {
+  const host = workbuddyEngineHost()
+  const out = []
+  const seen = new Set()
+  const push = (origin) => {
+    const o = String(origin || '').replace(/\/+$/, '')
+    if (!o || seen.has(o)) return
+    try {
+      const u = new URL(o)
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) return
+    } catch {
+      return
+    }
+    seen.add(o)
+    out.push(o)
+  }
+  try {
+    push(sessionStorage.getItem(WORKBUDDY_ENGINE_ORIGIN_KEY) || '')
+  } catch {
+    /* ignore */
+  }
+  try {
+    let port = (localStorage.getItem('dsh-mes-engine-port') || '').trim()
+    if (!/^\d+$/.test(port)) port = ''
+    const portNum = Number(port)
+    if (port && (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535)) port = ''
+    if (port) push(`http://${host}:${port}`)
+  } catch {
+    /* ignore */
+  }
+  push(`http://${host}:8000`)
+  push(`http://${host}:18000`)
+  return out
+}
+
+function workbuddyEngineBaseUrl() {
+  const list = workbuddyEngineOrigins()
+  return list[0] || 'http://127.0.0.1:8000'
+}
+
+function rememberWorkbuddyEngineOrigin(origin) {
+  const o = String(origin || '').replace(/\/+$/, '')
+  if (!o) return
+  try {
+    const u = new URL(o)
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) return
+    sessionStorage.setItem(WORKBUDDY_ENGINE_ORIGIN_KEY, o)
+  } catch {
+    /* ignore */
   }
 }
 
@@ -1017,10 +1067,30 @@ function isCompanyKnowledgeAdmin(optionsProbe) {
   return isTrustedTrueFlag(optionsProbe?.is_admin) || isTrustedTrueFlag(optionsProbe?.can_upload_company)
 }
 
+/** 公司库 API：多 Origin 探活（桌面 :18000 / 浏览器 :8000），避免单端口写死 */
+async function fetchWorkbuddyCompany(path, init) {
+  const headers = { ...workbuddyAuthHeaders(), Accept: 'application/json', ...(init?.headers || {}) }
+  let lastErr = null
+  for (const origin of workbuddyEngineOrigins()) {
+    try {
+      const response = await fetch(`${origin}${path}`, { ...init, headers })
+      if (response.ok || response.status === 401 || response.status === 403) {
+        rememberWorkbuddyEngineOrigin(origin)
+        return response
+      }
+      lastErr = new Error(`HTTP ${response.status}`)
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  if (lastErr) throw lastErr
+  throw new Error('engine unreachable')
+}
+
 async function fetchCompanyUploadOptions() {
   try {
-    const response = await fetch(`${workbuddyEngineBaseUrl()}/api/company-knowledge/upload-options`, {
-      headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' },
+    const response = await fetchWorkbuddyCompany('/api/company-knowledge/upload-options', {
+      method: 'GET',
     })
     if (!response.ok) return { can_upload_company: false, configured: false, can_read_company: false }
     const data = await response.json()
@@ -1073,8 +1143,8 @@ async function refreshWorkbuddyCompanyDocuments(options = {}) {
       page.error = ''
       return bucket
     }
-    const response = await fetch(`${workbuddyEngineBaseUrl()}/api/company-knowledge/entries?limit=100`, {
-      headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' },
+    const response = await fetchWorkbuddyCompany('/api/company-knowledge/entries?limit=100', {
+      method: 'GET',
       signal: options.signal,
     })
     const data = await response.json().catch(() => null)
@@ -1101,9 +1171,9 @@ async function refreshWorkbuddyCompanyDocuments(options = {}) {
 }
 
 async function fetchCompanyKnowledgeEntry(entryId) {
-  const response = await fetch(
-    `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries/${encodeURIComponent(entryId)}`,
-    { headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' } },
+  const response = await fetchWorkbuddyCompany(
+    `/api/company-knowledge/entries/${encodeURIComponent(entryId)}`,
+    { method: 'GET' },
   )
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok || !data.entry) {
@@ -1341,9 +1411,8 @@ async function importOneCompanyKnowledgeFile(file) {
   const body = new FormData()
   body.append('file', file, file.name)
   body.append('filename', file.name)
-  const response = await fetch(`${workbuddyEngineBaseUrl()}/api/company-knowledge/import`, {
+  const response = await fetchWorkbuddyCompany('/api/company-knowledge/import', {
     method: 'POST',
-    headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' },
     body,
   })
   let data = null
@@ -1413,12 +1482,12 @@ async function saveCompanyDocumentEditor(workspace, editor) {
     confidence: editor.confidence,
     ...(!editor.isNew && editor.version ? { expectedVersion: editor.version } : {}),
   }
-  const url = editor.isNew
-    ? `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries`
-    : `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries/${encodeURIComponent(editor.id)}`
-  const response = await fetch(url, {
+  const path = editor.isNew
+    ? '/api/company-knowledge/entries'
+    : `/api/company-knowledge/entries/${encodeURIComponent(editor.id)}`
+  const response = await fetchWorkbuddyCompany(path, {
     method: editor.isNew ? 'POST' : 'PUT',
-    headers: { ...workbuddyAuthHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
   const data = await response.json().catch(() => null)
@@ -2780,9 +2849,9 @@ function reopenDocument(workspace, editor) {
 }
 
 async function deleteCompanyKnowledgeEntry(entryId) {
-  const response = await fetch(
-    `${workbuddyEngineBaseUrl()}/api/company-knowledge/entries/${encodeURIComponent(entryId)}`,
-    { method: 'DELETE', headers: { ...workbuddyAuthHeaders(), Accept: 'application/json' } },
+  const response = await fetchWorkbuddyCompany(
+    `/api/company-knowledge/entries/${encodeURIComponent(entryId)}`,
+    { method: 'DELETE' },
   )
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok) {

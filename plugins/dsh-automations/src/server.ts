@@ -106,7 +106,18 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return data as Record<string, unknown>
 }
 
+function isLoopbackRemoteAddress(req: IncomingMessage): boolean {
+  const raw = String(req.socket.remoteAddress || '')
+    .trim()
+    .toLowerCase()
+  return raw === '127.0.0.1' || raw === '::1' || raw === '::ffff:127.0.0.1'
+}
+
 function rejectNonLoopback(req: IncomingMessage, res: ServerResponse): boolean {
+  if (!isLoopbackRemoteAddress(req)) {
+    send(res, 403, { ok: false, detail: '仅允许本机访问' }, req)
+    return true
+  }
   const origin = requestOrigin(req)
   if (origin && !isLoopbackBrowserOrigin(origin)) {
     send(res, 403, { ok: false, detail: '拒绝非本机 Origin' }, req)

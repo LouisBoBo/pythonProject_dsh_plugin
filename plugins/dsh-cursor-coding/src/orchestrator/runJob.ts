@@ -420,6 +420,7 @@ async function enterReviewFromDiff(
       last_synced_files: [],
       review_in_scope: [],
       review_deferred: deferredAll,
+      review_gate: null,
     })
     appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
     return
@@ -434,6 +435,7 @@ async function enterReviewFromDiff(
       (crit.length
         ? ` ⚠ 契约文件未进范围：${crit.slice(0, 5).join(', ')}——扩大写范围或勾选同步，否则易「请求失败」。`
         : '')
+    patchJob(jobId, { review_gate: 'await_user' })
     setStatus(loadJob(jobId)!, 'pending_review', detail)
     appendEvent(loadJob(jobId)!, {
       type: 'review',
@@ -448,6 +450,7 @@ async function enterReviewFromDiff(
     return
   }
 
+  patchJob(jobId, { review_gate: 'auto_applying' })
   setStatus(loadJob(jobId)!, 'pending_review', '自动同步中…')
   appendEvent(loadJob(jobId)!, {
     type: 'review',
@@ -467,6 +470,7 @@ async function enterReviewFromDiff(
     expand_scope: promoted,
   })
   if (!applied.ok) {
+    patchJob(jobId, { review_gate: 'auto_failed' })
     setStatus(loadJob(jobId)!, 'pending_review', applied.detail || '自动同步失败，请手动同步')
     return
   }
@@ -498,7 +502,8 @@ async function enterReviewFromDiff(
       ? `；⚠ 仍有契约文件未同步：${critLeft.slice(0, 5).join(', ')}`
       : '') +
     '。请自行打开页面确认效果；如需调整请在对话框继续说明。'
-  setStatus(j, 'succeeded', detail)
+  patchJob(jobId, { review_gate: null })
+  setStatus(loadJob(jobId)!, 'succeeded', detail)
   appendEvent(loadJob(jobId)!, {
     type: 'status',
     status: 'succeeded',
@@ -766,9 +771,10 @@ export function healStalePendingReview(jobId: string): ReturnType<typeof loadJob
   if (!job || job.status !== 'pending_review') return job
   const inScope = job.review_in_scope || []
   const deferred = job.review_deferred || job.deferred_files || []
-  if (!isIdlePendingReview(job.detail || '', inScope.length)) return job
-  // 人工勾选待审不治愈
-  if (inScope.length > 0 && /请勾选后同步/.test(job.detail || '')) return job
+  if (!isIdlePendingReview(job.detail || '', inScope.length, job.review_gate)) return job
+  // 人工勾选待审 / 自动同步中或失败待手工：禁止改写成 succeeded
+  if (job.review_gate === 'await_user' && inScope.length > 0) return job
+  if (job.review_gate === 'auto_applying' || job.review_gate === 'auto_failed') return job
 
   // 尝试把扩展写范围内的契约文件补同步
   const expanded = expandWriteScopeWithCompanions(job.write_scope || [])

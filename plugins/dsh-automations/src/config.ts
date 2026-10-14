@@ -270,22 +270,21 @@ export function applyConfigFromUi(body: Record<string, unknown>, overrideRoot?: 
     if (!Number.isFinite(n)) throw new Error('调度间隔非法')
     tickSec = Math.max(5, Math.min(3600, Math.floor(n)))
   }
-  const llmBaseRaw = applyPlain(body, 'llmBaseUrl', current.llmBaseUrl)
-  const zhipuBaseRaw = applyPlain(body, 'zhipuBaseUrl', current.zhipuBaseUrl)
+  // 推送配置页只改调度；LLM/智谱/企微/MES 一律不从本页写盘，只读 WorkBuddy 系统配置。
   return saveConfig(
     {
       listen: '127.0.0.1',
       port,
       schedulerEnabled: asBool(body.schedulerEnabled, current.schedulerEnabled),
       tickSec,
-      llmBaseUrl: llmBaseRaw ? normalizeHttpBaseUrl(llmBaseRaw, 'LLM Base URL') : '',
-      llmApiKey: keepOrReplace(body.llmApiKey, current.llmApiKey),
-      llmModel: applyPlain(body, 'llmModel', current.llmModel) || current.llmModel,
-      zhipuApiKey: keepOrReplace(body.zhipuApiKey, current.zhipuApiKey),
-      zhipuBaseUrl: zhipuBaseRaw ? normalizeHttpBaseUrl(zhipuBaseRaw, '智谱 Base URL') : '',
-      wecomPushEnabled: asBool(body.wecomPushEnabled, current.wecomPushEnabled),
-      wecomWebhookKey: keepOrReplace(body.wecomWebhookKey, current.wecomWebhookKey),
-      wecomDryRun: asBool(body.wecomDryRun, current.wecomDryRun),
+      llmBaseUrl: current.llmBaseUrl,
+      llmApiKey: current.llmApiKey,
+      llmModel: current.llmModel,
+      zhipuApiKey: current.zhipuApiKey,
+      zhipuBaseUrl: current.zhipuBaseUrl,
+      wecomPushEnabled: current.wecomPushEnabled,
+      wecomWebhookKey: current.wecomWebhookKey,
+      wecomDryRun: current.wecomDryRun,
       mesBaseUrl: current.mesBaseUrl,
     },
     overrideRoot,

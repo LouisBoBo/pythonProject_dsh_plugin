@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { getExpert, loadCatalog, type Catalog } from './catalog.js'
+import { loadCatalog, type Catalog } from './catalog.js'
 import type { EscState, SceneIssue, SceneMeta, SceneReview } from './types.js'
 import { SCENE_MAX_CONNECTORS, SCENE_MAX_SKILLS, USER_SCENE_MAX } from './types.js'
 import { writeJsonAtomic } from './util.js'
@@ -62,7 +62,7 @@ export function loadUserScenes(dataRoot: string): SceneMeta[] {
   }
 }
 
-function persistUserScenes(dataRoot: string, scenes: SceneMeta[]): SceneMeta[] {
+export function persistUserScenes(dataRoot: string, scenes: SceneMeta[]): SceneMeta[] {
   writeJsonAtomic(userScenesPath(dataRoot), scenes)
   return scenes
 }
@@ -94,7 +94,7 @@ export function reviewSceneCombo(
   const connectors = unique(connectorIds)
   const errors: SceneIssue[] = []
   const warnings: SceneIssue[] = []
-  const expert = getExpert(expertId)
+  const expert = catalog.experts.find((x) => x.id === expertId) || null
 
   if (!String(expertId || '').trim()) {
     errors.push(issue('error', 'missing_expert', '必须选 1 位专家。场景卡不能没有人设。'))
@@ -190,7 +190,8 @@ export function suggestCombo(
   matchesSceneId: string | null
 } | null {
   const expertId = state.activeExpertId
-  if (!expertId || !getExpert(expertId)) return null
+  const catalog = dataRoot ? loadCatalog(dataRoot) : loadCatalog()
+  if (!expertId || !catalog.experts.some((x) => x.id === expertId)) return null
   if (state.activeSceneId && dataRoot) {
     const scene = getAnyScene(dataRoot, state.activeSceneId)
     if (scene && scene.expertId === expertId) {
@@ -203,8 +204,7 @@ export function suggestCombo(
       }
     }
   }
-  const expert = getExpert(expertId)
-  const catalog = dataRoot ? loadCatalog(dataRoot) : loadCatalog()
+  const expert = catalog.experts.find((x) => x.id === expertId) || null
   const enabledSkills = Object.entries(state.skills)
     .filter(([, v]) => v.enabled)
     .map(([id]) => id)
@@ -256,7 +256,7 @@ export function createUserScene(
   if (!review.ok) {
     throw Object.assign(new Error(review.errors.map((e) => e.message).join('；')), { review })
   }
-  const expert = getExpert(expertId)
+  const expert = catalog.experts.find((x) => x.id === expertId) || null
   const description =
     String(input.description || '').trim() ||
     `召唤${expert?.title || expertId}，搭配 ${skillIds.map((id) => catalog.skills.find((s) => s.id === id)?.name || id).join('、') || '无人手册'}，连接 ${connectorIds.join('、') || '无'}。`

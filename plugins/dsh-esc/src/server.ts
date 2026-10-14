@@ -23,6 +23,18 @@ import {
   publicScenes,
   reviewSceneCombo,
 } from './scenes.js'
+import {
+  UserAssetError,
+  createUserExpert,
+  createUserSkill,
+  deleteUserExpert,
+  deleteUserSkill,
+  importUserSkill,
+  updateUserExpert,
+  updateUserSkill,
+} from './user_assets.js'
+import { recommendSkillsForExpert } from './expert_brief.js'
+import { EXPERT_BODY_FRAMEWORK, expandExpertBody } from './expert_framework.js'
 import { keepOrReplace, normalizeHttpBaseUrl } from './util.js'
 import { PLUGIN_VERSION } from './util.js'
 import { probeMes } from './adapters/mes.js'
@@ -124,12 +136,37 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return data as Record<string, unknown>
 }
 
+function isLoopbackRemoteAddress(req: IncomingMessage): boolean {
+  const raw = String(req.socket.remoteAddress || '')
+    .trim()
+    .toLowerCase()
+  if (!raw) return false
+  return raw === '127.0.0.1' || raw === '::1' || raw === '::ffff:127.0.0.1'
+}
+
 function rejectNonLoopback(req: IncomingMessage, res: ServerResponse): boolean {
+  // Origin 只能拦浏览器跨站；curl 等同机其它用户不带 Origin，必须再验 remoteAddress。
+  if (!isLoopbackRemoteAddress(req)) {
+    send(res, 403, { ok: false, detail: '仅允许本机访问' }, req)
+    return true
+  }
   const origin = requestOrigin(req)
   if (origin && !isLoopbackBrowserOrigin(origin)) {
     send(res, 403, { ok: false, detail: '拒绝非本机 Origin' }, req)
     return true
   }
+  return false
+}
+
+/** 扩写会消耗本机 DeepSeek Key：同进程简单节流，降低被同机滥刷的风险。 */
+let lastExpandBodyAt = 0
+function rejectExpandBodyRateLimit(res: ServerResponse, req: IncomingMessage): boolean {
+  const now = Date.now()
+  if (now - lastExpandBodyAt < 1500) {
+    send(res, 429, { ok: false, code: 'rate_limited', detail: '扩写过于频繁，请稍后再试' }, req)
+    return true
+  }
+  lastExpandBodyAt = now
   return false
 }
 
@@ -184,9 +221,241 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (rejectNonLoopback(req, res)) return
 
-  // 预制专家 / 技能 / 连接器 / 场景列表（含本机自建卡与已安装 SkillHub）
+  // 预制专家 / 技能 / 连接器 / 场景列表（含本机自建卡、自建专家/技能与已安装 SkillHub）
   if (method === 'GET' && path === '/api/catalog') {
     send(res, 200, { ok: true, ...publicCatalog(publicScenes(cfg.dataRoot), cfg.dataRoot) }, req)
+    return
+  }
+
+  // 人设框架示例（只读）
+  if (method === 'GET' && path === '/api/experts/framework') {
+    send(res, 200, { ok: true, framework: EXPERT_BODY_FRAMEWORK }, req)
+    return
+  }
+
+  // 按固定框架 AI 扩写人设（凭证只读系统配置 deepseek）
+  if (method === 'POST' && path === '/api/experts/expand-body') {
+    if (rejectExpandBodyRateLimit(res, req)) return
+    try {
+      const body = await readJson(req)
+      const out = await expandExpertBody({
+        title: String(body.title || ''),
+        role: String(body.role || ''),
+        tags: Array.isArray(body.tags) ? body.tags.map((x) => String(x)) : String(body.tags || '')
+          .split(/[,，]/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+        body: String(body.body || ''),
+      })
+      send(res, 200, { ok: true, body: out.body }, req)
+    } catch (e) {
+      const code =
+        e && typeof e === 'object' && 'code' in e && typeof (e as { code: unknown }).code === 'string'
+          ? (e as { code: string }).code
+          : 'llm_failed'
+      send(res, 400, { ok: false, code, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  // 按人设推荐技能（无人设则拒绝盲目推荐；可不选）
+  if (method === 'POST' && path === '/api/experts/recommend-skills') {
+    try {
+      const body = await readJson(req)
+      const out = recommendSkillsForExpert(cfg.dataRoot, {
+        title: String(body.title || ''),
+        role: String(body.role || ''),
+        tags: Array.isArray(body.tags) ? body.tags.map((x) => String(x)) : String(body.tags || '')
+          .split(/[,，]/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+        body: String(body.body || ''),
+      })
+      send(res, 200, { ok: out.ok, detail: out.detail, items: out.items }, req)
+    } catch (e) {
+      send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  // 本机自建专家
+  if (method === 'POST' && path === '/api/experts' && !path.includes('/summon') && !path.includes('/unsummon')) {
+    try {
+      const body = await readJson(req)
+      const expert = createUserExpert(cfg.dataRoot, {
+        title: String(body.title || ''),
+        role: String(body.role || ''),
+        tags: Array.isArray(body.tags) ? body.tags.map((x) => String(x)) : String(body.tags || '')
+          .split(/[,，]/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+        body: String(body.body || ''),
+        preferredSkillIds: Array.isArray(body.preferredSkillIds) ? body.preferredSkillIds.map((x) => String(x)) : [],
+        preferredConnectorIds: Array.isArray(body.preferredConnectorIds)
+          ? body.preferredConnectorIds.map((x) => String(x))
+          : [],
+        avatar: String(body.avatar || ''),
+      })
+      notify()
+      send(res, 200, { ok: true, expert }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'create_failed'
+      send(res, 400, { ok: false, code, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  const expertIdPath = path.match(/^\/api\/experts\/([^/]+)$/)
+  if (expertIdPath && method === 'PUT') {
+    try {
+      const body = await readJson(req)
+      const expert = updateUserExpert(cfg.dataRoot, decodeURIComponent(expertIdPath[1]), {
+        title: String(body.title || ''),
+        role: String(body.role || ''),
+        tags: Array.isArray(body.tags) ? body.tags.map((x) => String(x)) : String(body.tags || '')
+          .split(/[,，]/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+        body: String(body.body || ''),
+        preferredSkillIds: Array.isArray(body.preferredSkillIds) ? body.preferredSkillIds.map((x) => String(x)) : [],
+        preferredConnectorIds: Array.isArray(body.preferredConnectorIds)
+          ? body.preferredConnectorIds.map((x) => String(x))
+          : [],
+        avatar: String(body.avatar || ''),
+      })
+      notify()
+      send(res, 200, { ok: true, expert }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'update_failed'
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code,
+          detail: e instanceof Error ? e.message : String(e),
+          sceneIds: e instanceof UserAssetError ? e.sceneIds : undefined,
+        },
+        req,
+      )
+    }
+    return
+  }
+
+  if (expertIdPath && method === 'DELETE') {
+    try {
+      await deleteUserExpert(cfg.dataRoot, decodeURIComponent(expertIdPath[1]))
+      notify()
+      send(res, 200, { ok: true }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'delete_failed'
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code,
+          detail: e instanceof Error ? e.message : String(e),
+          sceneIds: e instanceof UserAssetError ? e.sceneIds : undefined,
+        },
+        req,
+      )
+    }
+    return
+  }
+
+  // 本机自建技能
+  if (method === 'POST' && path === '/api/skills/import') {
+    try {
+      const body = await readJson(req)
+      const skill = importUserSkill(cfg.dataRoot, {
+        markdown: typeof body.markdown === 'string' ? body.markdown : undefined,
+        zipBase64: typeof body.zipBase64 === 'string' ? body.zipBase64 : undefined,
+      })
+      const state = await setSkillEnabled(cfg.dataRoot, skill.id, body.enable === true)
+      notify()
+      send(res, 200, { ok: true, skill, state: publicState(state) }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'import_failed'
+      send(res, 400, { ok: false, code, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  if (method === 'POST' && path === '/api/skills') {
+    try {
+      const body = await readJson(req)
+      const skill = createUserSkill(cfg.dataRoot, {
+        name: String(body.name || ''),
+        description: String(body.description || ''),
+        category: String(body.category || '自建'),
+        icon: String(body.icon || ''),
+        triggers: Array.isArray(body.triggers)
+          ? body.triggers.map((x) => String(x))
+          : String(body.triggers || '')
+              .split(/[,，]/)
+              .map((x) => x.trim())
+              .filter(Boolean),
+        requiredConnectorIds: Array.isArray(body.requiredConnectorIds)
+          ? body.requiredConnectorIds.map((x) => String(x))
+          : [],
+        optionalConnectorIds: Array.isArray(body.optionalConnectorIds)
+          ? body.optionalConnectorIds.map((x) => String(x))
+          : [],
+        body: String(body.body || ''),
+      })
+      const enable = body.enable === true
+      const state = enable ? await setSkillEnabled(cfg.dataRoot, skill.id, true) : loadState(cfg.dataRoot)
+      notify()
+      send(res, 200, { ok: true, skill, state: publicState(state) }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'create_failed'
+      send(res, 400, { ok: false, code, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  const skillIdPath = path.match(/^\/api\/skills\/([^/]+)$/)
+  if (skillIdPath && method === 'PUT') {
+    try {
+      const body = await readJson(req)
+      const skill = updateUserSkill(cfg.dataRoot, decodeURIComponent(skillIdPath[1]), {
+        name: String(body.name || ''),
+        description: String(body.description || ''),
+        category: String(body.category || '自建'),
+        icon: String(body.icon || ''),
+        triggers: Array.isArray(body.triggers)
+          ? body.triggers.map((x) => String(x))
+          : String(body.triggers || '')
+              .split(/[,，]/)
+              .map((x) => x.trim())
+              .filter(Boolean),
+        requiredConnectorIds: Array.isArray(body.requiredConnectorIds)
+          ? body.requiredConnectorIds.map((x) => String(x))
+          : [],
+        optionalConnectorIds: Array.isArray(body.optionalConnectorIds)
+          ? body.optionalConnectorIds.map((x) => String(x))
+          : [],
+        body: String(body.body || ''),
+      })
+      notify()
+      send(res, 200, { ok: true, skill }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'update_failed'
+      send(res, 400, { ok: false, code, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
+    return
+  }
+
+  if (skillIdPath && method === 'DELETE') {
+    try {
+      await deleteUserSkill(cfg.dataRoot, decodeURIComponent(skillIdPath[1]))
+      notify()
+      send(res, 200, { ok: true }, req)
+    } catch (e) {
+      const code = e instanceof UserAssetError ? e.code : 'delete_failed'
+      send(res, 400, { ok: false, code, detail: e instanceof Error ? e.message : String(e) }, req)
+    }
     return
   }
 

@@ -76,6 +76,7 @@ function migrateJob(raw: CursorCodingJob): CursorCodingJob {
     review_in_scope: raw.review_in_scope || [],
     review_deleted: raw.review_deleted || [],
     review_deferred: raw.review_deferred || [],
+    review_gate: raw.review_gate ?? null,
     events: raw.events || [],
   }
 }
@@ -109,6 +110,7 @@ export function jobCardView(job: CursorCodingJob): Record<string, unknown> {
     review_in_scope: job.review_in_scope || [],
     review_deleted: job.review_deleted || [],
     review_deferred: job.review_deferred || [],
+    review_gate: job.review_gate ?? null,
     synced_files: job.synced_files || [],
     updated_at: job.updated_at,
     chat_conclusion: formatChatConclusion(job),
@@ -182,6 +184,7 @@ export function createJob(input: {
     review_in_scope: [],
     review_deleted: [],
     review_deferred: [],
+    review_gate: null,
     cancelled: false,
   }
   saveJob(job)

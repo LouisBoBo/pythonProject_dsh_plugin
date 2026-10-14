@@ -1,7 +1,7 @@
 /**
  * 本机 loopback API 的浏览器访问闸门。
  * - 服务只绑 127.0.0.1，但 CORS=* 时恶意网页仍可 CSRF / 读响应。
- * - 规则：带 Origin 时必须是 localhost/127.0.0.1；无 Origin（Node/curl）放行。
+ * - 规则：remoteAddress 必须为本机；带 Origin 时必须是 localhost/127.0.0.1。
  */
 import type { IncomingMessage } from 'node:http'
 
@@ -20,8 +20,16 @@ export function isLoopbackBrowserOrigin(origin: string): boolean {
   }
 }
 
-/** 浏览器跨域：仅本机 Origin；无 Origin（插件内 Node fetch / 自检）视为可信 */
+export function isLoopbackRemoteAddress(req: IncomingMessage): boolean {
+  const raw = String(req.socket?.remoteAddress || '')
+    .trim()
+    .toLowerCase()
+  return raw === '127.0.0.1' || raw === '::1' || raw === '::ffff:127.0.0.1'
+}
+
+/** 本机 remote +（若有 Origin）仅本机 Origin；无 Origin 的本机 Node/curl 放行 */
 export function browserOriginAllowed(req: IncomingMessage): boolean {
+  if (!isLoopbackRemoteAddress(req)) return false
   const origin = requestOrigin(req)
   if (!origin) return true
   return isLoopbackBrowserOrigin(origin)

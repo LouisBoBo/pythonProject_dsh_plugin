@@ -12,6 +12,80 @@ window.__ModuleLoader__.load({
 
     var PLUGIN_ID = '@zhongruan/dsh-esc'
     var WORKSPACE_EVENT = '@lemoncat7/dsh-plugin-ui/workspace-activate'
+    /** apply() 里挂上，创建技能时关掉面板回到对话 */
+    var escWorkspace = null
+    var CREATE_SKILL_CHAT_DRAFT =
+      '请帮我创建一个 ESC 技能：\n' +
+      '- 名称：\n' +
+      '- 何时用（触发词）：\n' +
+      '- 步骤：\n' +
+      '- 需要的连接器（如 mes / mcp-chart，没有可写无）：'
+
+    function flashToast(ok, text) {
+      ensureCss()
+      if (typeof document === 'undefined') return
+      var el = document.createElement('div')
+      el.className = 'esc-toast' + (ok ? ' ok' : ok === false ? ' err' : '')
+      el.textContent = text
+      document.body.appendChild(el)
+      setTimeout(function () {
+        if (el.parentNode) el.parentNode.removeChild(el)
+      }, 3200)
+    }
+
+    /** 尽量把草稿写入对话输入框（textarea / contenteditable）。 */
+    function tryFillComposer(text) {
+      if (typeof document === 'undefined') return false
+      var nodes = Array.prototype.slice.call(document.querySelectorAll('textarea, [contenteditable="true"]'))
+      var best = null
+      var bestArea = 0
+      nodes.forEach(function (el) {
+        if (!el || !el.getBoundingClientRect) return
+        if (el.closest && (el.closest('.esc-dialog') || el.closest('.esc-modal') || el.closest('.esc-root'))) return
+        var r = el.getBoundingClientRect()
+        if (r.width < 160 || r.height < 28 || r.bottom < 0 || r.top > window.innerHeight) return
+        var area = r.width * r.height
+        if (area > bestArea) {
+          bestArea = area
+          best = el
+        }
+      })
+      if (!best) return false
+      try {
+        best.focus()
+      } catch (e) {}
+      var tag = String(best.tagName || '').toUpperCase()
+      if (tag === 'TEXTAREA' || tag === 'INPUT') {
+        var desc = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')
+          || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+        if (desc && desc.set) desc.set.call(best, text)
+        else best.value = text
+        best.dispatchEvent(new Event('input', { bubbles: true }))
+        best.dispatchEvent(new Event('change', { bubbles: true }))
+        return true
+      }
+      try {
+        document.execCommand('selectAll', false, null)
+        document.execCommand('insertText', false, text)
+        return true
+      } catch (e2) {
+        best.textContent = text
+        best.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      }
+    }
+
+    /** 创建技能主路径：关面板 → 回对话 → 预填草稿（不弹表单）。 */
+    function beginCreateSkillViaChat() {
+      if (escWorkspace && typeof escWorkspace.close === 'function') escWorkspace.close()
+      setTimeout(function () {
+        var filled = tryFillComposer(CREATE_SKILL_CHAT_DRAFT)
+        flashToast(
+          true,
+          filled ? '已回到对话，补全后发送即可创建技能' : '请在对话里描述要创建的技能并发送',
+        )
+      }, 80)
+    }
 
     function servicePort() {
       try {
@@ -119,8 +193,14 @@ window.__ModuleLoader__.load({
       '.esc-btn{padding:7px 12px;border-radius:8px;border:1px solid var(--esc-border);background:#fff;cursor:pointer;font:inherit}' +
       '.esc-btn.primary{background:#111827;border-color:transparent;color:#fff}' +
       '.esc-btn:disabled{opacity:.5;cursor:not-allowed}' +
+      '.esc-btn.icon{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-radius:8px;color:#4b5563}' +
+      '.esc-btn.icon:hover:not(:disabled){background:#f3f4f6;color:#111827}' +
+      '.esc-btn.icon:disabled{opacity:.45}' +
+      '.esc-btn.icon .esc-spin{width:14px;height:14px;border-width:2px}' +
       '.esc-field{display:flex;flex-direction:column;gap:6px;margin:0}' +
-      '.esc-field input,.esc-field select{padding:8px 10px;border-radius:8px;border:1px solid var(--esc-border);font:inherit}' +
+      '.esc-field input,.esc-field select,.esc-field textarea{padding:8px 10px;border-radius:8px;border:1px solid var(--esc-border);font:inherit}' +
+      '.esc-field textarea{min-height:120px;resize:vertical;line-height:1.5}' +
+      '.esc-field textarea::placeholder{color:var(--text-tertiary,#9ca3af);white-space:pre-wrap}' +
       '.esc-hint{font-size:12px;color:var(--esc-text3);margin:0 0 12px}' +
       '.esc-toast{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483000;padding:8px 14px;border-radius:8px;background:#111827;color:#fff}' +
       '.esc-card.summoned{outline:2px solid #86efac}' +
@@ -189,6 +269,24 @@ window.__ModuleLoader__.load({
         h('circle', { cx: '6', cy: '6', r: '2.2', stroke: 'currentColor', strokeWidth: '1.2' }),
         h('rect', { x: '9.2', y: '8.8', width: '4.4', height: '4.4', rx: '1', stroke: 'currentColor', strokeWidth: '1.2' }),
         h('path', { d: 'M8 6h3.5M6 8v3', stroke: 'currentColor', strokeWidth: '1.2', strokeLinecap: 'round' }),
+      ])
+    }
+    /** AI 扩写：星芒小图标 */
+    function AiSparkIcon(size) {
+      size = size || 16
+      return svgEl({ width: size, height: size, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' }, [
+        h('path', {
+          d: 'M8 1.6l1.05 3.55L12.6 6.2l-3.55 1.05L8 10.8 6.95 7.25 3.4 6.2l3.55-1.05L8 1.6z',
+          stroke: 'currentColor',
+          strokeWidth: '1.2',
+          strokeLinejoin: 'round',
+        }),
+        h('path', {
+          d: 'M12.2 9.4l.55 1.85 1.85.55-1.85.55-.55 1.85-.55-1.85-1.85-.55 1.85-.55.55-1.85z',
+          stroke: 'currentColor',
+          strokeWidth: '1.1',
+          strokeLinejoin: 'round',
+        }),
       ])
     }
     /** 技能下载安装转圈 */
@@ -264,6 +362,15 @@ window.__ModuleLoader__.load({
       var skillSourceState = useState('company')
       var skillSource = skillSourceState[0]
       var setSkillSource = skillSourceState[1]
+      var expertSourceState = useState('company')
+      var expertSource = expertSourceState[0]
+      var setExpertSource = expertSourceState[1]
+      var expertFormState = useState(null)
+      var expertForm = expertFormState[0]
+      var setExpertForm = expertFormState[1]
+      var skillFormState = useState(null)
+      var skillForm = skillFormState[0]
+      var setSkillForm = skillFormState[1]
       var hubPageState = useState(1)
       var hubPage = hubPageState[0]
       var setHubPage = hubPageState[1]
@@ -443,10 +550,220 @@ window.__ModuleLoader__.load({
       var summonedExpertIds = (state.summonedExpertIds || []).slice()
       var skills = state.skills || {}
       var connectors = state.connectors || {}
-      var limits = catalog.limits || { maxSkills: 3, maxConnectors: 3 }
+      var limits = catalog.limits || { maxSkills: 3, maxConnectors: 3, maxUserExperts: 20, maxUserSkills: 30 }
 
       function skillInUse(id) {
         return !!(skills[id] && skills[id].enabled)
+      }
+
+      var DEFAULT_EXPERT_FRAMEWORK =
+        '你是【身份：岗位 + 几年经验 / 熟悉什么】。读者是【主管 / 工艺 / 质量 / …】。语气【专业、短句、表格优先】。不写代码、不部署、不闲聊。\n\n' +
+        '职责边界：\n' +
+        '1. 做什么：【本专家负责的分析 / 评审 / 辅导范围】\n' +
+        '2. 不做什么：【明确排除项；查数步骤放技能手册，这里不写 kind、不写几节几张图】\n' +
+        '3. 证据与禁编造：只解读当前技能 SOP 允许且工具已返回的数字；失败写 error.code，禁止编造。\n' +
+        '4. 与其它能力并存：【例如未召唤本专家时不抢 mes_pcb】\n\n' +
+        '## 排版\n\n' +
+        '- 能成表的一律表格；不能成表用短段落，每段一个判断。\n' +
+        '- 禁止大段连续叙述。\n'
+
+      function expertFrameworkText() {
+        return (data && data.catalog && data.catalog.expertBodyFramework) || DEFAULT_EXPERT_FRAMEWORK
+      }
+
+      function openExpertForm(prefill) {
+        var isEdit = !!(prefill && prefill.id)
+        var bodyText = (prefill && (prefill.body || prefill.preview)) || ''
+        setExpertForm({
+          id: (prefill && prefill.id) || '',
+          title: (prefill && prefill.title) || '',
+          role: (prefill && prefill.role) || '',
+          tags: ((prefill && prefill.tags) || []).join('，'),
+          // 新建人设为空，框架只当 placeholder；编辑保留原文。技能与连接器不在本表单配置。
+          body: bodyText || '',
+          expandBusy: false,
+        })
+      }
+
+      function expandExpertBodyAi() {
+        if (!expertForm) return
+        if (!String(expertForm.title || '').trim()) {
+          toastMsg(false, '请先填写专家名称')
+          return
+        }
+        var brief = {
+          title: expertForm.title,
+          role: expertForm.role,
+          tags: String(expertForm.tags || '')
+            .split(/[,，]/)
+            .map(function (x) {
+              return x.trim()
+            })
+            .filter(Boolean),
+          body: expertForm.body || expertFrameworkText(),
+        }
+        setExpertForm(function (prev) {
+          return prev ? Object.assign({}, prev, { expandBusy: true }) : prev
+        })
+        fetchJson(serviceBase() + '/api/experts/expand-body', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(brief),
+        })
+          .then(function (r) {
+            if (!r.ok) {
+              var detail = r.d.detail || '扩写失败'
+              if (detail === 'not found') detail = '本机服务版本过旧，请 ⌘⇧R 强刷或重启宿主后再试'
+              throw new Error(detail)
+            }
+            setExpertForm(function (prev) {
+              if (!prev) return prev
+              return Object.assign({}, prev, { body: r.d.body || prev.body, expandBusy: false })
+            })
+            toastMsg(true, '已按框架扩写人设')
+          })
+          .catch(function (e) {
+            setExpertForm(function (prev) {
+              return prev ? Object.assign({}, prev, { expandBusy: false }) : prev
+            })
+            toastMsg(false, String(e.message || e))
+          })
+      }
+
+      function openSkillForm(prefill) {
+        setSkillForm({
+          id: (prefill && prefill.id) || '',
+          name: (prefill && prefill.name) || '',
+          description: (prefill && prefill.description) || '',
+          category: (prefill && prefill.category) || '自建',
+          triggers: ((prefill && prefill.triggers) || []).join('，'),
+          requiredConnectorIds: ((prefill && prefill.requiredConnectorIds) || []).slice(),
+          optionalConnectorIds: ((prefill && prefill.optionalConnectorIds) || []).slice(),
+          body: (prefill && (prefill.sop || prefill.body)) || '',
+          enable: !(prefill && prefill.id),
+        })
+      }
+
+      function saveExpertForm() {
+        if (!expertForm) return
+        var payload = {
+          title: expertForm.title,
+          role: expertForm.role,
+          tags: String(expertForm.tags || '')
+            .split(/[,，]/)
+            .map(function (x) {
+              return x.trim()
+            })
+            .filter(Boolean),
+          body: expertForm.body,
+          preferredSkillIds: [],
+          preferredConnectorIds: [],
+        }
+        run(function () {
+          var url = expertForm.id
+            ? serviceBase() + '/api/experts/' + encodeURIComponent(expertForm.id)
+            : serviceBase() + '/api/experts'
+          return fetchJson(url, {
+            method: expertForm.id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).then(function (r) {
+            if (!r.ok) throw new Error(r.d.detail || '保存专家失败')
+            setExpertForm(null)
+            setExpertSource('mine')
+            setCatalogStamp(function (n) {
+              return n + 1
+            })
+          })
+        }, expertForm.id ? '已更新专家' : '已创建专家')
+      }
+
+      function saveSkillForm() {
+        if (!skillForm) return
+        var payload = {
+          name: skillForm.name,
+          description: skillForm.description,
+          category: skillForm.category || '自建',
+          triggers: String(skillForm.triggers || '')
+            .split(/[,，]/)
+            .map(function (x) {
+              return x.trim()
+            })
+            .filter(Boolean),
+          requiredConnectorIds: skillForm.requiredConnectorIds || [],
+          optionalConnectorIds: skillForm.optionalConnectorIds || [],
+          body: skillForm.body,
+          enable: !!skillForm.enable,
+        }
+        run(function () {
+          var url = skillForm.id
+            ? serviceBase() + '/api/skills/' + encodeURIComponent(skillForm.id)
+            : serviceBase() + '/api/skills'
+          return fetchJson(url, {
+            method: skillForm.id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).then(function (r) {
+            if (!r.ok) throw new Error(r.d.detail || '保存技能失败')
+            setSkillForm(null)
+            setSkillSource('created')
+            setCatalogStamp(function (n) {
+              return n + 1
+            })
+          })
+        }, skillForm.id ? '已更新技能' : '已创建技能')
+      }
+
+      function removeExpert(id) {
+        if (!window.confirm('删除这位自建专家？删除后不可恢复。')) return
+        run(function () {
+          return fetchJson(serviceBase() + '/api/experts/' + encodeURIComponent(id), { method: 'DELETE' }).then(function (r) {
+            if (!r.ok) throw new Error(r.d.detail || '删除失败')
+            setCatalogStamp(function (n) {
+              return n + 1
+            })
+          })
+        }, '已删除专家')
+      }
+
+      function removeUserSkill(id) {
+        if (!window.confirm('删除这个自建技能？删除后不可恢复。')) return
+        run(function () {
+          return fetchJson(serviceBase() + '/api/skills/' + encodeURIComponent(id), { method: 'DELETE' }).then(function (r) {
+            if (!r.ok) throw new Error(r.d.detail || '删除失败')
+            if (skillDetailId === id) setSkillDetailId(null)
+            setCatalogStamp(function (n) {
+              return n + 1
+            })
+          })
+        }, '已删除技能')
+      }
+
+      function importSkillFile(file) {
+        if (!file) return
+        var reader = new FileReader()
+        reader.onload = function () {
+          var result = reader.result || ''
+          var isZip = /\.zip$/i.test(file.name) || String(file.type || '').indexOf('zip') >= 0
+          var payload = isZip
+            ? { zipBase64: String(result).split(',').pop(), enable: true }
+            : { markdown: typeof result === 'string' ? result : '', enable: true }
+          run(function () {
+            return fetchJson(serviceBase() + '/api/skills/import', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            }).then(function (r) {
+              if (!r.ok) throw new Error(r.d.detail || '导入失败')
+              setSkillSource('created')
+              setCatalogStamp(function (n) {
+                return n + 1
+              })
+            })
+          }, '已导入技能')
+        }
+        if (/\.zip$/i.test(file.name)) reader.readAsDataURL(file)
+        else reader.readAsText(file)
       }
 
       function issueList(review) {
@@ -735,57 +1052,151 @@ window.__ModuleLoader__.load({
           ),
         ])
       } else if (tab === 'experts') {
-        body = h(
-          'div',
-          { className: 'esc-grid' },
-          (catalog.experts || [])
-            .filter(function (x) {
-              return hit([x.title, x.role, x.author, (x.tags || []).join(' '), x.preview].join(' '))
-            })
-            .map(function (x) {
-              var summoned = summonedExpertIds.indexOf(x.id) >= 0
-              return h('div', { key: x.id, className: 'esc-card' + (summoned ? ' summoned' : '') }, [
-                h('div', { className: 'esc-card-hd' }, [
-                  Avatar(x.avatar, (x.title || '?').slice(0, 1), false),
-                  h('div', null, [
-                    h('h3', null, x.title),
-                    h('p', { className: 'esc-muted' }, (x.author || x.role || '公司预制') + (x.role ? ' · ' + x.role : '')),
-                  ]),
-                ]),
-                h('p', { className: 'esc-desc' }, x.preview || ''),
-                h(
-                  'div',
-                  { className: 'esc-tags' },
-                  (x.tags || []).map(function (t) {
-                    return h('span', { key: t, className: 'esc-tag' }, t)
-                  }),
-                ),
-                h('div', { className: 'esc-actions' }, [
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'esc-summon' + (summoned ? ' on' : ''),
-                      disabled: busy,
-                      title: summoned ? '点击取消召唤' : '召唤该专家',
-                      onClick: function () {
-                        toggleSummonExpert(x.id, x.title, summoned)
-                      },
-                    },
-                    summoned ? '已召唤' : '召唤',
-                  ),
-                ]),
-              ])
-            }),
-        )
+        var companyExperts = (catalog.experts || []).filter(function (x) {
+          return x.source !== 'user'
+        })
+        var myExperts = (catalog.experts || []).filter(function (x) {
+          return x.source === 'user'
+        })
+        var expertRows = (expertSource === 'mine' ? myExperts : companyExperts).filter(function (x) {
+          return hit([x.title, x.role, x.author, (x.tags || []).join(' '), x.preview].join(' '))
+        })
+        var expertSourceBar = h('div', { className: 'esc-source' }, [
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'esc-source-btn' + (expertSource === 'mine' ? ' on' : ''),
+              onClick: function () {
+                setExpertSource('mine')
+              },
+            },
+            '我的专家' + (myExperts.length ? ' · ' + myExperts.length : ''),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'esc-source-btn' + (expertSource === 'company' ? ' on' : ''),
+              onClick: function () {
+                setExpertSource('company')
+              },
+            },
+            '公司预制',
+          ),
+        ])
+        body = h('div', null, [
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' } }, [
+            expertSourceBar,
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'esc-btn primary',
+                disabled: busy,
+                onClick: function () {
+                  openExpertForm(null)
+                },
+              },
+              '创建专家',
+            ),
+          ]),
+          h(
+            'p',
+            { className: 'esc-hint' },
+            expertSource === 'mine'
+              ? '本机自建专家（最多 ' + (limits.maxUserExperts || 20) + ' 位）。写清人设与边界；操作步骤请放到技能里。'
+              : '公司预制专家，点召唤后可在对话里选用。',
+          ),
+          expertRows.length
+            ? h(
+                'div',
+                { className: 'esc-grid' },
+                expertRows.map(function (x) {
+                  var summoned = summonedExpertIds.indexOf(x.id) >= 0
+                  var isUser = x.source === 'user'
+                  return h('div', { key: x.id, className: 'esc-card' + (summoned ? ' summoned' : '') }, [
+                    h('div', { className: 'esc-card-hd' }, [
+                      Avatar(x.avatar, (x.title || '?').slice(0, 1), false),
+                      h('div', null, [
+                        h('h3', null, x.title + (isUser ? ' · 自建' : '')),
+                        h('p', { className: 'esc-muted' }, (x.author || x.role || '公司预制') + (x.role ? ' · ' + x.role : '')),
+                      ]),
+                    ]),
+                    h('p', { className: 'esc-desc' }, x.preview || ''),
+                    h(
+                      'div',
+                      { className: 'esc-tags' },
+                      (x.tags || []).map(function (t) {
+                        return h('span', { key: t, className: 'esc-tag' }, t)
+                      }),
+                    ),
+                    h('div', { className: 'esc-actions' }, [
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'esc-summon' + (summoned ? ' on' : ''),
+                          disabled: busy,
+                          title: summoned ? '点击取消召唤' : '召唤该专家',
+                          onClick: function () {
+                            toggleSummonExpert(x.id, x.title, summoned)
+                          },
+                        },
+                        summoned ? '已召唤' : '召唤',
+                      ),
+                      isUser
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'esc-btn',
+                              disabled: busy,
+                              onClick: function () {
+                                openExpertForm(x)
+                              },
+                            },
+                            '编辑',
+                          )
+                        : null,
+                      isUser
+                        ? h(
+                            'button',
+                            {
+                              type: 'button',
+                              className: 'esc-btn',
+                              disabled: busy,
+                              onClick: function () {
+                                removeExpert(x.id)
+                              },
+                            },
+                            '删除',
+                          )
+                        : null,
+                    ]),
+                  ])
+                }),
+              )
+            : h(
+                'p',
+                { className: 'esc-hint' },
+                expertSource === 'mine' ? '还没有自建专家。点右上角「创建专家」。' : '没有匹配的预制专家。',
+              ),
+        ])
       } else if (tab === 'skills') {
         var companySkills = (catalog.skills || []).filter(function (s) {
-          return s.source !== 'skillhub'
+          return s.source !== 'skillhub' && s.source !== 'user'
+        })
+        var createdSkills = (catalog.skills || []).filter(function (s) {
+          return s.source === 'user'
         })
         var mySkillsAll = (catalog.skills || []).filter(function (s) {
           return skillInUse(s.id)
         })
         var mySkillRows = mySkillsAll.filter(function (s) {
+          return hit((s.name || '') + (s.description || '') + ((s.triggers || []).join(' ')))
+        })
+        var createdSkillRows = createdSkills.filter(function (s) {
           return hit((s.name || '') + (s.description || '') + ((s.triggers || []).join(' ')))
         })
         var sourceBar = h('div', { className: 'esc-source' }, [
@@ -800,6 +1211,18 @@ window.__ModuleLoader__.load({
               },
             },
             '我的技能' + (mySkillsAll.length ? ' · ' + mySkillsAll.length : ''),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'esc-source-btn' + (skillSource === 'created' ? ' on' : ''),
+              onClick: function () {
+                setSkillSource('created')
+                setChip('全部')
+              },
+            },
+            '我创建的' + (createdSkills.length ? ' · ' + createdSkills.length : ''),
           ),
           h(
             'button',
@@ -830,6 +1253,7 @@ window.__ModuleLoader__.load({
         function skillCard(s, opts) {
           var on = !!(opts && opts.on != null ? opts.on : skillInUse(s.id))
           var isHub = s.source === 'skillhub' || !!(opts && opts.hub)
+          var isUser = s.source === 'user'
           return h(
             'div',
             {
@@ -857,6 +1281,7 @@ window.__ModuleLoader__.load({
                   h('h3', null, [
                     s.name || s.title,
                     isHub ? h('span', { className: 'esc-hub-badge' }, 'SkillHub') : null,
+                    isUser ? h('span', { className: 'esc-hub-badge' }, '自建') : null,
                   ]),
                   h('p', { className: 'esc-desc' }, s.description || s.summary || ''),
                 ]),
@@ -885,7 +1310,7 @@ window.__ModuleLoader__.load({
             h(
               'p',
               { className: 'esc-hint' },
-              '当前已启用的技能（公司预制 + SkillHub）。点 ✓ 可停用；去「公司预制 / SkillHub」可继续安装。',
+              '当前已启用的技能（公司预制 + 自建 + SkillHub）。点 ✓ 可停用；去「我创建的 / 公司预制 / SkillHub」可继续添加。',
             ),
             mySkillRows.length
               ? h(
@@ -895,7 +1320,62 @@ window.__ModuleLoader__.load({
                     return skillCard(s)
                   }),
                 )
-              : h('p', { className: 'esc-hint' }, '还没有启用中的技能。到「公司预制」或 SkillHub 点 + 启用后，会出现在这里。'),
+              : h('p', { className: 'esc-hint' }, '还没有启用中的技能。到「我创建的」「公司预制」或 SkillHub 点 + 启用后，会出现在这里。'),
+          ])
+        } else if (skillSource === 'created') {
+          body = h('div', null, [
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } }, [
+              sourceBar,
+              h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } }, [
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'esc-btn primary',
+                    disabled: busy,
+                    title: '回到对话创建技能（不弹表单）',
+                    onClick: function () {
+                      beginCreateSkillViaChat()
+                    },
+                  },
+                  '创建技能',
+                ),
+                h(
+                  'label',
+                  { className: 'esc-btn', style: { cursor: busy ? 'not-allowed' : 'pointer' } },
+                  [
+                    '上传手册',
+                    h('input', {
+                      type: 'file',
+                      accept: '.md,.zip,text/markdown,application/zip',
+                      style: { display: 'none' },
+                      disabled: busy,
+                      onChange: function (ev) {
+                        var f = ev.target.files && ev.target.files[0]
+                        ev.target.value = ''
+                        if (f) importSkillFile(f)
+                      },
+                    }),
+                  ],
+                ),
+              ]),
+            ]),
+            h(
+              'p',
+              { className: 'esc-hint' },
+              '本机自建技能（最多 ' +
+                (limits.maxUserSkills || 30) +
+                ' 个）。点「创建技能」会回到对话里创建（与豆包/WorkBuddy 一致）；也可直接在对话里说，或上传含 SKILL.md 的手册/zip。已有技能可在详情里编辑。',
+            ),
+            createdSkillRows.length
+              ? h(
+                  'div',
+                  { className: 'esc-grid' },
+                  createdSkillRows.map(function (s) {
+                    return skillCard(s)
+                  }),
+                )
+              : h('p', { className: 'esc-hint' }, '还没有自建技能。点「创建技能」去对话里创建，或「上传手册」。'),
           ])
         } else if (skillSource === 'skillhub') {
           var hubCats = [{ key: '', label: '全部' }].concat(hub.categories || [])
@@ -1297,7 +1777,7 @@ window.__ModuleLoader__.load({
                             setCreate(Object.assign({}, create, { expertId: x.id }))
                           },
                         }),
-                        x.title,
+                        x.title + (x.source === 'user' ? ' · 自建' : ''),
                       ])
                     }),
                   ]),
@@ -1314,7 +1794,8 @@ window.__ModuleLoader__.load({
                             setCreate(Object.assign({}, create, { skillIds: toggleId(create.skillIds, s.id, limits.maxSkills) }))
                           },
                         }),
-                        s.name + (s.source === 'skillhub' ? ' · SkillHub' : ''),
+                        s.name +
+                          (s.source === 'skillhub' ? ' · SkillHub' : s.source === 'user' ? ' · 自建' : ''),
                       ])
                     }),
                   ]),
@@ -1345,6 +1826,238 @@ window.__ModuleLoader__.load({
                         className: 'esc-btn primary',
                         disabled: busy || !create.title.trim() || (liveReview && liveReview.ok === false),
                         onClick: saveCreate,
+                      },
+                      '保存',
+                    ),
+                  ]),
+                ],
+              ),
+            ])
+          : null,
+        expertForm
+          ? h('div', { className: 'esc-modal', onClick: function () { setExpertForm(null) } }, [
+              h(
+                'div',
+                {
+                  className: 'esc-dialog',
+                  onClick: function (ev) {
+                    ev.stopPropagation()
+                  },
+                },
+                [
+                  h('h3', { style: { marginTop: 0 } }, expertForm.id ? '编辑专家' : '创建专家'),
+                  h('p', { className: 'esc-hint' }, '只写人设与边界。技能、连接器请到场景卡里搭配，不要写在这里。'),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '名称'),
+                    h('input', {
+                      value: expertForm.title,
+                      placeholder: '例如 来料检验专家',
+                      onChange: function (ev) {
+                        setExpertForm(Object.assign({}, expertForm, { title: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '岗位'),
+                    h('input', {
+                      value: expertForm.role,
+                      placeholder: '例如 质量',
+                      onChange: function (ev) {
+                        setExpertForm(Object.assign({}, expertForm, { role: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '标签（逗号分隔）'),
+                    h('input', {
+                      value: expertForm.tags,
+                      placeholder: '来料，检验',
+                      onChange: function (ev) {
+                        setExpertForm(Object.assign({}, expertForm, { tags: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h(
+                      'div',
+                      { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' } },
+                      [
+                        h('label', { style: { margin: 0 } }, '人设与边界'),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'esc-btn icon',
+                            disabled: busy || expertForm.expandBusy || !String(expertForm.title || '').trim(),
+                            title:
+                              catalog.llmExpandReady === false
+                                ? '需先在系统配置填写对话模型'
+                                : expertForm.expandBusy
+                                  ? '正在扩写…'
+                                  : 'AI 扩写人设',
+                            'aria-label': expertForm.expandBusy ? '正在扩写' : 'AI 扩写人设',
+                            onClick: expandExpertBodyAi,
+                          },
+                          expertForm.expandBusy ? EscSpin(false) : AiSparkIcon(16),
+                        ),
+                      ],
+                    ),
+                    h('p', { className: 'esc-hint', style: { margin: '4px 0 0' } }, '灰色字是框架提示，开始输入后会消失；也可点右上角 ✦ 扩写（保留「你是 / 职责边界 / 排版」）。'),
+                    h('textarea', {
+                      value: expertForm.body,
+                      rows: 12,
+                      placeholder: expertFrameworkText(),
+                      onChange: function (ev) {
+                        setExpertForm(Object.assign({}, expertForm, { body: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 } }, [
+                    h('button', { type: 'button', className: 'esc-btn', onClick: function () { setExpertForm(null) } }, '取消'),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-btn primary',
+                        disabled: busy || !String(expertForm.title || '').trim() || !String(expertForm.body || '').trim(),
+                        onClick: saveExpertForm,
+                      },
+                      '保存',
+                    ),
+                  ]),
+                ],
+              ),
+            ])
+          : null,
+        skillForm
+          ? h('div', { className: 'esc-modal', onClick: function () { setSkillForm(null) } }, [
+              h(
+                'div',
+                {
+                  className: 'esc-dialog',
+                  onClick: function (ev) {
+                    ev.stopPropagation()
+                  },
+                },
+                [
+                  h('h3', { style: { marginTop: 0 } }, skillForm.id ? '编辑技能' : '创建技能'),
+                  h('p', { className: 'esc-hint' }, '手册只描述步骤与已有工具名（如 zr_esc_mes_query）。不能新增工具或跑脚本。'),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '名称'),
+                    h('input', {
+                      value: skillForm.name,
+                      placeholder: '例如 来料异常分析',
+                      onChange: function (ev) {
+                        setSkillForm(Object.assign({}, skillForm, { name: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '一句话说明'),
+                    h('input', {
+                      value: skillForm.description,
+                      placeholder: '何时用、产出什么',
+                      onChange: function (ev) {
+                        setSkillForm(Object.assign({}, skillForm, { description: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '分类'),
+                    h('input', {
+                      value: skillForm.category,
+                      placeholder: '自建',
+                      onChange: function (ev) {
+                        setSkillForm(Object.assign({}, skillForm, { category: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '触发短语（逗号分隔）'),
+                    h('input', {
+                      value: skillForm.triggers,
+                      placeholder: '来料异常，进料检验',
+                      onChange: function (ev) {
+                        setSkillForm(Object.assign({}, skillForm, { triggers: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '必选连接器'),
+                    (catalog.connectors || []).map(function (c) {
+                      var on = (skillForm.requiredConnectorIds || []).indexOf(c.id) >= 0
+                      return h('label', { key: c.id, className: 'esc-check' }, [
+                        h('input', {
+                          type: 'checkbox',
+                          checked: on,
+                          onChange: function () {
+                            setSkillForm(
+                              Object.assign({}, skillForm, {
+                                requiredConnectorIds: toggleId(skillForm.requiredConnectorIds || [], c.id, 20),
+                              }),
+                            )
+                          },
+                        }),
+                        c.title || c.id,
+                      ])
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '可选连接器'),
+                    (catalog.connectors || []).map(function (c) {
+                      var on = (skillForm.optionalConnectorIds || []).indexOf(c.id) >= 0
+                      return h('label', { key: 'opt-' + c.id, className: 'esc-check' }, [
+                        h('input', {
+                          type: 'checkbox',
+                          checked: on,
+                          onChange: function () {
+                            setSkillForm(
+                              Object.assign({}, skillForm, {
+                                optionalConnectorIds: toggleId(skillForm.optionalConnectorIds || [], c.id, 20),
+                              }),
+                            )
+                          },
+                        }),
+                        c.title || c.id,
+                      ])
+                    }),
+                  ]),
+                  h('div', { className: 'esc-field' }, [
+                    h('label', null, '操作手册（SOP）'),
+                    h('textarea', {
+                      value: skillForm.body,
+                      rows: 10,
+                      placeholder: '1. …\n2. 调用 zr_esc_mes_query，kind=…\n3. 按结构输出…',
+                      onChange: function (ev) {
+                        setSkillForm(Object.assign({}, skillForm, { body: ev.target.value }))
+                      },
+                    }),
+                  ]),
+                  !skillForm.id
+                    ? h('label', { className: 'esc-check' }, [
+                        h('input', {
+                          type: 'checkbox',
+                          checked: !!skillForm.enable,
+                          onChange: function (ev) {
+                            setSkillForm(Object.assign({}, skillForm, { enable: ev.target.checked }))
+                          },
+                        }),
+                        '保存后立即启用',
+                      ])
+                    : null,
+                  h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 } }, [
+                    h('button', { type: 'button', className: 'esc-btn', onClick: function () { setSkillForm(null) } }, '取消'),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-btn primary',
+                        disabled:
+                          busy ||
+                          !String(skillForm.name || '').trim() ||
+                          !String(skillForm.description || '').trim() ||
+                          !String(skillForm.body || '').trim(),
+                        onClick: saveSkillForm,
                       },
                       '保存',
                     ),
@@ -1394,7 +2107,11 @@ window.__ModuleLoader__.load({
                 ),
                 h('div', { className: 'esc-detail-hd' }, [
                   Avatar(icon, (name || '?').slice(0, 1), true),
-                  h('h2', null, [name, isHub ? h('span', { className: 'esc-hub-badge' }, 'SkillHub') : null]),
+                  h('h2', null, [
+                    name,
+                    isHub ? h('span', { className: 'esc-hub-badge' }, 'SkillHub') : null,
+                    detail && detail.source === 'user' ? h('span', { className: 'esc-hub-badge' }, '自建') : null,
+                  ]),
                 ]),
                 detail
                   ? h(
@@ -1443,6 +2160,37 @@ window.__ModuleLoader__.load({
                         },
                       },
                       '卸载',
+                    )
+                  : null,
+                detail && detail.source === 'user'
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-btn',
+                        style: { marginLeft: 8 },
+                        disabled: busy,
+                        onClick: function () {
+                          openSkillForm(detail)
+                          closeDetail()
+                        },
+                      },
+                      '编辑',
+                    )
+                  : null,
+                detail && detail.source === 'user'
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'esc-btn',
+                        style: { marginLeft: 8 },
+                        disabled: busy,
+                        onClick: function () {
+                          removeUserSkill(detail.id)
+                        },
+                      },
+                      '删除',
                     )
                   : null,
                 h('p', { className: 'esc-detail-lead' }, desc),
@@ -1918,6 +2666,7 @@ window.__ModuleLoader__.load({
       }
       ensureCss()
       var workspace = createWorkspace(ctx)
+      escWorkspace = workspace
       if (typeof ctx.effect === 'function') {
         ctx.effect(function () {
           return observePluginWorkspace(PLUGIN_ID, function () {

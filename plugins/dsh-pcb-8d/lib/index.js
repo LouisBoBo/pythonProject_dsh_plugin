@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { DEMO_SCENARIO } from './demo-scenario.js';
+import { assertSafeReportId } from './report_id.js';
 export const name = 'pcb-8d';
 export const inject = ['tools'];
 /** D0–D8 步骤定义 */
@@ -24,7 +25,7 @@ function storeDir() {
     return dir;
 }
 function reportPath(id) {
-    return join(storeDir(), `${id}.json`);
+    return join(storeDir(), `${assertSafeReportId(id)}.json`);
 }
 function newId() {
     const d = new Date();
@@ -112,7 +113,7 @@ function toMarkdown(report) {
 }
 function exportMarkdown(report) {
     const markdown = toMarkdown(report);
-    const filePath = join(storeDir(), `${report.id}.md`);
+    const filePath = join(storeDir(), `${assertSafeReportId(report.id)}.md`);
     writeFileSync(filePath, markdown, 'utf8');
     return { filePath, markdown };
 }

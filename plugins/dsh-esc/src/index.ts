@@ -26,6 +26,7 @@ import { writeFeishuDoc } from './adapters/feishu.js'
 import { searchLexiang, writeLexiangDoc } from './adapters/lexiang.js'
 import { readPublicUrl } from './adapters/web_read.js'
 import { PLUGIN_VERSION, sanitizeMdCaption } from './util.js'
+import { createSkillFromChat } from './skill_chat.js'
 
 export const name = 'esc'
 export const inject = ['tools'] as const
@@ -71,7 +72,7 @@ function registerHarnessHandlers(): void {
         running: isServerRunning(),
         addr: getListenAddr(),
         view: publicConfigView(cfg),
-        catalog: publicCatalog(publicScenes(cfg.dataRoot)),
+        catalog: publicCatalog(publicScenes(cfg.dataRoot), cfg.dataRoot),
         state: publicState(loadState(cfg.dataRoot)),
       }
     })
@@ -573,7 +574,7 @@ export function apply(ctx: Context) {
       name: 'zr_esc_list',
       description:
         '【列出 ESC 专家/技能/连接器】仅当用户问当前专家、已启用技能、连接器是否打开、或要看精选场景时调用。' +
-        '不要用于 MES 查数或写码。参数 ignore 传空字符串。',
+        '新建技能请用 zr_esc_create_skill，不要让用户去侧栏填表。不要用于 MES 查数或写码。参数 ignore 传空字符串。',
       parameters: {
         ignore: { type: 'string', required: true, description: '占位参数，传空字符串即可' },
       },
@@ -591,7 +592,7 @@ export function apply(ctx: Context) {
         const state = loadState(cfg.dataRoot)
         const sid = sessionIdOf(exec)
         const expertId = resolveExpertId(state, sid)
-        const expert = expertId ? getExpert(expertId) : null
+        const expert = expertId ? getExpert(expertId, cfg.dataRoot) : null
         const sess = sid ? state.sessions[sid] : undefined
         const skills = catalog.skills
           .map((s) => `${s.name}${state.skills[s.id]?.enabled ? '（开）' : '（关）'}`)
@@ -605,6 +606,7 @@ export function apply(ctx: Context) {
         return {
           summary: [
             `请到左侧栏「专家·技能·连接器」管理，或在对话输入框旁添加场景卡。本机服务：${isServerRunning() ? '已监听' : '未监听'} ${getListenAddr() || publicConfigView(cfg).addr}`,
+            `新建技能：在对话里说明用途与步骤，调用 zr_esc_create_skill（不要让用户去侧栏「创建技能」表单）。`,
             `当前专家：${expert ? `${expert.title}（${expert.id}）` : '未选择（与 mes_pcb 并存，工艺闲聊可走现网 mes_pcb）'}`,
             `本会话场景卡：${sess?.sceneId || '未绑定（用面板默认）'}`,
             `技能：${skills || '无'}`,
@@ -612,6 +614,76 @@ export function apply(ctx: Context) {
             `场景卡：${scenes}`,
           ].join('\n'),
         }
+      },
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'zr_esc_create_skill',
+      description:
+        '【对话创建 ESC 自建技能·唯一落盘口】用户要「新建/创建/做一个 ESC 技能、手册、SOP」时必须调用本工具。' +
+        '禁止 Bash / 写文件 / Glob / zr_cchat_begin / zr_cchat_*（写码与建技能无关；宿主禁 Bash 改盘时也不要改走写码）。' +
+        '与豆包/WorkBuddy 一致：在对话里完成，不要让用户去侧栏填表。' +
+        '先问清：名称、何时用（触发词）、步骤（可写 zr_esc_mes_query 等已启用连接器工具）、是否需要连接器。' +
+        '信息够了再调用一次；缺名称/说明/手册正文时不要盲建。' +
+        '禁止写进宿主 .dsh/skills；禁止执行脚本；禁止把用户口令写进手册。',
+      parameters: {
+        name: { type: 'string', required: true, description: '技能名称，2～20 字，如「来料异常分析」' },
+        description: { type: 'string', required: true, description: '一句话说明何时用、产出什么，最多 200 字' },
+        body: {
+          type: 'string',
+          required: true,
+          description:
+            '技能手册 Markdown：步骤编号、何时调哪个 zr_esc_*、输出结构。不要写密钥。可含表格模板。',
+        },
+        triggers: {
+          type: 'string',
+          required: true,
+          description: '触发词，逗号分隔，如「来料异常,来料不良」；无可传空字符串',
+        },
+        requiredConnectorIds: {
+          type: 'string',
+          required: true,
+          description: '必选连接器 id，逗号分隔（mes / mcp-chart / mcp-feishu 等）；无可传空字符串',
+        },
+        optionalConnectorIds: {
+          type: 'string',
+          required: true,
+          description: '可选连接器 id，逗号分隔；无可传空字符串',
+        },
+        category: {
+          type: 'string',
+          required: true,
+          description: '分类，默认「自建」；可传空字符串',
+        },
+        enable: {
+          type: 'string',
+          required: true,
+          description: '创建后是否启用：true/false，默认 true；可传空字符串表示启用',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { summary: { type: 'string' } },
+        },
+        render: (_args, value) => textBlocks(value.summary),
+      },
+      async execute(args) {
+        const cfg = loadConfig()
+        const out = await createSkillFromChat(cfg.dataRoot, {
+          name: String(args.name || ''),
+          description: String(args.description || ''),
+          body: String(args.body || ''),
+          triggers: String(args.triggers || ''),
+          requiredConnectorIds: String(args.requiredConnectorIds || ''),
+          optionalConnectorIds: String(args.optionalConnectorIds || ''),
+          category: String(args.category || ''),
+          enable: String(args.enable || ''),
+        })
+        return { summary: out.summary }
       },
     }),
   )
@@ -647,7 +719,7 @@ export function apply(ctx: Context) {
           else await setActiveExpert(cfg.dataRoot, null)
           return { summary: '已清除当前专家与本会话场景卡。下一轮不再注入该人设。' }
         }
-        const expert = getExpert(id)
+        const expert = getExpert(id, cfg.dataRoot)
         if (!expert) return { summary: `未知专家 id「${id}」。请先 zr_esc_list。` }
         if (sid) {
           const prev = loadState(cfg.dataRoot).sessions[sid]
@@ -713,5 +785,7 @@ export function apply(ctx: Context) {
     }),
   )
 
-  console.log('[esc] 插件已加载：zr_esc_list / zr_esc_select_expert / zr_esc_apply_scene；连接器工具按启用态注册')
+  console.log(
+    '[esc] 插件已加载：zr_esc_list / zr_esc_create_skill / zr_esc_select_expert / zr_esc_apply_scene；连接器工具按启用态注册',
+  )
 }

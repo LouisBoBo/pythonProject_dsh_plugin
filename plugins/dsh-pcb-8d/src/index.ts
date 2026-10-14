@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEMO_SCENARIO } from './demo-scenario.js'
+import { assertSafeReportId } from './report_id.js'
 
 export const name = 'pcb-8d'
 export const inject = ['tools'] as const
@@ -42,7 +43,7 @@ function storeDir(): string {
 }
 
 function reportPath(id: string): string {
-  return join(storeDir(), `${id}.json`)
+  return join(storeDir(), `${assertSafeReportId(id)}.json`)
 }
 
 function newId(): string {
@@ -141,7 +142,7 @@ function toMarkdown(report: EightDReport): string {
 
 function exportMarkdown(report: EightDReport): { filePath: string; markdown: string } {
   const markdown = toMarkdown(report)
-  const filePath = join(storeDir(), `${report.id}.md`)
+  const filePath = join(storeDir(), `${assertSafeReportId(report.id)}.md`)
   writeFileSync(filePath, markdown, 'utf8')
   return { filePath, markdown }
 }

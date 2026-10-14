@@ -295,20 +295,19 @@ window.__ModuleLoader__.load({
       return false
     }
 
-    function phaseFromJobStatus(st, detail, inScopeLen) {
+    function phaseFromJobStatus(st, detail, inScopeLen, reviewGate) {
       var s = String(st || '').trim()
       if (TERMINAL_JOB[s]) return 'done'
       if (s === 'pending_review') {
-        var d = String(detail || '')
+        var gate = String(reviewGate || '').trim()
         var n = typeof inScopeLen === 'number' ? inScopeLen : -1
-        // 无可同步 / 待勾选：结束转圈，进入完成或待审 UI（追问与首轮同一状态机）
-        if (
-          /无可同步项|均在范围外|写码已结束|契约文件未/.test(d) ||
-          (n === 0 && /待审|范围外/.test(d))
-        ) {
-          return 'done'
-        }
-        if (/请勾选后同步/.test(d)) return 'review'
+        // 只认 review_gate / 范围内数量；旧账本仅全等编排器固定 detail
+        if (gate === 'auto_applying') return 'running'
+        if (gate === 'auto_failed') return 'review'
+        if (gate === 'await_user') return n === 0 ? 'done' : 'review'
+        if (detail === '自动同步中…') return 'running'
+        if (n === 0) return 'done'
+        if (n > 0) return 'review'
         return 'running'
       }
       if (s) return 'running'
@@ -332,20 +331,20 @@ window.__ModuleLoader__.load({
       return '## 本轮结论\n\n' + body
     }
 
-    function labelFromJobStatus(st, detail, inScopeLen) {
+    function labelFromJobStatus(st, detail, inScopeLen, reviewGate) {
       var s = String(st || '').trim()
       if (s === 'succeeded') return '已完成'
       if (s === 'failed') return '失败'
       if (s === 'cancelled') return '已取消'
       if (s === 'blocked_no_runner') return '无 Runner'
       if (s === 'pending_review') {
-        var d = String(detail || '')
+        var gate = String(reviewGate || '').trim()
         var n = typeof inScopeLen === 'number' ? inScopeLen : -1
-        if (/无可同步项|均在范围外|写码已结束|契约文件未/.test(d) || (n === 0 && /待审|范围外/.test(d))) {
-          return '已完成·有范围外文件'
-        }
-        if (/请勾选后同步/.test(d)) return '待审同步'
-        if (/自动同步失败/.test(d)) return '同步失败'
+        if (gate === 'auto_applying' || detail === '自动同步中…') return '自动同步中'
+        if (gate === 'auto_failed') return '同步失败'
+        if (gate === 'await_user') return n === 0 ? '已完成·有范围外文件' : '待审同步'
+        if (n === 0) return '已完成·有范围外文件'
+        if (n > 0) return '待审同步'
         return '自动同步中'
       }
       if (s === 'syncing') return '自动同步中'
@@ -1443,15 +1442,16 @@ window.__ModuleLoader__.load({
         }
         var detail = String(job.detail || '')
         var inScopeLen = Array.isArray(job.review_in_scope) ? job.review_in_scope.length : -1
-        var nextPhase = phaseFromJobStatus(st, detail, inScopeLen)
-        var nextLabel = labelFromJobStatus(st, detail, inScopeLen)
+        var reviewGate = job.review_gate || null
+        var nextPhase = phaseFromJobStatus(st, detail, inScopeLen, reviewGate)
+        var nextLabel = labelFromJobStatus(st, detail, inScopeLen, reviewGate)
         if (TERMINAL_JOB[st]) sealedStatusRef.current = st
         if (nextPhase === 'done') {
           setPhase('done')
           setStatusLabel(nextLabel || '已完成')
           dialogPinRef.current = false
           stickBottomRef.current = false
-        } else if (nextPhase === 'review' || (st === 'pending_review' && /请勾选/.test(detail))) {
+        } else if (nextPhase === 'review') {
           setPhase('review')
           setStatusLabel(nextLabel || '待审同步')
           dialogPinRef.current = true
@@ -1582,17 +1582,20 @@ window.__ModuleLoader__.load({
                 review_in_scope: data.review_in_scope,
                 review_deleted: data.review_deleted,
                 review_deferred: data.review_deferred,
+                review_gate: data.review_gate,
               })
               if (data.status === 'pending_review') {
-                var dtl = String(data.detail || '')
                 var inN = Array.isArray(data.review_in_scope) ? data.review_in_scope.length : 0
-                if (
-                  /无可同步项|均在范围外|写码已结束|契约文件未/.test(dtl) ||
-                  (inN === 0 && /待审|范围外/.test(dtl))
-                ) {
+                var snapPhase = phaseFromJobStatus(
+                  data.status,
+                  data.detail,
+                  inN,
+                  data.review_gate,
+                )
+                if (snapPhase === 'done') {
                   setPhase('done')
                   setStatusLabel('已完成·有范围外文件')
-                } else if (data.auto_apply) {
+                } else if (snapPhase === 'running' || data.auto_apply || data.review_gate === 'auto_applying') {
                   if (sseMayForceRunning(sealedStatusRef.current)) {
                     setPhase('running')
                     setStatusLabel('自动同步中')
