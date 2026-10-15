@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-knowledge",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "中软知识库：导入 md/txt/pdf/docx；公司共享库仅管理员可见；多引擎端口探活",
   "dshMarket": {
     "zh": "知识库：导入文档；公司共享库仅管理员可见，普通用户不显示",
@@ -94,10 +94,5 @@
   "publishConfig": {
     "access": "restricted",
     "registry": "http://175.178.238.31/dsh-plugins/npm/"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/LouisBoBo/pythonProject_dsh_plugin.git"
-  },
-  "homepage": "https://github.com/LouisBoBo/pythonProject_dsh_plugin#readme"
+  }
 }
