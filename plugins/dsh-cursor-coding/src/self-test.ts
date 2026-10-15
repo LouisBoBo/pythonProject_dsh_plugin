@@ -43,6 +43,7 @@ import {
 import { appendEvent, createJob, findLatestJobForSession, jobCardView, loadJob, onJobChange, patchJob, setStatus } from './jobs.js'
 import {
   hasClarifyEvidence,
+  looksLikeAddOrDeletePageMenu,
   looksLikeFollowUp,
   needsRequirementClarify,
 } from './requirementGate.js'
@@ -143,6 +144,12 @@ async function main() {
     assert(
       needsRequirementClarify('报表中心菜单删除设备维修、设备保养、设备点检报表'),
       '删除菜单/报表入口必须澄清',
+    )
+    assert(!looksLikeAddOrDeletePageMenu('删除废弃路由'), '裸删路由不拦')
+    assert(!looksLikeAddOrDeletePageMenu('添加路由守卫'), '裸加路由守卫不拦')
+    assert(
+      looksLikeAddOrDeletePageMenu('删除设置页面相关路由'),
+      '删页面相关路由仍须澄清',
     )
     assert(
       needsRequirementClarify('报表中心菜单删除设备维修、设备保养、设备点检报表', true),

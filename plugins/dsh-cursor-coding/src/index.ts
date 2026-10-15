@@ -483,8 +483,8 @@ export function apply(ctx: Context) {
     defineTool({
       name: 'zr_cursor_begin',
       description:
-        '【Cursor 写码·主入口】禁止 Bash/Write 直接改用户工程。' +
-        '入口级新增/删除页面·菜单：先 ask_user_question，答完再调本工具（clarified=true）。' +
+        '【Cursor 写码·主入口】改工程代码/修 bug/加接口/改页面·菜单·报表入口时用本工具；禁止 Bash/Write 直接改用户工程。' +
+        '入口级新增/删除页面·菜单·报表入口：先 ask_user_question，答完再调本工具（clarified=true）。' +
         '本工具成功路径是阻塞确认卡，不是空返回；禁止对用户说「已发出确认卡」除非工具卡已出现。' +
         '小改且意图清晰 → 直接本工具出确认卡。本会话已有写码后优先 zr_cursor_continue。',
       parameters: {

@@ -52,9 +52,12 @@ async function main() {
     assert(wantsCreateEscSkill('请帮我创建一个 ESC 技能：\n- 名称：来料异常分析'), 'detect esc skill create template')
     assert(wantsCreateEscSkill('帮我创建一个来料异常分析技能'), 'detect create skill phrase')
     assert(wantsCreateEscSkill('请新建一个来料异常分析技能'), 'detect 请新建 skill phrase')
+    assert(wantsCreateEscSkill('帮我做一个来料异常分析技能'), 'detect 帮我做 skill phrase')
+    assert(wantsCreateEscSkill('请帮我做个 ESC 技能'), 'detect 请帮我做个 skill phrase')
     assert(!wantsCreateEscSkill('查一下来料异常良率'), 'non-create query not matched')
     assert(!wantsCreateEscSkill('请说明创建技能模块的代码结构'), 'meta discuss create-skill not matched')
     assert(!wantsCreateEscSkill('学习创建技能的最佳实践'), 'learning about create-skill not matched')
+    assert(!wantsCreateEscSkill('帮我做个会议纪要'), '做纪要 without 技能 not matched')
     assert(createSkillRouteText().includes('zr_esc_create_skill') && createSkillRouteText().includes('禁止 Bash'), 'create skill route text')
     assert(!expertIdentityReady({ title: '', body: EXPERT_BODY_FRAMEWORK }).ok, 'identity needs title')
     assert(!expertIdentityReady({ title: '来料专家', body: EXPERT_BODY_FRAMEWORK }).ok, 'placeholders not ready')
@@ -203,7 +206,8 @@ async function main() {
 
   {
     const enabled = ['after-sales-ticket', 'test-case-gen', 'mes-ops-analysis']
-    assert(matchSkill('请分析工单 WO-1', enabled, null) === 'after-sales-ticket', 'wo trigger')
+    assert(matchSkill('请分析工单 WO-1', enabled, null) === 'after-sales-ticket', 'wo trigger via WO-')
+    assert(matchSkill('请分析售后工单', enabled, null) === 'after-sales-ticket', 'after-sales phrase')
     assert(matchSkill('帮我出测试用例', enabled, null) === 'test-case-gen', 'test trigger')
     assert(matchSkill('请出生产运营分析', enabled, null) === 'mes-ops-analysis', 'ops trigger')
     assert(matchSkill('今天天气如何', enabled, null) === null, 'no match')
@@ -217,6 +221,10 @@ async function main() {
     assert(matchSkill('看一下 OEE 和稼动率', mesPack, null) === 'mes-oee-capacity', 'oee skill')
     assert(matchSkill('缺料会不会停 SMT', mesPack, null) === 'mes-material-kitting', 'kitting trigger')
     assert(matchSkill('虚焊落在哪道工序', mesPack, null) === 'mes-yield-defect', 'defect trigger')
+    assert(matchSkill('虚焊不良分析', mesPack, null) === 'mes-yield-defect', 'yield not stolen by after-sales')
+    assert(matchSkill('客诉不良分析', mesPack, null) === 'after-sales-ticket', 'after-sales 客诉不良')
+    assert(matchSkill('今天工单在哪', mesPack, null) === 'mes-wo-trace', 'today wo')
+    assert(matchSkill('请分析工单进度', mesPack, null) === 'mes-wo-trace', '工单进度 not stolen by after-sales')
   }
 
   {
@@ -596,6 +604,15 @@ async function main() {
     assert(expertContextText('chat-1', dir).includes('数据分析师'), 'bound expert prompt')
     assert(expertContextText('chat-1', dir).includes('ask_user_question'), 'esc forbids quiz')
     assert(skillCatalogText(dir, 'chat-1').includes('mes-ops-analysis'), 'bound skill catalog')
+    {
+      const cat = skillCatalogText(dir, 'chat-1')
+      assert(!cat.includes('不要调用写码'), 'unmatched catalog must not ban coding')
+      assert(!/禁止\s*Bash/.test(cat), 'unmatched catalog must not ban Bash')
+      assert(cat.includes('zr_cchat_') || cat.includes('zr_cursor_'), 'catalog points coding to cursor tools')
+      const sop = skillSopNoticeText(getSkill('mes-ops-analysis', dir)!, '')
+      assert(/禁止\s*Bash/.test(sop) && sop.includes('zr_cchat_'), 'matched SOP bans Bash/coding tools')
+    }
+    assert(expertContextText('chat-1', dir).includes('zr_cchat_'), 'expert forbids zr_cchat')
     const clearedSess = await clearSessionScene(dir, 'chat-1')
     assert(clearedSess.sessions['chat-1']?.sceneId === null, 'session scene clear')
     let blocked = false

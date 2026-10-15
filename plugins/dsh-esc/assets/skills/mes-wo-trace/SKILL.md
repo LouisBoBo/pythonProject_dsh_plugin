@@ -11,6 +11,8 @@ triggers:
   - 查工单
   - 近日工单
   - 近几天工单
+  - 今天工单
+  - 今日工单
   - 工单状态
   - 工单列表
 requiredConnectorIds:

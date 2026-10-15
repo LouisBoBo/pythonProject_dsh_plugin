@@ -6,9 +6,10 @@ category: 品质质量
 icon: https://api.dicebear.com/9.x/icons/svg?seed=AfterSales&backgroundColor=fee2e2
 triggers:
   - 售后工单
-  - 分析工单
+  - 分析售后工单
   - 客诉
-  - 不良分析
+  - 客诉不良
+  - 售后不良
   - WO-
 requiredConnectorIds:
   - mes

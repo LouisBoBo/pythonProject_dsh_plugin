@@ -2,9 +2,9 @@
  * @zhongruan/dsh-cursor-chat — 对话式多轮写码（与 dsh-cursor-coding 并存、互不影响）
  * 工具名 zr_cchat_*；端口 18789；数据 ~/.zhongruan/cursor-chat。
  *
- * 主路径：用户原话 → 确认卡 → Cursor（薄 prompt）→ 同步 → 正文结论
+ * 主路径：用户原话 →（入口级变更先澄清）→ 确认卡 → Cursor → 同步 → 正文结论
  * 续改：zr_cchat_continue → 优先 Agent.resume 同一 agent_id
- * 不强制旧插件澄清门禁；确认前不写盘。
+ * 确认前不写盘；澄清门与 coding 同源（decideCodingGate，认 ask_user 事件）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
@@ -14,6 +14,7 @@ import { cursorKeyReady, defaultDataRoot, loadConfig, publicConfigView } from '.
 import { findLatestJobForSession, forceCancelJob, jobSummary, listJobs, loadJob, patchJob } from './jobs.js'
 import { applyJobReview, healStalePendingReview } from './orchestrator/runJob.js'
 import { createPendingConfirm, cancelPendingConfirm, loadPendingConfirm } from './pendingConfirm.js'
+import { decideCodingGate, extractSessionEvents } from './clarifyFlow.js'
 import { looksLikeFollowUp } from './requirementGate.js'
 import {
   extractImagesFromExec,
@@ -85,9 +86,16 @@ function truthy(v: unknown): boolean {
   return s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === '确认' || s === 'ok'
 }
 
+/** 入口级变更被拦时：先出选择题，禁止再空调 begin */
+const CLARIFY_AGENT_HINT =
+  '【下一步唯一动作】立刻调用 ask_user_question：按用户原话自拟 2～4 个关键选项（如删范围：仅菜单 / 菜单+路由 / 菜单+页面+接口等），禁止长文反问。' +
+  '禁止再次调用 zr_cchat_begin/continue，直到用户答完。' +
+  '答完后一次调用 begin/continue（clarified=true）；message 尽量带结论。插件会认会话里已答完的选择题并出确认卡。' +
+  '空返回不是确认卡，禁止对用户说「已发出确认卡」。'
+
 const FOLLOWUP_AGENT_HINT =
   '续改：把用户最新原话原样传入 message；优先 zr_cchat_continue（同会话 resume）。' +
-  '确认卡→进度→正文结论。禁止对旧 job 再 finish。'
+  '入口级新增/删除须先 ask_user_question。确认卡→进度→正文结论。禁止对旧 job 再 finish。'
 
 /** 硬规则：凡写码终态必须产出正文结论（begin/continue 收口或 finish 兜底） */
 const FINISH_DONE = new Set(['succeeded', 'failed', 'cancelled', 'blocked_no_runner'])
@@ -503,21 +511,27 @@ export function apply(ctx: Context) {
     defineTool({
       name: 'zr_cchat_begin',
       description:
-        '【Cursor 对话写码·主入口】像跟 Cursor IDE 聊：用户原话 + 可选截图进 Cursor 多模态改盘。' +
-        '禁止 Bash/Write 直接改用户工程。成功路径是阻塞确认卡，不是空返回。' +
-        '用户贴了图：把本机图片绝对路径（或 data URL）放进 images 参数；有图必须传，勿只靠文字复述。' +
-        '本会话已有成功写码后的补充/修正 → 优先 zr_cchat_continue。' +
-        '与 zr_cursor_*（旧写码插件）不同；要「聊着改 / 看图改」用本工具。',
+        '【Cursor 对话写码·主入口】任意本地工作区、不限技术栈：改当前工程代码 / 聊着改 / 看图改。' +
+        'workspace=侧栏当前打开工程的绝对路径（换项目即换路径）；禁止 Bash/Write 直接改盘。' +
+        '成功路径是阻塞确认卡，不是空返回。' +
+        '入口级新增/删除页面·菜单·报表入口：先 ask_user_question，答完再调本工具（clarified=true）。' +
+        '用户贴了图：把本机图片绝对路径（或 data URL）放进 images；有图必须传。' +
+        'MES/售后/测试用例等已命中 ESC 技能时不要用本工具；本会话已有成功写码后优先 zr_cchat_continue。' +
+        '与 zr_cursor_* 不同；日常「聊着改 / 看图改」用本工具。',
       parameters: {
         workspace: {
           type: 'string',
           required: true,
-          description: '当前会话工作区绝对路径（必填，支持 ~/…）',
+          description: '当前会话工作区绝对路径（必填，支持 ~/…；任意项目，以侧栏打开的工程为准）',
         },
         message: {
           type: 'string',
           required: true,
-          description: '用户本轮诉求原文（勿改写、勿套模板）',
+          description: '用户本轮诉求原文；若已澄清，把结论一并写入（勿套固定模板）',
+        },
+        clarified: {
+          type: 'string',
+          description: '已完成 ask_user_question 澄清后传 true',
         },
         images: {
           type: 'string',
@@ -545,6 +559,7 @@ export function apply(ctx: Context) {
         }
         const workspace = String((args && (args as { workspace?: string }).workspace) || '').trim()
         const message = String((args && (args as { message?: string }).message) || '').trim()
+        const clarified = args && (args as { clarified?: unknown }).clarified
         if (!workspace) {
           return asJson({
             ok: false,
@@ -561,6 +576,23 @@ export function apply(ctx: Context) {
             chat_body: '缺少写码诉求。请直接说明要改什么。',
           })
         }
+        const gate = decideCodingGate({
+          message,
+          clarified,
+          events: extractSessionEvents(exec),
+        })
+        if (gate.action === 'block') {
+          return asJson({
+            ok: false,
+            need_clarify: true,
+            started: false,
+            workspace: expandWorkspace(workspace),
+            detail: CLARIFY_AGENT_HINT,
+            chat_body: '',
+            source: 'cursor_chat',
+            cursor_chat_ui: { kind: 'await_ask_user', requirement: message },
+          })
+        }
         const abs = expandWorkspace(workspace)
         const { refs: images, note: imageNote } = collectToolImages(args, exec, abs)
         const sid = execSessionId(exec)
@@ -570,7 +602,7 @@ export function apply(ctx: Context) {
           session_id: sid,
           statuses: ['succeeded', 'pending_review'],
         })
-        if (latest && looksLikeFollowUp(message)) {
+        if (latest && looksLikeFollowUp(gate.requirement)) {
           parentJobId = latest.id
         }
         if (imageNote) {
@@ -578,7 +610,7 @@ export function apply(ctx: Context) {
         }
         return waitConfirmThenStart({
           workspace: abs,
-          requirement: message,
+          requirement: gate.requirement,
           images,
           parentJobId,
           callId: execCallId(exec),
@@ -593,14 +625,15 @@ export function apply(ctx: Context) {
     defineTool({
       name: 'zr_cchat_continue',
       description:
-        '【Cursor 对话写码·续改】同会话多轮：用户最新原话 + 可选新截图；优先 resume 上一轮 Agent。' +
+        '【Cursor 对话写码·续改】同工程多轮：用户最新原话 + 可选新截图；优先 resume 上一轮 Agent。' +
+        '换了侧栏工程则 workspace 用新路径。入口级新增/删除页面·菜单·报表入口：先 ask_user_question，答完再调（clarified=true）。' +
         FOLLOWUP_AGENT_HINT +
         ' 有新图时同样传入 images。',
       parameters: {
         workspace: {
           type: 'string',
           required: true,
-          description: '当前会话工作区绝对路径（支持 ~/…）',
+          description: '当前会话工作区绝对路径（支持 ~/…；须与本轮侧栏工程一致）',
         },
         message: {
           type: 'string',
@@ -610,6 +643,10 @@ export function apply(ctx: Context) {
         parent_job_id: {
           type: 'string',
           description: '可选：上次成功/待审任务 id；缺省则自动取本会话最近任务',
+        },
+        clarified: {
+          type: 'string',
+          description: '用户已通过 ask_user_question 完成澄清后传 true',
         },
         images: {
           type: 'string',
@@ -637,6 +674,7 @@ export function apply(ctx: Context) {
         }
         const workspace = String((args && (args as { workspace?: string }).workspace) || '').trim()
         const message = String((args && (args as { message?: string }).message) || '').trim()
+        const clarified = args && (args as { clarified?: unknown }).clarified
         let parentId = String((args && (args as { parent_job_id?: string }).parent_job_id) || '').trim()
         if (!workspace || !message) {
           return asJson({
@@ -644,6 +682,23 @@ export function apply(ctx: Context) {
             show_error: true,
             detail: 'workspace 与 message 均必填。',
             chat_body: '续改需要工作区路径和诉求原文。',
+          })
+        }
+        const gate = decideCodingGate({
+          message,
+          clarified,
+          events: extractSessionEvents(exec),
+        })
+        if (gate.action === 'block') {
+          return asJson({
+            ok: false,
+            need_clarify: true,
+            started: false,
+            workspace: expandWorkspace(workspace),
+            detail: CLARIFY_AGENT_HINT + ' ' + FOLLOWUP_AGENT_HINT,
+            chat_body: '',
+            source: 'cursor_chat',
+            cursor_chat_ui: { kind: 'await_ask_user', requirement: message },
           })
         }
         const abs = expandWorkspace(workspace)
@@ -668,7 +723,7 @@ export function apply(ctx: Context) {
         }
         return waitConfirmThenStart({
           workspace: abs,
-          requirement: message,
+          requirement: gate.requirement,
           images,
           parentJobId: parentId || undefined,
           callId: execCallId(exec),
