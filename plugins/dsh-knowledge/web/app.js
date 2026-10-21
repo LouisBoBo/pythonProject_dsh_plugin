@@ -1,5 +1,7 @@
 const API_BASE = document.querySelector('meta[name="dsh-knowledge-api"]')?.content || '/knowledge-api/v1'
 const AUTH_MODE = document.querySelector('meta[name="dsh-knowledge-auth-mode"]')?.content || 'bearer'
+// same-origin = WorkBuddy 宿主面板；面板常 <1120px，勿走窄屏汉堡抽屉。
+document.documentElement.dataset.embed = AUTH_MODE === 'same-origin' ? 'host' : 'standalone'
 const WEB_PATH = document.querySelector('meta[name="dsh-knowledge-web"]')?.content || '/knowledge'
 const ASSET_VERSION = document.querySelector('meta[name="dsh-knowledge-asset-version"]')?.content || ''
 const moduleUrl = name => `./${name}.js${ASSET_VERSION ? `?v=${encodeURIComponent(ASSET_VERSION)}` : ''}`
@@ -14,7 +16,7 @@ const [apiModule, themeModule, uiModule, modelCatalogModule, dialogModule, selec
   import(moduleUrl('knowledge-import')),
 ])
 const { createApiClient } = apiModule
-const { installHostThemeBridge } = themeModule
+const { installHostThemeBridge, requestHostMountContext } = themeModule
 const { actionButton, badge, createToastPresenter, element, interfaceIcon, paneToggleButton } = uiModule
 const {
   importedOriginalKind,
@@ -43,9 +45,9 @@ const DOCUMENT_STATE_LABELS = { open: '进行中', resolved: '已解决', comple
 const DOCUMENT_LAYOUT_KEY = 'dsh-knowledge.document-layout'
 const KNOWLEDGE_DOCUMENT_DRAG_TYPE = 'application/x-dsh-knowledge-document-id'
 const NOTE_MAX_FILE_SIZE = 64 * 1024 * 1024
-/** 侧栏只展示知识文档；挂载页已下线（免挂载）。其它 view 仍可通过 URL / 宿主深链打开。 */
+/** 侧栏展示知识文档与挂载；其它 view（待审核、回写、笔记等）仍可通过 URL / 宿主深链打开。 */
 const SIDEBAR_NAV_GROUPS = [
-  ['知识工作区', [['entries', '知识文档']]],
+  ['知识工作区', [['entries', '知识文档'], ['bases', '知识库与挂载']]],
 ]
 const pageParams = new URLSearchParams(location.search)
 const initialKnowledgeBaseId = pageParams.get('knowledgeBaseId')?.trim() || ''
@@ -65,7 +67,8 @@ const savedDocumentLayout = readDocumentLayout()
 
 function createDocumentViewState(overrides = {}) {
   return {
-    knowledgeBaseId: '', documentId: '', query: '', mode: 'preview', treeOpen: false,
+    // 宿主面板默认展开知识目录（图二）；standalone 窄屏仍可收起。
+    knowledgeBaseId: '', documentId: '', query: '', mode: 'preview', treeOpen: AUTH_MODE === 'same-origin',
     expandedBases: new Set(), documentPages: new Map(),
     searchResults: [], searchNextCursor: '', searchTotal: 0, searchLoading: false, searchError: '', searchRequest: 0,
     editor: null, editorLoading: false, loadingDocumentId: '', ...overrides,
@@ -570,8 +573,31 @@ function sessionMountedKnowledgeBaseIds() {
 }
 
 function isKnowledgeBaseMountedOnSession(baseId) {
-  if (!state.mountContext.sessionId) return true
+  if (!state.mountContext.sessionId) return false
   return sessionMountedKnowledgeBaseIds().has(baseId)
+}
+
+function applyHostMountContext(next) {
+  const sessionId = typeof next?.sessionId === 'string' ? next.sessionId.trim() : ''
+  const projectId = typeof next?.projectId === 'string' ? next.projectId.trim() : ''
+  if (state.mountContext.sessionId === sessionId && state.mountContext.projectId === projectId) return false
+  state.mountContext.sessionId = sessionId
+  state.mountContext.projectId = projectId
+  if (sessionId) state.mountManager.targetKind = 'session'
+  else if (projectId) state.mountManager.targetKind = 'project'
+  return true
+}
+
+async function refreshAfterHostMountContext(next) {
+  if (!applyHostMountContext(next)) return
+  try {
+    if (state.view === 'bases' || state.view === 'entries') {
+      await loadKnowledgeBasesPage()
+    }
+  } catch (error) {
+    if (error?.name !== 'AbortError') showToast(friendlyError(error), 'error')
+  }
+  renderShell()
 }
 
 function sessionDocumentWorkspace() {
@@ -917,7 +943,7 @@ function createBlankDocument(workspace, baseId) {
     view.knowledgeBaseId = WORKBUDDY_COMPANY_BASE_ID
     view.documentId = ''
     view.mode = 'edit'
-    view.treeOpen = false
+    if (AUTH_MODE !== 'same-origin') view.treeOpen = false
     view.expandedBases.add(WORKBUDDY_COMPANY_BASE_ID)
     view.editor = {
       id: '', knowledgeBaseId: WORKBUDDY_COMPANY_BASE_ID, title: '', body: '', type: 'fact', tags: [], tagsText: '',
@@ -934,7 +960,7 @@ function createBlankDocument(workspace, baseId) {
   view.knowledgeBaseId = base.id
   view.documentId = ''
   view.mode = 'edit'
-  view.treeOpen = false
+  if (AUTH_MODE !== 'same-origin') view.treeOpen = false
   view.expandedBases.add(base.id)
   view.editor = {
     id: '', knowledgeBaseId: base.id, title: '', body: '', type: 'fact', tags: [], tagsText: '',
@@ -1442,7 +1468,8 @@ async function selectDocument(workspace, id) {
   const emptyDraft = editor?.isNew && !editor.title.trim() && !editor.body.trim()
   if (editor?.dirty && !emptyDraft && !await saveDocumentEditor(workspace)) return
   workspace.view.documentId = id
-  workspace.view.treeOpen = false
+  // 宿主保持目录+正文并排；窄屏 standalone 选中文档后再收起目录腾地方。
+  if (AUTH_MODE !== 'same-origin') workspace.view.treeOpen = false
   workspace.view.editor = null
   workspace.view.editorLoading = true
   workspace.view.loadingDocumentId = id
@@ -1723,17 +1750,21 @@ function renderShell() {
   }
   const [title, subtitle] = titles[state.view]
   const viewIndexes = { overview: '00', notes: '01', shares: '02', entries: '01', candidates: '04', writeback: '05', bases: '02', tokens: '07' }
+  // WorkBuddy 宿主侧栏已有「知识库」入口；插件内主导航（品牌/01 知识文档/连接状态）冗余，不再渲染。
+  const hostEmbed = AUTH_MODE === 'same-origin'
   const shell = element('div', {
     class: 'app-shell', 'data-menu-open': String(state.menuOpen),
+    'data-host-embed': String(hostEmbed),
     'data-view': state.view, 'data-loading': String(state.loading),
     'data-scroll-state': currentScrollState(),
     'data-base-detail': String(state.view === 'bases' && state.knowledgeBaseView === 'detail'),
-    'data-sidebar-hidden': String(state.documentView.sidebarHidden),
+    // 宿主不渲染侧栏，勿打 data-sidebar-hidden（否则仍按三列网格把 main 挤到第 3 列，左侧留白）。
+    'data-sidebar-hidden': String(!hostEmbed && state.documentView.sidebarHidden),
     style: `--sidebar-width: ${state.documentView.sidebarWidth}px`,
   },
-    renderSidebar(),
-    renderAppSidebarResizer(),
-    element('button', {
+    hostEmbed ? null : renderSidebar(),
+    hostEmbed ? null : renderAppSidebarResizer(),
+    hostEmbed ? null : element('button', {
       type: 'button', class: 'app-sidebar-scrim', hidden: !state.menuOpen,
       'aria-label': '关闭导航菜单',
       onClick: () => setMenuOpen(false),
@@ -1741,16 +1772,19 @@ function renderShell() {
     element('main', { class: 'main' },
       element('header', { class: 'topbar' },
         element('div', { class: 'topbar-title' },
-          // Compact-only nav drawer (CSS hides on wide desktop). Main-pane hide toggle stays removed.
-          actionButton(interfaceIcon('menu'), () => setMenuOpen(!state.menuOpen), 'ghost mobile-menu', {
-            'aria-label': state.menuOpen ? '关闭导航菜单' : '打开导航菜单',
-            'aria-expanded': String(state.menuOpen),
-          }),
           renderContextPaneToggle(),
           element('div', { class: 'topbar-heading' },
             element('span', { class: 'topbar-kicker' }, `KNOWLEDGE / ${viewIndexes[state.view] || '00'}`),
             element('h1', {}, title),
             element('p', {}, subtitle)),
+        ),
+        element('div', { class: 'topbar-actions' },
+          state.view === 'bases'
+            ? actionButton(interfaceIcon('close'), () => {
+                state.knowledgeBaseView = 'mounts'
+                void navigate('entries')
+              }, 'ghost chrome-close', { 'aria-label': '关闭知识库与挂载', title: '关闭' })
+            : null,
         ),
         state.loading ? element('div', {
           class: 'route-progress', role: 'progressbar', 'aria-label': state.loadingPhase || '正在加载',
@@ -1761,7 +1795,7 @@ function renderShell() {
     ),
   )
   app.replaceChildren(shell)
-  applySidebarVisibility(shell, state.documentView.sidebarHidden)
+  if (!hostEmbed) applySidebarVisibility(shell, state.documentView.sidebarHidden)
   restoreScrollPosition(currentScrollState())
   renderDocumentSyncNotice()
 }
@@ -1859,14 +1893,13 @@ function compactChrome() {
 }
 
 function setMenuOpen(open) {
+  // 宿主面板不用抽屉；standalone/bearer 窄屏才开关。
+  if (AUTH_MODE === 'same-origin') open = false
   state.menuOpen = open
   const shell = app.querySelector('.app-shell')
   if (!shell) return
   shell.dataset.menuOpen = String(open)
   shell.querySelector('.app-sidebar-scrim')?.toggleAttribute('hidden', !open)
-  const toggle = shell.querySelector('.mobile-menu')
-  toggle?.setAttribute('aria-expanded', String(open))
-  toggle?.setAttribute('aria-label', open ? '关闭导航菜单' : '打开导航菜单')
   applySidebarVisibility(shell, state.documentView.sidebarHidden)
 }
 
@@ -2007,6 +2040,7 @@ function renderKnowledgeBases() {
   const activeBases = state.knowledgeBases.filter(base => base.status === 'active')
   const archivedBases = state.knowledgeBases.filter(base => base.status === 'archived')
   if (state.knowledgeBaseView === 'detail') return renderKnowledgeBaseDetail()
+  const contextAvailable = Boolean(state.mountContext.projectId || state.mountContext.sessionId)
   const query = state.knowledgeBaseQuery.trim().toLocaleLowerCase()
   const matchesQuery = base => !query || [base.name, base.group, base.description, base.defaultTags.join(' ')]
     .some(value => String(value || '').toLocaleLowerCase().includes(query))
@@ -2053,31 +2087,33 @@ function renderKnowledgeBases() {
       element('div', { class: 'base-heading-actions' },
         actionButton('管理知识库', () => { state.knowledgeBaseView = 'libraries'; renderShell() }, 'ghost small'),
         actionButton('+ 创建知识库', () => openKnowledgeBaseEditor(), 'primary small'),
-        actionButton('本机回写模型', () => openGlobalWritebackModelEditor(), 'ghost small'),
       ),
     ),
-    element('p', {}, state.service.writebackProvider && state.service.writebackModel
-      ? `仅当前客户端使用 ${state.service.writebackProvider} / ${state.service.writebackModel} 回写。`
-      : '当前客户端跟随每轮会话模型回写。'),
   )
   return element('div', { class: 'bases-page' },
     mountToolbar,
     element('section', { class: 'mount-section', 'aria-labelledby': 'mounts-heading' },
       element('div', { class: 'section-heading' }, element('div', {},
-        element('h2', { id: 'mounts-heading' }, '知识库可用性'),
-        element('p', {}, '免挂载：上传或创建后的可用知识库对所有工作区自动可见，对话召回不再依赖项目/会话挂载。'),
+        element('h2', { id: 'mounts-heading' }, '挂载范围'),
+        element('p', {}, '先用下方「项目 / 会话」切换挂载维度；会话默认继承项目，只有需要差异时才创建会话覆盖。'),
       )),
-      element('div', { class: 'mount-context' }, contextPill('范围', '全部工作区')),
-      activeBases.length
-        ? element('div', { class: 'mount-global-list', role: 'list' },
-          ...activeBases.map(base => element('div', { class: 'mount-global-row', role: 'listitem' },
-            element('strong', {}, base.name),
-            element('span', {}, base.group || '未分组'),
-            badge('全局可用', 'success'),
-            actionButton('打开文档', () => { void openKnowledgeBaseDocuments(base) }, 'ghost small'),
-          )),
+      contextAvailable
+        ? element('div', { class: 'mount-context' },
+          state.mountContext.projectId ? contextPill('项目', state.mountContext.projectId) : contextPill('项目', '当前页面未提供'),
+          state.mountContext.sessionId ? contextPill('会话', state.mountContext.sessionId) : contextPill('会话', '当前页面未提供'),
         )
-        : emptyState('还没有可用知识库', '点上方「创建知识库」或「管理知识库」导入文档。'),
+        : element('div', { class: 'context-warning' },
+          element('p', {}, '尚未关联当前会话。请先在左侧工作区点开任意会话，再回到本页挂载；或点下方按钮向宿主索取会话上下文。'),
+          actionButton('重新获取会话上下文', () => {
+            requestHostMountContext?.()
+            showToast('已请求宿主会话上下文…', 'info')
+          }, 'primary small'),
+        ),
+      !contextAvailable
+        ? null
+        : activeBases.length
+          ? renderMountManager(activeBases)
+          : emptyState('还没有可用知识库', '点上方「管理知识库」创建后再回来挂载。'),
     ),
   )
 }
@@ -2147,7 +2183,7 @@ function renderKnowledgeBaseDetail() {
             badge(archived ? '已归档' : '可用', archived ? '' : 'success'),
             mountStatus ? badge(mountStatus.statusLabel, mountStatus.statusVariant) : badge('未选择挂载范围'),
           ),
-          element('p', {}, base.description || '通用知识库，尚未设置匹配描述。'),
+          base.description ? element('p', {}, base.description) : null,
         ),
       ),
       element('div', { class: 'library-detail-actions' },
@@ -2209,16 +2245,16 @@ function renderKnowledgeBaseCard(base) {
         element('div', {}, element('h3', {}, base.name), element('small', { title: base.id }, base.id === 'default' ? '系统默认库' : `ID · ${base.id}`)),
       ),
       badge(archived ? '已归档' : '可用', archived ? '' : 'success'),
+      base.externalUrl ? badge('外部', 'accent') : null,
     ),
-    element('p', { class: 'base-description' }, base.description || '通用知识库，尚未设置匹配描述。'),
+    base.description ? element('p', { class: 'base-description' }, base.description) : null,
     element('div', { class: 'base-card-tags' }, visibleTags.length
       ? visibleTags.map(tag => element('span', { class: 'tag' }, `#${tag}`))
       : element('span', { class: 'tag is-empty' }, '无默认标签'),
     hiddenTagCount ? element('span', { class: 'tag' }, `+${hiddenTagCount}`) : null),
     element('div', { class: 'base-card-meta' },
-      element('span', {}, element('strong', {}, '回写策略'), base.writebackPolicy === 'proactive' ? '主动' : '严谨'),
-      element('span', {}, element('strong', {}, '回写模型'), writebackRouteLabel(base)),
-      base.extractionInstructions ? element('span', {}, element('strong', {}, '提取规则'), '已设置') : null,
+      element('span', {}, element('strong', {}, '分组'), base.group || '未分组'),
+      base.externalUrl ? element('span', {}, element('strong', {}, '外部地址'), base.externalUrl) : null,
     ),
     element('div', { class: 'base-card-actions' },
       actionButton('查看知识', () => { void openKnowledgeBaseDocuments(base) }, 'ghost small', { 'data-open-knowledge-base': base.id }),
@@ -2332,15 +2368,18 @@ function renderMountListRow(base, view, targetKind, targetId) {
       renderShell()
     },
   })
-  const modelLabel = writebackRouteLabel(base)
   return element('article', {
     class: `mount-list-row${selected ? ' is-selected' : ''}`,
     role: 'listitem',
   },
     element('label', { class: 'mount-select' }, checkbox, element('span', { class: 'visually-hidden' }, `选择 ${knowledgeBasePathLabel(base)}`)),
     element('div', { class: 'mount-list-main' },
-      element('div', { class: 'mount-list-title' }, element('strong', { class: 'mount-base-path', title: knowledgeBasePathLabel(base) }, knowledgeBasePathLabel(base)), badge(view.statusLabel, view.statusVariant), badge(modelLabel)),
-      element('p', {}, base.description || '通用知识库'),
+      element('div', { class: 'mount-list-title' },
+        element('strong', { class: 'mount-base-path', title: knowledgeBasePathLabel(base) }, knowledgeBasePathLabel(base)),
+        badge(view.statusLabel, view.statusVariant),
+        base.externalUrl ? badge('外部', 'accent') : null,
+      ),
+      base.description ? element('p', {}, base.description) : null,
       element('div', { class: 'mount-list-meta' }, view.detail,
         view.source?.includeTags.length ? element('span', {}, ` · 包含 #${view.source.includeTags.join(' #')}`) : null,
         view.source?.excludeTags.length ? element('span', {}, ` · 排除 #${view.source.excludeTags.join(' #')}`) : null,
@@ -2438,9 +2477,9 @@ function renderDocumentWorkspace(workspace, options = {}) {
           : (state.workbuddyCompany.configured ? badge('本机', 'success') : null),
         isWorkbuddyCompanyBase(base.id)
           ? badge('免挂载', '')
-          : (state.mountContext.sessionId && !isKnowledgeBaseMountedOnSession(base.id)
-            ? badge('未挂载', 'accent')
-            : null),
+          : (!state.mountContext.sessionId && !state.mountContext.projectId
+            ? badge('待关联会话', 'accent')
+            : (!isKnowledgeBaseMountedOnSession(base.id) ? badge('未挂载', 'accent') : badge('已挂载', 'success'))),
         element('span', { class: 'tree-count' }, query ? documents.length : page.loaded ? page.total : '—')),
         !readOnly && !isWorkbuddyCompanyBase(base.id) && base.id !== 'default'
           ? actionButton('删除', () => confirmRemoveKnowledgeBase(base), 'ghost small note-tree-base-delete', { title: `删除「${base.name}」` })
@@ -2531,7 +2570,13 @@ function renderDocumentWorkspace(workspace, options = {}) {
       ),
       element('div', { class: 'note-tree-search-wrap' }, interfaceIcon('search', 'search-symbol'), search),
       element('nav', { class: 'note-tree', 'data-scroll-key': `${workspace.kind}-note-tree` }, treeContent),
-      workspace.kind === 'session' ? element('footer', { class: 'note-tree-footer' }, actionButton('新建知识库', () => openKnowledgeBaseEditor(), 'ghost small')) : null,
+      workspace.kind === 'session' ? element('footer', { class: 'note-tree-footer' },
+        actionButton('知识库与挂载', () => {
+          requestHostMountContext?.()
+          void navigate('bases')
+        }, 'ghost small', { title: '按项目/会话挂载，控制召回范围' }),
+        actionButton('新建知识库', () => openKnowledgeBaseEditor(), 'ghost small'),
+      ) : null,
     ),
     view.treeOpen ? element('button', {
       type: 'button', class: 'note-tree-scrim', 'aria-label': '关闭知识目录',
@@ -4778,60 +4823,83 @@ function parseTags(value) {
 }
 
 async function openKnowledgeBaseEditor(base) {
-  await loadModelCatalog()
-  const source = base || { name: '', description: '', defaultTags: [], extractionInstructions: '', writebackPolicy: 'conservative' }
+  const source = base || { name: '', group: '', description: '', defaultTags: [], extractionInstructions: '', writebackPolicy: 'conservative' }
   const form = element('form', { class: 'form-grid' })
   const name = formField('名称', 'input', source.name, { required: true, maxlength: 100, placeholder: '例如：项目规范' })
-  const group = formField('所属分组', 'input', source.group || '', { id: 'knowledge-base-group', maxlength: 64, placeholder: '留空为未分组，也可输入新分组名称', list: 'knowledge-base-group-options' })
-  group.wrapper.querySelector('label').htmlFor = group.input.id
-  const groupOptions = element('datalist', { id: 'knowledge-base-group-options' },
-    [...new Set(state.knowledgeBases.map(item => item.group).filter(Boolean))].sort().map(value => element('option', { value })))
-  const description = formField('回写匹配描述', 'textarea', source.description, { maxlength: 2000, placeholder: '描述什么样的对话才属于这个库。例如：只记录 dsh-knowledge 项目的架构决策和部署规范' })
-  const tags = formField('默认标签', 'input', source.defaultTags.join(', '), { placeholder: 'project-rule, backend' })
-  const instructions = formField('提取要求', 'textarea', source.extractionInstructions, { maxlength: 4000, placeholder: '例如：只收录已确认、可跨会话复用的项目约定' })
-  const policy = selectField('回写策略', [
-    { value: 'conservative', label: '严谨（高置信度直写）' },
-    { value: 'proactive', label: '主动（更积极沉淀）' },
-  ], source.writebackPolicy || 'conservative')
-  const dedicatedModel = element('input', {
-    type: 'checkbox',
-    checked: Boolean(source.writebackProvider && source.writebackModel),
+  const description = formField('知识库描述', 'textarea', source.description || '', {
+    maxlength: 2000,
+    placeholder: '简要说明这个库存什么、给谁用。例如：PCB 计价规则与例外说明',
   })
-  const route = modelRouteFields(source.writebackProvider || '', source.writebackModel || '')
-  const routeToggle = element('label', { class: 'check-option span-2' }, dedicatedModel,
+  const externalEnabled = element('input', {
+    type: 'checkbox',
+    checked: Boolean(source.externalUrl),
+  })
+  const externalToggle = element('label', { class: 'check-option span-2' }, externalEnabled,
     element('span', {},
-      element('strong', {}, '这个知识库使用专用回写模型'),
-      element('small', {}, '未设置时先使用本机覆盖；本机也未设置时跟随当前会话模型。'),
+      element('strong', {}, '对接外部知识库'),
+      element('small', {}, '填写访问地址与帐号密码；本机保存凭据，密码不会回显。'),
     ))
-  const syncRouteAvailability = () => {
-    route.provider.input.disabled = route.model.input.disabled = !dedicatedModel.checked
-    route.provider.input.required = route.model.input.required = dedicatedModel.checked
+  const externalUrl = formField('访问地址', 'input', source.externalUrl || '', {
+    type: 'url',
+    maxlength: 500,
+    placeholder: 'https://knowledge.example.com/api',
+    autocomplete: 'url',
+  })
+  const externalUsername = formField('帐号', 'input', source.externalUsername || '', {
+    maxlength: 200,
+    placeholder: '登录帐号',
+    autocomplete: 'username',
+  })
+  const externalPassword = formField('密码', 'input', '', {
+    type: 'password',
+    maxlength: 500,
+    placeholder: source.externalPasswordConfigured ? '已保存；留空则保持不变' : '登录密码',
+    autocomplete: 'new-password',
+  })
+  const externalFields = element('div', { class: 'span-2 external-knowledge-fields' },
+    externalUrl.wrapper, externalUsername.wrapper, externalPassword.wrapper)
+  const syncExternalFields = () => {
+    const on = externalEnabled.checked
+    externalFields.hidden = !on
+    externalUrl.input.required = on
+    externalUsername.input.required = on
+    externalPassword.input.required = on && !source.externalPasswordConfigured
   }
-  dedicatedModel.addEventListener('change', syncRouteAvailability)
-  syncRouteAvailability()
-  for (const field of [name, description, tags, instructions]) field.wrapper.classList.add('span-2')
-  form.append(
-    name.wrapper, group.wrapper, groupOptions, description.wrapper, tags.wrapper, instructions.wrapper, policy.wrapper,
-    routeToggle, route.provider.wrapper, route.model.wrapper,
-  )
+  externalEnabled.addEventListener('change', syncExternalFields)
+  syncExternalFields()
+  for (const field of [name, description, externalUrl]) field.wrapper.classList.add('span-2')
+  form.append(name.wrapper, description.wrapper, externalToggle, externalFields)
   openSheet({
     title: base ? '编辑知识库' : '创建知识库',
-    description: '匹配描述先判断对话是否属于该库；提取要求再规定应该收录什么。',
+    description: '先建库并挂载到项目/会话；也可选对接外部知识库。',
     body: form,
     primaryLabel: base ? '保存修改' : '创建',
     onPrimary: async () => {
       if (!form.reportValidity()) return false
+      const passwordValue = externalPassword.input.value
       const draft = {
         name: name.input.value.trim(),
-        group: group.input.value.trim(),
+        group: base ? String(source.group || '') : '',
         description: description.input.value.trim(),
-        defaultTags: parseTags(tags.input.value),
-        extractionInstructions: instructions.input.value.trim(),
-        writebackPolicy: policy.input.value,
-        ...(dedicatedModel.checked ? {
-          writebackProvider: route.provider.input.value,
-          writebackModel: route.model.input.value,
+        defaultTags: base ? [...(source.defaultTags || [])] : [],
+        extractionInstructions: base ? String(source.extractionInstructions || '') : '',
+        writebackPolicy: base ? (source.writebackPolicy || 'conservative') : 'conservative',
+        ...(base && source.writebackProvider && source.writebackModel ? {
+          writebackProvider: source.writebackProvider,
+          writebackModel: source.writebackModel,
         } : {}),
+        ...(externalEnabled.checked
+          ? {
+              externalUrl: externalUrl.input.value.trim(),
+              externalUsername: externalUsername.input.value.trim(),
+              ...(passwordValue.length > 0 ? { externalPassword: passwordValue } : {}),
+            }
+          : { externalUrl: '', externalUsername: '', externalPassword: '' }),
+      }
+      if (externalEnabled.checked && !passwordValue && !source.externalPasswordConfigured) {
+        showToast('对接外部知识库时请填写密码。', 'error')
+        externalPassword.input.focus()
+        return false
       }
       const returnView = state.view
       if (base) await api(`knowledge-bases/${encodeURIComponent(base.id)}`, { method: 'PUT', body: { draft } })
@@ -5618,4 +5686,6 @@ window.addEventListener('beforeunload', event => {
 })
 
 installDragRecovery()
-void installHostThemeBridge().then(() => boot()).then(() => documentSync.wake())
+void installHostThemeBridge({
+  onMountContext: next => { void refreshAfterHostMountContext(next) },
+}).then(() => boot()).then(() => documentSync.wake())

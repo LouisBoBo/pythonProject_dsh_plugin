@@ -2,7 +2,7 @@ import { DEFAULT_KNOWLEDGE_BASE_ID, nowIso } from '../domain.js';
 /** Versioned upgrades preserve the provider's database and transaction boundaries. */
 export function migrateKnowledgeDatabase(db, notes) {
     let version = Number(db.prepare('PRAGMA user_version').get().user_version ?? 0);
-    if (version > 14)
+    if (version > 15)
         throw new Error(`knowledge database schema ${version} is newer than this plugin supports`);
     if (version === 0)
         db.exec(`
@@ -309,6 +309,26 @@ export function migrateKnowledgeDatabase(db, notes) {
             if (!columns.some(column => column.name === 'group_name'))
                 db.exec("ALTER TABLE knowledge_bases ADD COLUMN group_name TEXT NOT NULL DEFAULT ''");
             db.exec('PRAGMA user_version = 14; COMMIT');
+        }
+        catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
+        }
+    }
+    if (version <= 13)
+        version = 14;
+    if (version === 14) {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+            const columns = db.prepare('PRAGMA table_info(knowledge_bases)').all();
+            const names = new Set(columns.map(column => String(column.name)));
+            if (!names.has('external_url'))
+                db.exec("ALTER TABLE knowledge_bases ADD COLUMN external_url TEXT NOT NULL DEFAULT ''");
+            if (!names.has('external_username'))
+                db.exec("ALTER TABLE knowledge_bases ADD COLUMN external_username TEXT NOT NULL DEFAULT ''");
+            if (!names.has('external_password'))
+                db.exec('ALTER TABLE knowledge_bases ADD COLUMN external_password TEXT');
+            db.exec('PRAGMA user_version = 15; COMMIT');
         }
         catch (error) {
             db.exec('ROLLBACK');

@@ -1,5 +1,6 @@
 /**
- * 左侧栏「专家·技能·连接器」：与设置/知识库/自动化并列。
+ * 左侧栏「专家·技能·连接器」：DSH 0.2.1+ 用 sidebar.panellist（与知识库同槽）；
+ * 无 docked panel 时回退 sidebar.footer.action。
  */
 window.__ModuleLoader__.load({
   id: '@zhongruan/dsh-esc',
@@ -11,6 +12,7 @@ window.__ModuleLoader__.load({
     var useEffect = React.useEffect
 
     var PLUGIN_ID = '@zhongruan/dsh-esc'
+    var PANEL_ID = 'esc'
     var WORKSPACE_EVENT = '@lemoncat7/dsh-plugin-ui/workspace-activate'
     /** apply() 里挂上，创建技能时关掉面板回到对话 */
     var escWorkspace = null
@@ -2397,16 +2399,44 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function supportsDockedPanels(ctx) {
+      return !!(ctx && ctx.layout && typeof ctx.layout.selectPanel === 'function')
+    }
+
     function createWorkspace(ctx) {
       var listeners = new Set()
       var disposeWorkspace
+      var docked = supportsDockedPanels(ctx)
       function notify() {
         listeners.forEach(function (fn) {
           fn()
         })
       }
       var controller
+      function isSelected() {
+        if (docked) {
+          try {
+            return ctx.layout.panelInfo && typeof ctx.layout.panelInfo.getSnapshot === 'function'
+              ? ctx.layout.panelInfo.getSnapshot().activePanelId === PANEL_ID
+              : false
+          } catch (_err) {
+            return false
+          }
+        }
+        return disposeWorkspace !== undefined
+      }
       function close() {
+        if (docked) {
+          if (isSelected()) {
+            try {
+              ctx.layout.selectPanel(null)
+            } catch (_err) {
+              /* panel already cleared */
+            }
+          }
+          notify()
+          return
+        }
         if (disposeWorkspace === undefined) return
         var dispose = disposeWorkspace
         disposeWorkspace = undefined
@@ -2414,11 +2444,20 @@ window.__ModuleLoader__.load({
         notify()
       }
       function open() {
-        if (disposeWorkspace !== undefined) return
         activatePluginWorkspace(PLUGIN_ID)
+        if (docked) {
+          try {
+            ctx.layout.selectPanel(PANEL_ID)
+          } catch (err) {
+            console.error('[esc] could not open main panel', err)
+          }
+          notify()
+          return
+        }
+        if (disposeWorkspace !== undefined) return
         disposeWorkspace = registerMainPanel(
           ctx,
-          PLUGIN_ID,
+          PANEL_ID,
           -1,
           function () {
             return h(EscView)
@@ -2428,19 +2467,24 @@ window.__ModuleLoader__.load({
         notify()
       }
       controller = {
-        isOpen: function () {
-          return disposeWorkspace !== undefined
-        },
+        isOpen: isSelected,
         open: open,
         toggle: function () {
-          if (disposeWorkspace !== undefined) return close()
+          if (isSelected()) return close()
           open()
         },
         close: close,
         subscribe: function (listener) {
           listeners.add(listener)
+          var offPanel =
+            docked && ctx.layout.panelInfo && typeof ctx.layout.panelInfo.subscribe === 'function'
+              ? ctx.layout.panelInfo.subscribe(function () {
+                  listener()
+                })
+              : function () {}
           return function () {
             listeners.delete(listener)
+            offPanel()
           }
         },
       }
@@ -2665,6 +2709,7 @@ window.__ModuleLoader__.load({
         return
       }
       ensureCss()
+      var docked = supportsDockedPanels(ctx)
       var workspace = createWorkspace(ctx)
       escWorkspace = workspace
       if (typeof ctx.effect === 'function') {
@@ -2679,14 +2724,37 @@ window.__ModuleLoader__.load({
           }
         }, 'dsh-esc: workspace lifecycle')
       }
-      ctx.slots.inject('sidebar.footer.action', function () {
-        return ctx.slots.register(
-          { name: 'sidebar.footer.action', id: 'esc', order: -7 },
-          function EscFooter(props) {
-            return h(EscFooterAction, { wide: props && props.wide, workspace: workspace })
-          },
-        )
-      })
+      if (docked) {
+        ctx.slots.inject('main', function () {
+          return ctx.slots.register({ name: 'main', key: PANEL_ID }, function EscMain() {
+            return h(EscView)
+          })
+        })
+        ctx.slots.inject('sidebar.panellist', function () {
+          return ctx.slots.register(
+            {
+              name: 'sidebar.panellist',
+              id: PANEL_ID,
+              order: -7,
+              label: function () {
+                return '专家·技能·连接器'
+              },
+            },
+            function EscPanelIcon(props) {
+              return EscIcon((props && props.size) || 18)
+            },
+          )
+        })
+      } else {
+        ctx.slots.inject('sidebar.footer.action', function () {
+          return ctx.slots.register(
+            { name: 'sidebar.footer.action', id: PANEL_ID, order: -7 },
+            function EscFooter(props) {
+              return h(EscFooterAction, { wide: props && props.wide, workspace: workspace })
+            },
+          )
+        })
+      }
       ctx.slots.inject('conversation.input.left', function () {
         return ctx.slots.register(
           { name: 'conversation.input.left', id: 'esc-scene', order: 40, label: '场景卡' },
@@ -2695,7 +2763,11 @@ window.__ModuleLoader__.load({
           },
         )
       })
-      console.log('[esc] 已注册侧栏「专家·技能·连接器」与对话栏场景卡')
+      console.log(
+        docked
+          ? '[esc] 已注册侧栏 panellist「专家·技能·连接器」与对话栏场景卡'
+          : '[esc] 已注册侧栏 footer「专家·技能·连接器」（无 docked panel 回退）与对话栏场景卡',
+      )
     }
 
     module.exports = { inject: ['slots', 'layout'], apply: apply }

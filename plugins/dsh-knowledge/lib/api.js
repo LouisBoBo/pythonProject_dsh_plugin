@@ -725,6 +725,12 @@ function parseKnowledgeBaseDraft(value) {
         const writebackProvider = optionalNullableStringProperty(value, 'writebackProvider');
         const writebackModel = optionalNullableStringProperty(value, 'writebackModel');
         const group = optionalNullableStringProperty(value, 'group');
+        const externalUrl = typeof value.externalUrl === 'string' ? value.externalUrl : '';
+        const externalUsername = typeof value.externalUsername === 'string' ? value.externalUsername : '';
+        const hasPassword = Object.hasOwn(value, 'externalPassword');
+        if (hasPassword && value.externalPassword !== undefined && typeof value.externalPassword !== 'string') {
+            throw httpError(400, 'knowledge base draft externalPassword must be a string');
+        }
         const draft = normalizeKnowledgeBaseDraft({
             ...(group == null ? {} : { group }),
             name: typeof value.name === 'string' ? value.name : '',
@@ -734,6 +740,9 @@ function parseKnowledgeBaseDraft(value) {
             writebackPolicy: value.writebackPolicy === 'proactive' ? 'proactive' : 'conservative',
             ...writebackProvider === undefined || writebackProvider === null ? {} : { writebackProvider },
             ...writebackModel === undefined || writebackModel === null ? {} : { writebackModel },
+            externalUrl,
+            externalUsername,
+            ...hasPassword && typeof value.externalPassword === 'string' ? { externalPassword: value.externalPassword } : {},
         });
         return { ...draft, ...(group === undefined ? {} : { group: group?.trim() ?? '' }) };
     }

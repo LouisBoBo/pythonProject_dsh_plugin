@@ -14,6 +14,7 @@ import { applyKnowledgeTextEdits, mergeKnowledgeBodies } from './knowledge-merge
 import { normalizeFinalizationChange } from './document-lifecycle.js';
 import { NoteStore } from './notes/store.js';
 import { isImportedOriginalEntryId, readImportedOriginalFile, removeImportedOriginal, writeImportedOriginal } from './knowledge-originals.js';
+import { createSecretBox } from './secret-box.js';
 const ENTRY_COLUMNS = `
   id, knowledge_base_id, title, body, type, tags_json, scope_kind, scope_id, confidence,
   status, document_state, finalized_at, finalization_note, version, source_json, created_at, updated_at
@@ -42,14 +43,45 @@ export class LocalKnowledgeProvider {
             ? join(tmpdir(), `dsh-knowledge-${randomUUID()}`)
             : dirname(path);
         this.storageRoot = storageRoot;
+        this.secretBox = createSecretBox(storageRoot);
         this.notes = new NoteStore(inMemory ? storageRoot : join(storageRoot, 'notes'), inMemory);
         this.documentStore = new KnowledgeDocumentStore(join(storageRoot, 'documents'));
         this.db = new DatabaseSync(path);
         this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
         migrateKnowledgeDatabase(this.db, this.notes);
+        this.migrateExternalPasswordsAtRest();
         this.db.exec('CREATE TABLE IF NOT EXISTS note_excerpt_receipts (request_id TEXT PRIMARY KEY, input_hash TEXT NOT NULL, knowledge_id TEXT NOT NULL);');
         this.db.exec('CREATE TABLE IF NOT EXISTS writeback_receipts (source_key TEXT NOT NULL, proposal_hash TEXT NOT NULL, result_json TEXT NOT NULL, PRIMARY KEY(source_key, proposal_hash));');
         this.documentsReady = this.enqueueDocumentSync(() => this.syncAllDocuments());
+    }
+    /** Encrypt any legacy plaintext external passwords left in SQLite. */
+    migrateExternalPasswordsAtRest() {
+        const rows = this.db.prepare(`
+      SELECT id, external_password FROM knowledge_bases
+      WHERE external_password IS NOT NULL AND length(external_password) > 0
+        AND external_password NOT LIKE 'enc:v1:%'
+    `).all();
+        if (rows.length === 0)
+            return;
+        const update = this.db.prepare('UPDATE knowledge_bases SET external_password=? WHERE id=?');
+        this.db.exec('BEGIN IMMEDIATE');
+        try {
+            for (const row of rows)
+                update.run(this.secretBox.persist(String(row.external_password)), String(row.id));
+            this.db.exec('COMMIT');
+        }
+        catch (error) {
+            this.db.exec('ROLLBACK');
+            throw error;
+        }
+    }
+    /** Decrypt stored external password for outbound sync (never exposed via HTTP API). */
+    readExternalPassword(id) {
+        this.assertOpen();
+        const row = this.db.prepare('SELECT external_password FROM knowledge_bases WHERE id=?').get(id);
+        if (row?.external_password == null)
+            return null;
+        return this.secretBox.open(String(row.external_password));
     }
     assertOpen() {
         if (this.closed)
@@ -98,15 +130,18 @@ export class LocalKnowledgeProvider {
         this.assertOpen();
         await this.documentsReady;
         const draft = normalizeKnowledgeBaseDraft(input);
+        if (draft.externalUrl && !(draft.externalPassword && draft.externalPassword.length > 0)) {
+            throw new Error('external knowledge password is required when linking an access URL');
+        }
         const timestamp = nowIso();
-        const base = { ...draft, id: newId(), status: 'active', createdAt: timestamp, updatedAt: timestamp };
+        const id = newId();
         this.db.prepare(`
       INSERT INTO knowledge_bases(
-        id,name,description,default_tags_json,extraction_instructions,writeback_policy,writeback_provider,writeback_model,status,created_at,updated_at,group_name
-      ) VALUES(?,?,?,?,?,?,?,?,'active',?,?,?)
-    `).run(base.id, base.name, base.description, JSON.stringify(base.defaultTags), base.extractionInstructions, base.writebackPolicy, base.writebackProvider ?? null, base.writebackModel ?? null, timestamp, timestamp, base.group ?? '');
-        await this.syncKnowledgeBaseManifestQueued(base.id);
-        return base;
+        id,name,description,default_tags_json,extraction_instructions,writeback_policy,writeback_provider,writeback_model,status,created_at,updated_at,group_name,external_url,external_username,external_password
+      ) VALUES(?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?)
+    `).run(id, draft.name, draft.description, JSON.stringify(draft.defaultTags), draft.extractionInstructions, draft.writebackPolicy, draft.writebackProvider ?? null, draft.writebackModel ?? null, timestamp, timestamp, draft.group ?? '', draft.externalUrl ?? '', draft.externalUsername ?? '', draft.externalUrl ? this.secretBox.persist(draft.externalPassword ?? null) : null);
+        await this.syncKnowledgeBaseManifestQueued(id);
+        return (await this.getKnowledgeBase(id));
     }
     async updateKnowledgeBase(id, input) {
         this.assertOpen();
@@ -114,22 +149,30 @@ export class LocalKnowledgeProvider {
         const current = await this.getKnowledgeBase(id);
         if (current === undefined)
             throw notFound('knowledge base', id);
+        const currentRow = this.db.prepare('SELECT external_password FROM knowledge_bases WHERE id=?').get(id);
         // Older clients omit grouping from their full editor payload; preserve it.
         const draft = normalizeKnowledgeBaseDraft({ ...input, group: input.group ?? current.group ?? '' });
-        const updated = {
-            id: current.id,
-            status: current.status,
-            createdAt: current.createdAt,
-            ...draft,
-            updatedAt: nowIso(),
-        };
+        let externalPassword = null;
+        if (draft.externalUrl) {
+            if (typeof draft.externalPassword === 'string' && draft.externalPassword.length > 0) {
+                externalPassword = this.secretBox.persist(draft.externalPassword);
+            }
+            else if (currentRow?.external_password) {
+                // Re-seal legacy plaintext on touch so old rows migrate at rest.
+                externalPassword = this.secretBox.persist(String(currentRow.external_password));
+            }
+            else {
+                throw new Error('external knowledge password is required when linking an access URL');
+            }
+        }
+        const updatedAt = nowIso();
         this.db.prepare(`
       UPDATE knowledge_bases SET
-        name=?,description=?,default_tags_json=?,extraction_instructions=?,writeback_policy=?,writeback_provider=?,writeback_model=?,updated_at=?,group_name=?
+        name=?,description=?,default_tags_json=?,extraction_instructions=?,writeback_policy=?,writeback_provider=?,writeback_model=?,updated_at=?,group_name=?,external_url=?,external_username=?,external_password=?
       WHERE id=?
-    `).run(updated.name, updated.description, JSON.stringify(updated.defaultTags), updated.extractionInstructions, updated.writebackPolicy, updated.writebackProvider ?? null, updated.writebackModel ?? null, updated.updatedAt, updated.group ?? '', id);
+    `).run(draft.name, draft.description, JSON.stringify(draft.defaultTags), draft.extractionInstructions, draft.writebackPolicy, draft.writebackProvider ?? null, draft.writebackModel ?? null, updatedAt, draft.group ?? '', draft.externalUrl ?? '', draft.externalUsername ?? '', externalPassword, id);
         await this.syncKnowledgeBaseManifestQueued(id);
-        return updated;
+        return (await this.getKnowledgeBase(id));
     }
     async patchKnowledgeBase(id, patch) {
         this.assertOpen();
@@ -139,6 +182,7 @@ export class LocalKnowledgeProvider {
         const clearRoute = patch.writebackProvider === null || patch.writebackModel === null;
         const provider = typeof patch.writebackProvider === 'string' ? patch.writebackProvider : current.writebackProvider;
         const model = typeof patch.writebackModel === 'string' ? patch.writebackModel : current.writebackModel;
+        const clearExternal = patch.externalUrl === null || patch.externalUrl === '';
         return this.updateKnowledgeBase(id, {
             name: patch.name ?? current.name,
             group: patch.group === null ? '' : patch.group ?? current.group ?? '',
@@ -147,6 +191,13 @@ export class LocalKnowledgeProvider {
             extractionInstructions: patch.extractionInstructions ?? current.extractionInstructions,
             writebackPolicy: patch.writebackPolicy ?? current.writebackPolicy,
             ...clearRoute || provider === undefined || model === undefined ? {} : { writebackProvider: provider, writebackModel: model },
+            ...(clearExternal
+                ? { externalUrl: '', externalUsername: '', externalPassword: '' }
+                : {
+                    externalUrl: typeof patch.externalUrl === 'string' ? patch.externalUrl : (current.externalUrl ?? ''),
+                    externalUsername: typeof patch.externalUsername === 'string' ? patch.externalUsername : (current.externalUsername ?? ''),
+                    ...(typeof patch.externalPassword === 'string' ? { externalPassword: patch.externalPassword } : {}),
+                }),
         });
     }
     async assignKnowledgeBaseGroup(ids, value) {
@@ -405,50 +456,28 @@ export class LocalKnowledgeProvider {
     }
     async resolveMounts(sessionId, projectId) {
         this.assertOpen();
-        // 免挂载：无显式挂载时，active 库自动可召回（writeMode=none）。
-        // 显式挂载仍可关闭整库（enabled=false）或仅关召回（recallEnabled=false），并覆盖 writeMode/标签。
-        const bases = (await this.listKnowledgeBases()).filter(base => base.status === 'active');
+        // 仅显式挂载（项目继承 + 会话覆盖）参与召回/回写；enabled=false 的挂载行会被跳过。
         const project = projectId === undefined ? [] : await this.listMounts('project', projectId);
         const session = sessionId ? await this.listMounts('session', sessionId) : [];
-        const explicit = new Map();
-        for (const mount of project) {
-            explicit.set(mount.knowledgeBaseId, { mount, inheritedFrom: 'project' });
-        }
-        for (const mount of session) {
-            explicit.set(mount.knowledgeBaseId, { mount });
-        }
-        const targetId = sessionId || 'global';
-        const timestamp = nowIso();
+        const resolved = new Map();
+        for (const mount of project)
+            resolved.set(mount.knowledgeBaseId, { mount, inheritedFrom: 'project' });
+        for (const mount of session)
+            resolved.set(mount.knowledgeBaseId, { mount });
+        const bases = new Map((await this.listKnowledgeBases()).map(base => [base.id, base]));
         const output = [];
-        for (const base of bases) {
-            const hit = explicit.get(base.id);
-            if (hit !== undefined) {
-                if (!hit.mount.enabled)
-                    continue;
-                output.push({
-                    ...hit.mount,
-                    enabled: true,
-                    recallEnabled: hit.mount.recallEnabled,
-                    base,
-                    ...hit.inheritedFrom === undefined ? {} : { inheritedFrom: hit.inheritedFrom },
-                });
+        for (const { mount, inheritedFrom } of resolved.values()) {
+            if (!mount.enabled)
                 continue;
-            }
+            const base = bases.get(mount.knowledgeBaseId);
+            if (base === undefined || base.status !== 'active')
+                continue;
             output.push({
-                id: `global:${base.id}`,
-                targetKind: 'session',
-                targetId,
-                knowledgeBaseId: base.id,
+                ...mount,
                 enabled: true,
-                recallEnabled: true,
-                // 全局免挂载只开放召回；回写仍需显式挂载，避免写到全部库。
-                writeMode: 'none',
-                includeTags: [],
-                excludeTags: [],
-                extractionInstructions: '',
-                createdAt: base.createdAt ?? timestamp,
-                updatedAt: base.updatedAt ?? timestamp,
+                recallEnabled: mount.recallEnabled,
                 base,
+                ...inheritedFrom === undefined ? {} : { inheritedFrom },
             });
         }
         return output.sort((left, right) => left.base.name.localeCompare(right.base.name, 'zh-CN'));
@@ -2052,6 +2081,9 @@ function factualValues(value) {
 function rowToKnowledgeBase(row) {
     const writebackProvider = row.writeback_provider == null ? undefined : String(row.writeback_provider);
     const writebackModel = row.writeback_model == null ? undefined : String(row.writeback_model);
+    const externalUrl = row.external_url == null ? '' : String(row.external_url).trim();
+    const externalUsername = row.external_username == null ? '' : String(row.external_username).trim();
+    const externalPasswordConfigured = typeof row.external_password === 'string' && row.external_password.length > 0;
     return {
         id: String(row.id),
         name: String(row.name),
@@ -2061,6 +2093,9 @@ function rowToKnowledgeBase(row) {
         extractionInstructions: String(row.extraction_instructions),
         writebackPolicy: String(row.writeback_policy),
         ...writebackProvider === undefined || writebackModel === undefined ? {} : { writebackProvider, writebackModel },
+        ...(externalUrl
+            ? { externalUrl, externalUsername, externalPasswordConfigured }
+            : {}),
         status: String(row.status),
         createdAt: String(row.created_at),
         updatedAt: String(row.updated_at),

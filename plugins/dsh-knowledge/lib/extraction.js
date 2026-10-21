@@ -324,7 +324,7 @@ async function extractWithLlm(ctx, config, snapshot, mounts, existing, route, wr
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text: framed }],
-        source: { kind: 'plugin' },
+        source: { kind: 'plugin:dsh-knowledge', form: 'extraction' },
     };
     const output = await callStructuredModel(ctx, route, message, snapshot.sessionId, config.extractionMaxTokens, config.extractionTimeoutMs, parentSignal, extractionSystemPrompt(writebackPolicy), extractionRetrySystemPrompt(writebackPolicy), 'extraction');
     const parsed = parseJsonOutput(output);

@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-knowledge",
-  "version": "1.0.20",
-  "description": "中软知识库：导入 md/txt/pdf/docx；免挂载全局可用；公司共享库仅管理员可见",
+  "version": "1.0.37",
+  "description": "中软知识库：导入 md/txt/pdf/docx；按项目/会话挂载召回与回写；公司共享库仅管理员可见",
   "dshMarket": {
-    "zh": "知识库：免挂载，上传后全工作区可用；公司共享库仅管理员可见",
-    "en": "Knowledge: no mount required; uploaded docs available in all workspaces; shared library for admins only"
+    "zh": "知识库：按项目/会话挂载后召回与回写；公司共享库仅管理员可见",
+    "en": "Knowledge: mount bases per project/session for recall and writeback; shared library for admins only"
   },
   "keywords": [
     "deepseek-harness",

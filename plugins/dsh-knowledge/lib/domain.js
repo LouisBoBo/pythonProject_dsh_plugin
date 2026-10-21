@@ -71,6 +71,34 @@ export function normalizeKnowledgeBaseGroup(value) {
         throw new Error('knowledge base group must contain at most 64 characters without control characters');
     return group;
 }
+export function normalizeExternalKnowledgeUrl(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw)
+        return '';
+    let url;
+    try {
+        url = new URL(raw);
+    }
+    catch {
+        throw new Error('external knowledge URL is invalid');
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+        throw new Error('external knowledge URL must use http or https');
+    }
+    if (url.username || url.password) {
+        throw new Error('external knowledge URL must not embed credentials; use username/password fields');
+    }
+    if (url.hash) {
+        throw new Error('external knowledge URL must not contain a fragment');
+    }
+    // Prefer HTTPS; allow HTTP only for loopback so intranet testing still works.
+    const host = url.hostname.toLowerCase();
+    const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+    if (url.protocol === 'http:' && !loopback) {
+        throw new Error('external knowledge URL must use https (http is allowed only for localhost)');
+    }
+    return url.toString().replace(/\/+$/u, '') || url.origin;
+}
 export function normalizeKnowledgeBaseDraft(input) {
     const group = normalizeKnowledgeBaseGroup(input.group);
     const name = input.name.trim();
@@ -97,6 +125,23 @@ export function normalizeKnowledgeBaseDraft(input) {
     if (writebackModel !== undefined && writebackModel.length > 200) {
         throw new Error('knowledge base writebackModel must contain at most 200 characters');
     }
+    const externalUrl = normalizeExternalKnowledgeUrl(input.externalUrl ?? '');
+    const externalUsername = String(input.externalUsername ?? '').trim();
+    if (/[\u0000-\u001f\u007f]/u.test(externalUsername)) {
+        throw new Error('external knowledge username must not contain control characters');
+    }
+    const externalPassword = typeof input.externalPassword === 'string' ? input.externalPassword : undefined;
+    if (externalUrl) {
+        if (!externalUsername || externalUsername.length > 200) {
+            throw new Error('external knowledge username is required (at most 200 characters)');
+        }
+        if (externalPassword !== undefined && externalPassword.length > 500) {
+            throw new Error('external knowledge password must contain at most 500 characters');
+        }
+    }
+    else if (externalUsername || (externalPassword !== undefined && externalPassword.length > 0)) {
+        throw new Error('external knowledge username/password require an access URL');
+    }
     return {
         name,
         ...(group ? { group } : {}),
@@ -107,6 +152,13 @@ export function normalizeKnowledgeBaseDraft(input) {
         ...writebackProvider === undefined || writebackModel === undefined
             ? {}
             : { writebackProvider, writebackModel },
+        ...(externalUrl
+            ? {
+                externalUrl,
+                externalUsername,
+                ...(externalPassword === undefined ? {} : { externalPassword }),
+            }
+            : { externalUrl: '', externalUsername: '' }),
     };
 }
 export function normalizeKnowledgeMountDraft(input) {

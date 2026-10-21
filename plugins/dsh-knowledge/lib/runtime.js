@@ -6,12 +6,15 @@ export function messageText(message) {
         .join('\n')
         .trim();
 }
-export function createRecallMessage(text) {
+export function createKnowledgeSurfaceMessage(text, form) {
     return {
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: 'dsh-knowledge', form: 'recall' },
+        source: { kind: 'plugin:dsh-knowledge', form },
     };
+}
+export function createRecallMessage(text) {
+    return createKnowledgeSurfaceMessage(text, 'recall');
 }
 //# sourceMappingURL=runtime.js.map

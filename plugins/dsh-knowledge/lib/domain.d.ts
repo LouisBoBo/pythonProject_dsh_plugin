@@ -61,6 +61,11 @@ export interface KnowledgeBaseDraft {
     /** Empty means use the model route from the current assistant turn. */
     writebackProvider?: string;
     writebackModel?: string;
+    /** Optional upstream knowledge service; empty clears the link. */
+    externalUrl?: string;
+    externalUsername?: string;
+    /** Write-only; omitted on update keeps the stored secret. */
+    externalPassword?: string;
 }
 export interface KnowledgeBasePatch {
     name?: string;
@@ -71,12 +76,17 @@ export interface KnowledgeBasePatch {
     writebackPolicy?: KnowledgeWritebackPolicy;
     writebackProvider?: string | null;
     writebackModel?: string | null;
+    externalUrl?: string | null;
+    externalUsername?: string | null;
+    externalPassword?: string | null;
 }
-export interface KnowledgeBase extends KnowledgeBaseDraft {
+export interface KnowledgeBase extends Omit<KnowledgeBaseDraft, 'externalPassword'> {
     id: string;
     status: KnowledgeBaseStatus;
     createdAt: string;
     updatedAt: string;
+    /** True when a password is stored; the secret itself is never returned. */
+    externalPasswordConfigured?: boolean;
 }
 /** User-facing Markdown projection of approved knowledge entries. */
 export interface KnowledgeDocument {
@@ -310,6 +320,7 @@ export declare function normalizeTags(tags: readonly string[]): string[];
 export declare function normalizeDraft(input: KnowledgeDraft): KnowledgeDraft;
 export declare function contentHash(draft: KnowledgeDraft): string;
 export declare function normalizeKnowledgeBaseGroup(value: unknown): string;
+export declare function normalizeExternalKnowledgeUrl(value: unknown): string;
 export declare function normalizeKnowledgeBaseDraft(input: KnowledgeBaseDraft): KnowledgeBaseDraft;
 export declare function normalizeKnowledgeMountDraft(input: KnowledgeMountDraft): KnowledgeMountDraft;
 export declare function isKnowledgeType(value: unknown): value is KnowledgeType;

@@ -1,7 +1,7 @@
 /**
- * 左侧栏「自动化」：与设置并列（sidebar.footer.action）。
- * 主面板对标 simplified-workbuddy AutomationsView（定时任务 / 运行记录）。
- * 不注入 settings.section，不占用右侧栏。
+ * 左侧栏「自动化」：DSH 0.2.1+ 用 sidebar.panellist（与知识库同槽）；
+ * 无 docked panel 时回退 sidebar.footer.action。
+ * 主面板对标 AutomationsView（定时任务 / 运行记录）。
  */
 window.__ModuleLoader__.load({
   id: '@zhongruan/dsh-automations',
@@ -14,6 +14,7 @@ window.__ModuleLoader__.load({
     var useRef = React.useRef
 
     var PLUGIN_ID = '@zhongruan/dsh-automations'
+    var PANEL_ID = 'automations'
     var WORKSPACE_EVENT = '@lemoncat7/dsh-plugin-ui/workspace-activate'
     var RUNS_PAGE_SIZE = 10
     var SECRET_MASK = '••••••••••••'
@@ -1979,16 +1980,44 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function supportsDockedPanels(ctx) {
+      return !!(ctx && ctx.layout && typeof ctx.layout.selectPanel === 'function')
+    }
+
     function createWorkspace(ctx) {
       var listeners = new Set()
       var disposeWorkspace
+      var docked = supportsDockedPanels(ctx)
       function notify() {
         listeners.forEach(function (fn) {
           fn()
         })
       }
       var controller
+      function isSelected() {
+        if (docked) {
+          try {
+            return ctx.layout.panelInfo && typeof ctx.layout.panelInfo.getSnapshot === 'function'
+              ? ctx.layout.panelInfo.getSnapshot().activePanelId === PANEL_ID
+              : false
+          } catch (_err) {
+            return false
+          }
+        }
+        return disposeWorkspace !== undefined
+      }
       function close() {
+        if (docked) {
+          if (isSelected()) {
+            try {
+              ctx.layout.selectPanel(null)
+            } catch (_err) {
+              /* panel already cleared */
+            }
+          }
+          notify()
+          return
+        }
         if (disposeWorkspace === undefined) return
         var dispose = disposeWorkspace
         disposeWorkspace = undefined
@@ -1996,36 +2025,47 @@ window.__ModuleLoader__.load({
         notify()
       }
       function open() {
-        if (disposeWorkspace !== undefined) return
         activatePluginWorkspace(PLUGIN_ID)
+        if (docked) {
+          try {
+            ctx.layout.selectPanel(PANEL_ID)
+          } catch (err) {
+            console.error('[automations] could not open main panel', err)
+          }
+          notify()
+          return
+        }
+        if (disposeWorkspace !== undefined) return
         disposeWorkspace = registerMainPanel(
           ctx,
-          PLUGIN_ID,
+          PANEL_ID,
           -1,
           function () {
             return h(AutomationsView, { workspace: controller })
           },
           close,
         )
+        notify()
       }
       controller = {
-        isOpen: function () {
-          return disposeWorkspace !== undefined
-        },
-        open: function () {
-          open()
-          notify()
-        },
+        isOpen: isSelected,
+        open: open,
         toggle: function () {
-          if (disposeWorkspace !== undefined) return close()
+          if (isSelected()) return close()
           open()
-          notify()
         },
         close: close,
         subscribe: function (listener) {
           listeners.add(listener)
+          var offPanel =
+            docked && ctx.layout.panelInfo && typeof ctx.layout.panelInfo.subscribe === 'function'
+              ? ctx.layout.panelInfo.subscribe(function () {
+                  listener()
+                })
+              : function () {}
           return function () {
             listeners.delete(listener)
+            offPanel()
           }
         },
       }
@@ -2038,6 +2078,7 @@ window.__ModuleLoader__.load({
         return
       }
       ensureCss()
+      var docked = supportsDockedPanels(ctx)
       var workspace = createWorkspace(ctx)
       if (typeof ctx.effect === 'function') {
         ctx.effect(function () {
@@ -2051,15 +2092,39 @@ window.__ModuleLoader__.load({
           }
         }, 'dsh-automations: workspace lifecycle')
       }
+      if (docked) {
+        ctx.slots.inject('main', function () {
+          return ctx.slots.register({ name: 'main', key: PANEL_ID }, function AutomationsMain() {
+            return h(AutomationsView, { workspace: workspace })
+          })
+        })
+        ctx.slots.inject('sidebar.panellist', function () {
+          return ctx.slots.register(
+            {
+              name: 'sidebar.panellist',
+              id: PANEL_ID,
+              order: -8,
+              label: function () {
+                return '自动化'
+              },
+            },
+            function AutomationsPanelIcon(props) {
+              return TimerIcon((props && props.size) || 18)
+            },
+          )
+        })
+        console.log('[automations] 已注册侧栏 panellist「自动化」')
+        return
+      }
       ctx.slots.inject('sidebar.footer.action', function () {
         return ctx.slots.register(
-          { name: 'sidebar.footer.action', id: 'automations', order: -8 },
+          { name: 'sidebar.footer.action', id: PANEL_ID, order: -8 },
           function AutomationsFooter(props) {
             return h(AutomationsFooterAction, { wide: props && props.wide, workspace: workspace })
           },
         )
       })
-      console.log('[automations] 已注册侧栏「自动化」（与设置并列）')
+      console.log('[automations] 已注册侧栏 footer「自动化」（无 docked panel 回退）')
     }
 
     module.exports = { inject: ['slots', 'layout'], apply: apply }

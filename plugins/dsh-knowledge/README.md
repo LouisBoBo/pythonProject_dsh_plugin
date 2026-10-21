@@ -77,6 +77,8 @@ dsh plugin --profile web add @zhongruan/dsh-knowledge@1.0.1
 
 **1.0.14**：公司库 Web API 多 Origin 探活（`:8000` / `:18000` + 会话缓存），并保留 1.0.12 管理员可见与回环地址约束。
 
+**1.0.16**：适配 DSH 0.2.x 侧栏：注册 `main` + `sidebar.panellist`（`PANEL_ID=knowledge`，图标 `Icon*OutlineRegular`），工作区用 `layout.selectPanel`；`turnTail` 增加 `id: knowledge-writeback`；去掉失效的 `sidebar.footer.action` / `dsh-client-ui-slots` inject。
+
 ## 开发
 
 要求 Node.js `^22.19.0 || >=24.0.0`。交付物含上游 2.9.6 预构建 `lib/`；`web/` 为管理台源码。

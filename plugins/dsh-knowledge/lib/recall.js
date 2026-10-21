@@ -1,5 +1,5 @@
 import { formatAutomaticRecall, formatMountCatalog, resolveKnowledgeMounts, resolveRecallMounts, searchMountedKnowledge, selectAutomaticRecallHits, } from './retrieval.js';
-import { createRecallMessage, messageText, } from './runtime.js';
+import { createKnowledgeSurfaceMessage, createRecallMessage, messageText, } from './runtime.js';
 import { fetchCompanySharedRecall, mergeLocalAndCompanyRecall, } from './company-shared-recall.js';
 /**
  * Sanitize prior plugin surface messages, then perform bounded first-step
@@ -32,9 +32,11 @@ export function registerKnowledgeRecall(ctx, provider, config, codec) {
             }
             const companyText = await fetchCompanySharedRecall(query, config, payload.signal);
             const text = mergeLocalAndCompanyRecall(localText, companyText, config.recallMaxChars);
-            if (text.length === 0)
+            if (text.length > 0)
+                return { kind: 'enter', messages: [...messages, createRecallMessage(text)] };
+            if (mounts.length > 0)
                 return sanitized;
-            return { kind: 'enter', messages: [...messages, createRecallMessage(text)] };
+            return { kind: 'enter', messages: [...messages, createKnowledgeSurfaceMessage(UNMOUNTED_NOTICE, 'notice')] };
         }
         catch (error) {
             if (!payload.signal.aborted) {
@@ -78,10 +80,19 @@ export function registerKnowledgeCatalog(ctx, provider, config) {
         }
     });
 }
+const UNMOUNTED_NOTICE = [
+    '当前工作目录未挂载知识库。',
+    '若这次是在查制度、细则、规范或知识库文档：不要搜索工作区，不要新建文件，不要加载技能。只回复用户：当前工作目录未挂载知识库，请先挂载后再查询。',
+    '若用户要改当前项目里的代码，忽略以上限制，按原请求继续。',
+].join('\n');
 function isKnowledgeSurfaceMessage(message) {
-    return message.source.kind === 'plugin'
-        && message.source.plugin === 'dsh-knowledge'
-        && (message.source.form === 'notice' || message.source.form === 'recall');
+    const source = message.source;
+    if (source == null)
+        return false;
+    if (source.form !== 'notice' && source.form !== 'recall')
+        return false;
+    return source.kind === 'plugin:dsh-knowledge'
+        || (source.kind === 'plugin' && source.plugin === 'dsh-knowledge');
 }
 function automaticRecallQuery(payload, decision) {
     if (payload.step !== 1)

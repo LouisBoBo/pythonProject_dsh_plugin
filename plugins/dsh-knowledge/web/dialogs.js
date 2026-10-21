@@ -32,7 +32,7 @@ export function createDialogPresenter({ element, actionButton, interfaceIcon, sh
       onClose?.()
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus()
     }
-    const closeButton = actionButton(interfaceIcon('close'), () => close(), 'ghost', { 'aria-label': '关闭对话框' })
+    const closeButton = actionButton(interfaceIcon('close'), () => close(), 'ghost chrome-close', { 'aria-label': '关闭对话框', title: '关闭' })
     const cancel = actionButton(cancelLabel, () => close(true))
     const primary = primaryLabel ? actionButton(primaryLabel, async () => {
       if (busy) return
