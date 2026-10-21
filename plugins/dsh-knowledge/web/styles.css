@@ -1811,7 +1811,6 @@ html,
   .app-shell { height: auto; min-height: 100svh; min-height: 100dvh; display: block; overflow: visible; }
   .main { width: 100%; height: auto; min-height: 100svh; min-height: 100dvh; margin: 0; overflow: visible; border: 0; border-radius: 0; }
   .app-sidebar-resizer { display: none; }
-  .pane-toggle-button[data-pane="main"] { display: none; }
   .pane-toggle-button[data-pane="library"] { display: inline-grid; }
   .sidebar {
     position: fixed;

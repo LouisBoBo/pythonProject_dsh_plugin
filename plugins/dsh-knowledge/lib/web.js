@@ -58,7 +58,11 @@ function sendAsset(res, method, asset, embedded = false) {
         ...securityHeaders(embedded),
         'content-type': asset.contentType,
         'content-length': asset.body.byteLength,
-        'cache-control': asset.contentType.startsWith('text/html') ? 'no-store' : 'public, max-age=31536000, immutable',
+        // HTML always fresh. JS/CSS use content-hash ?v= but Electron still kept
+        // year-long immutable copies across plugin syncs — revalidate instead.
+        'cache-control': asset.contentType.startsWith('text/html')
+            ? 'no-store'
+            : 'no-cache, must-revalidate',
     });
     res.end(method === 'HEAD' ? undefined : asset.body);
 }

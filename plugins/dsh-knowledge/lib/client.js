@@ -3546,15 +3546,15 @@ function KnowledgeActivityNotes({ sessionId, projectId, controller }) {
   );
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-knowledge-activity-browser", children: [
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("form", { className: "dsh-knowledge-activity-search", role: "search", onSubmit: submitSearch, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconSearchOutline16, { size: 16, "aria-hidden": "true" }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconSearchOutlineRegular, { size: 16, "aria-hidden": "true" }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { "aria-label": "\u641C\u7D22\u7B14\u8BB0\u6587\u6863", value: queryInput, placeholder: "\u641C\u7D22\u7B14\u8BB0\u548C\u76EE\u5F55\u2026", onChange: (event) => setQueryInput(event.target.value) }),
       queryInput && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", onClick: () => {
         setQueryInput("");
         setQuery("");
-      }, "aria-label": "\u6E05\u9664\u641C\u7D22", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconCloseOutline16, { size: 14 }) })
+      }, "aria-label": "\u6E05\u9664\u641C\u7D22", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconCloseOutlineRegular, { size: 14 }) })
     ] }),
     !query && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("nav", { className: "dsh-knowledge-activity-breadcrumbs", "aria-label": "\u7B14\u8BB0\u76EE\u5F55\u8DEF\u5F84", children: crumbs.map((crumb, index) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-      index > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconChevronRightOutline14, { size: 12 }),
+      index > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 12 }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", "aria-current": index === crumbs.length - 1 ? "location" : void 0, onClick: () => openCrumb(crumb, index), children: crumb.name })
     ] }, `${crumb.id ?? "root"}-${index}`)) }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-knowledge-activity-list-heading", children: [
@@ -3562,17 +3562,17 @@ function KnowledgeActivityNotes({ sessionId, projectId, controller }) {
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: query ? `\u201C${query}\u201D \u7684\u7ED3\u679C` : crumbs.at(-1)?.name ?? "\u7B14\u8BB0\u6587\u6863" }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: query ? "\u641C\u7D22\u5168\u90E8\u7B14\u8BB0" : `\u5F53\u524D\u663E\u793A ${nodes.length} \u9879` })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5237\u65B0\u7B14\u8BB0", title: "\u5237\u65B0", onClick: () => setRefresh((value) => value + 1), children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconRefreshOutline14, { size: 14 }) })
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5237\u65B0\u7B14\u8BB0", title: "\u5237\u65B0", onClick: () => setRefresh((value) => value + 1), children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconRefreshOutlineRegular, { size: 14 }) })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-knowledge-activity-list", "aria-busy": listState === "loading", children: listState === "loading" && nodes.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ActivityState, { label: "\u6B63\u5728\u8BFB\u53D6\u7B14\u8BB0\u2026" }) : listState === "error" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ActivityError, { error, onRetry: () => setRefresh((value) => value + 1) }) : nodes.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ActivityEmpty, { query }) : nodes.map((node) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", { type: "button", className: "dsh-knowledge-activity-row", disabled: node.kind !== "folder" && !node.editable, onClick: () => openNode(node), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsh-knowledge-activity-row-icon", children: node.kind === "folder" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconFolderOpenOutline16, { size: 16 }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconDataOutline16, { size: 16 }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsh-knowledge-activity-row-icon", children: node.kind === "folder" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconFolderOpenOutlineRegular, { size: 16 }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconDataOutlineRegular, { size: 16 }) }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "dsh-knowledge-activity-row-copy", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: node.name }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: node.kind === "folder" ? "\u76EE\u5F55" : node.editable ? formatSize(node.size) : "\u6682\u4E0D\u652F\u6301\u4FA7\u680F\u9884\u89C8" })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className: "dsh-knowledge-activity-row-meta", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("time", { dateTime: node.updatedAt, children: formatDate(node.updatedAt) }),
-        node.kind === "folder" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconChevronRightOutline14, { size: 13 })
+        node.kind === "folder" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconChevronRightOutlineRegular, { size: 13 })
       ] })
     ] }, node.id)) })
   ] });
@@ -3582,7 +3582,7 @@ function NoteReader({ value, state, error, onBack, onRetry }) {
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-knowledge-activity-reader", children: [
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-knowledge-activity-reader-bar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", { type: "button", className: "dsh-knowledge-activity-back", onClick: onBack, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconChevronLeftOutline14, { size: 14 }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconChevronLeftOutlineRegular, { size: 14 }),
         "\u7B14\u8BB0\u76EE\u5F55"
       ] }),
       value && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
@@ -3592,7 +3592,7 @@ function NoteReader({ value, state, error, onBack, onRetry }) {
     ] }),
     state === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ActivityState, { label: "\u6B63\u5728\u6253\u5F00\u7B14\u8BB0\u2026" }) : state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ActivityError, { error, onRetry }) : value === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ActivityState, { label: "\u6B63\u5728\u51C6\u5907\u7B14\u8BB0\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-knowledge-activity-document-heading", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsh-knowledge-activity-document-icon", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconDataOutline16, { size: 18 }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsh-knowledge-activity-document-icon", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconDataOutlineRegular, { size: 18 }) }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", { children: value.node.name }),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("p", { children: [
@@ -3620,7 +3620,7 @@ function ActivityError({ error, onRetry }) {
 }
 function ActivityEmpty({ query }) {
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-knowledge-activity-empty", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconDataOutline16, { size: 20 }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives.IconDataOutlineRegular, { size: 20 }) }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: query ? "\u6CA1\u6709\u627E\u5230\u76F8\u5173\u7B14\u8BB0" : "\u8FD9\u4E2A\u76EE\u5F55\u8FD8\u662F\u7A7A\u7684" }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: query ? "\u6362\u4E2A\u5173\u952E\u8BCD\uFF0C\u6216\u6E05\u9664\u641C\u7D22\u540E\u6D4F\u89C8\u76EE\u5F55\u3002" : "\u53EF\u4EE5\u5728\u5B8C\u6574\u5DE5\u4F5C\u533A\u4E2D\u65B0\u5EFA\u6216\u5BFC\u5165\u7B14\u8BB0\u3002" })
   ] });
@@ -3825,7 +3825,7 @@ function KnowledgeActivityPanel(props) {
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("section", { className: "dsh-knowledge-activity-panel", "data-knowledge-surface": "activity", "aria-label": "\u4F1A\u8BDD\u77E5\u8BC6\u5E93", children: [
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("header", { className: "dsh-knowledge-activity-header", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-title", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-mark", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutline16, { size: 17 }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-mark", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutlineRegular, { size: 17 }) }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("strong", { children: "\u77E5\u8BC6\u5E93" }),
           /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("small", { children: [
@@ -3835,37 +3835,37 @@ function KnowledgeActivityPanel(props) {
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-header-actions", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5728\u5B8C\u6574\u5DE5\u4F5C\u533A\u4E2D\u6253\u5F00", title: "\u5B8C\u6574\u5DE5\u4F5C\u533A", onClick: openWorkspace, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconFullscreenOutline16, { size: 16 }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5173\u95ED\u4F1A\u8BDD\u77E5\u8BC6\u5E93", title: "\u5173\u95ED", onClick: () => props.controller.close(sessionId), children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconCloseOutline16, { size: 16 }) })
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5728\u5B8C\u6574\u5DE5\u4F5C\u533A\u4E2D\u6253\u5F00", title: "\u5B8C\u6574\u5DE5\u4F5C\u533A", onClick: openWorkspace, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconFullscreenOutlineRegular, { size: 16 }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5173\u95ED\u4F1A\u8BDD\u77E5\u8BC6\u5E93", title: "\u5173\u95ED", onClick: () => props.controller.close(sessionId), children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconCloseOutlineRegular, { size: 16 }) })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("nav", { className: "dsh-knowledge-activity-tabs", "aria-label": "\u77E5\u8BC6\u5E93\u5185\u5BB9\u7C7B\u578B", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("button", { type: "button", className: mode === "knowledge" ? "is-active" : "", "aria-pressed": mode === "knowledge", onClick: () => selectMode("knowledge"), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutline16, { size: 15 }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutlineRegular, { size: 15 }),
         "\u77E5\u8BC6\u6587\u6863"
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("button", { type: "button", className: mode === "notes" ? "is-active" : "", "aria-pressed": mode === "notes", onClick: () => selectMode("notes"), children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutline16, { size: 15 }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutlineRegular, { size: 15 }),
         "\u7B14\u8BB0\u6587\u6863"
       ] })
     ] }),
     mode === "notes" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(KnowledgeActivityNotes, { sessionId, projectId, controller: props.controller }) : selectedDocumentId === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-browser", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("form", { className: "dsh-knowledge-activity-search", role: "search", onSubmit: submitSearch, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconSearchOutline16, { size: 16, "aria-hidden": "true" }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconSearchOutlineRegular, { size: 16, "aria-hidden": "true" }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { "aria-label": "\u641C\u7D22\u5F53\u524D\u4F1A\u8BDD\u77E5\u8BC6\u6587\u6863", value: queryInput, placeholder: "\u641C\u7D22\u5DF2\u6302\u8F7D\u77E5\u8BC6\u2026", onChange: (event) => setQueryInput(event.target.value) }),
-        queryInput && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", onClick: clearSearch, "aria-label": "\u6E05\u9664\u641C\u7D22", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconCloseOutline16, { size: 14 }) })
+        queryInput && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", onClick: clearSearch, "aria-label": "\u6E05\u9664\u641C\u7D22", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconCloseOutlineRegular, { size: 14 }) })
       ] }),
       mountState === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityState2, { label: "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u6302\u8F7D\u2026" }) : mountState === "error" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityError2, { message: error, onRetry: () => {
         void refreshMounts();
       } }) : mounts.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityEmpty2, { title: "\u5F53\u524D\u4F1A\u8BDD\u6CA1\u6709\u6302\u8F7D\u77E5\u8BC6\u5E93", description: "\u5728\u5B8C\u6574\u5DE5\u4F5C\u533A\u4E2D\u6302\u8F7D\u540E\uFF0C\u5C31\u80FD\u5728\u8FD9\u91CC\u968F\u624B\u67E5\u9605\u6587\u6863\u3002" }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { ref: scopeRef, className: "dsh-knowledge-activity-scope", children: [
           /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("button", { type: "button", className: "dsh-knowledge-activity-scope-trigger", "aria-haspopup": "listbox", "aria-expanded": baseMenuOpen, onClick: () => setBaseMenuOpen((value) => !value), children: [
-            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-scope-icon", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutline16, { size: 15 }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-scope-icon", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutlineRegular, { size: 15 }) }),
             /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
               /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("small", { children: "\u5F53\u524D\u77E5\u8BC6\u5E93" }),
               /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("strong", { children: mounts.find((item) => item.knowledgeBaseId === selectedBaseId)?.base.name })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconChevronDownOutline14, { size: 14, className: baseMenuOpen ? "is-open" : "" })
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconChevronDownOutlineRegular, { size: 14, className: baseMenuOpen ? "is-open" : "" })
           ] }),
           baseMenuOpen && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dsh-knowledge-activity-scope-menu", role: "listbox", "aria-label": "\u5207\u6362\u77E5\u8BC6\u5E93", children: mounts.map((mount) => /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
             "button",
@@ -3876,7 +3876,7 @@ function KnowledgeActivityPanel(props) {
               className: selectedBaseId === mount.knowledgeBaseId ? "is-active" : "",
               onClick: () => selectBase(mount.knowledgeBaseId),
               children: [
-                /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutline16, { size: 15 }),
+                /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutlineRegular, { size: 15 }),
                 /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
                   /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("strong", { children: mount.base.name }),
                   /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("small", { children: mount.inheritedFrom === "project" ? "\u9879\u76EE\u6302\u8F7D" : "\u4F1A\u8BDD\u6302\u8F7D" })
@@ -3893,7 +3893,7 @@ function KnowledgeActivityPanel(props) {
           ] }),
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", className: "dsh-knowledge-activity-icon-button", "aria-label": "\u5237\u65B0\u6587\u6863", title: "\u5237\u65B0", onClick: () => {
             void loadIndex();
-          }, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconRefreshOutline14, { size: 14 }) })
+          }, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconRefreshOutlineRegular, { size: 14 }) })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dsh-knowledge-activity-list", "aria-busy": listState === "loading", children: listState === "loading" && documents.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityState2, { label: "\u6B63\u5728\u8BFB\u53D6\u6587\u6863\u2026" }) : listState === "error" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityError2, { message: error, onRetry: () => {
           void loadIndex();
@@ -3927,7 +3927,7 @@ function KnowledgeActivityPanel(props) {
 function DocumentRow({ document: document2, baseName, onClick }) {
   const stateLabel = document2.documentState === "resolved" ? "\u5DF2\u89E3\u51B3" : document2.documentState === "complete" ? "\u5DF2\u5B8C\u6210" : void 0;
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("button", { type: "button", className: "dsh-knowledge-activity-row", onClick, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-row-icon", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutline16, { size: 16 }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-row-icon", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutlineRegular, { size: 16 }) }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { className: "dsh-knowledge-activity-row-copy", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("strong", { children: document2.title }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("small", { children: baseName ? `${baseName} \xB7 ${document2.relPath}` : document2.relPath })
@@ -3943,7 +3943,7 @@ function DocumentReader({ value, state, error, onBack, onRetry }) {
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-reader", children: [
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-reader-bar", children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("button", { type: "button", className: "dsh-knowledge-activity-back", onClick: onBack, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconChevronLeftOutline14, { size: 14 }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconChevronLeftOutlineRegular, { size: 14 }),
         "\u6587\u6863\u76EE\u5F55"
       ] }),
       value && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("span", { children: [
@@ -3953,7 +3953,7 @@ function DocumentReader({ value, state, error, onBack, onRetry }) {
     ] }),
     state === "loading" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityState2, { label: "\u6B63\u5728\u6253\u5F00\u6587\u6863\u2026" }) : state === "error" ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityError2, { message: error, onRetry }) : value === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ActivityState2, { label: "\u6B63\u5728\u51C6\u5907\u6587\u6863\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-document-heading", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-document-icon", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutline16, { size: 18 }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "dsh-knowledge-activity-document-icon", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDataOutlineRegular, { size: 18 }) }),
         /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h2", { children: value.title }),
           /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { children: value.relPath })
@@ -3978,7 +3978,7 @@ function ActivityError2({ message: message3, onRetry }) {
 }
 function ActivityEmpty2({ title, description }) {
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "dsh-knowledge-activity-empty", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutline16, { size: 20 }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives2.IconDatabaseOutlineRegular, { size: 20 }) }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("strong", { children: title }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { children: description })
   ] });
@@ -4258,9 +4258,31 @@ function createKnowledgeHostTheme(snapshot) {
 // src/client.tsx
 var import_jsx_runtime5 = require("react/jsx-runtime");
 var PLUGIN_ID = "@zhongruan/dsh-knowledge";
+var PANEL_ID = "knowledge";
 var STYLE_ID = `${PLUGIN_ID}/client`;
 var CONNECTION_CONTROL_PATH = "/knowledge-control/v1/connection";
 var cachedConnectionView;
+/** Last non-blank session seen in the store — used when opening the root knowledge panel clears `current`. */
+var lastMountContext = { sessionId: void 0, projectId: void 0 };
+function rememberMountContext(list) {
+  const state = list.getSnapshot();
+  const id = normalizeSessionId(state.current);
+  if (id === void 0) return;
+  const row = state.byId[id];
+  if (row === void 0 || row.blank === true) return;
+  lastMountContext = { sessionId: id, projectId: sessionProjectId(row) };
+}
+function resolveMountSessionId(scopedId, list) {
+  return scopedId ?? normalizeSessionId(list.getSnapshot().current) ?? lastMountContext.sessionId;
+}
+function resolveMountProjectId(scopedId, list) {
+  const id = resolveMountSessionId(scopedId, list);
+  if (id !== void 0) {
+    const fromRow = sessionProjectId(list.getSnapshot().byId[id]);
+    if (fromRow !== void 0) return fromRow;
+  }
+  return lastMountContext.projectId;
+}
 var inject = ["slots", "theme", "layout", "sessions"];
 function apply2(ctx) {
   ctx.effect(installStyles, "dsh-knowledge: client styles");
@@ -4279,6 +4301,10 @@ function apply2(ctx) {
       else workspace.openDocument(target);
     }
   });
+  ctx.effect(() => {
+    rememberMountContext(ctx.sessions.list);
+    return ctx.sessions.list.subscribe(() => rememberMountContext(ctx.sessions.list));
+  }, "dsh-knowledge: remember mount context");
   ctx.effect(() => observePluginWorkspace(PLUGIN_ID, () => {
     workspace.close();
     if (!docked) activity?.close(void 0, true);
@@ -4287,17 +4313,24 @@ function apply2(ctx) {
     workspace.close();
     activity?.dispose();
   }, "dsh-knowledge: workspace lifecycle");
-  ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
-    name: "sidebar.footer.action",
-    id: "knowledge",
-    order: -10
-  }, (props) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(KnowledgeLauncher, { ...props, workspace, activity, docked: supportsDockedPanels(ctx) })));
+  ctx.slots.inject("main", () => ctx.slots.register({
+    name: "main",
+    key: PANEL_ID
+  }, (props) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(KnowledgeWorkspace, { ...props, client: ctx, workspace })));
+  ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
+    name: "sidebar.panellist",
+    id: PANEL_ID,
+    order: -20,
+    label: () => "知识库"
+  }, ({ size }) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconDataOutlineRegular, { size })));
   ctx.slots.inject("settings.plugin.item", () => ctx.slots.register({
     name: "settings.plugin.item",
     key: KNOWLEDGE_SETTINGS_NAMESPACE
   }, KnowledgeConnectionCard));
   ctx.slots.inject("conversation.chat.turnTail", () => ctx.slots.register({
     name: "conversation.chat.turnTail",
+    id: "knowledge-writeback",
+    order: 30,
     select: (owner) => ({ turn: owner.turn.turn })
   }, (props) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(KnowledgeWritebackStatus, { sessionId: String(props.sessionId), turn: props.matched.turn, workspace })));
 }
@@ -4387,49 +4420,59 @@ function KnowledgeWritebackStatus({
 }
 function createKnowledgeWorkspaceController(client, beforeOpen) {
   const listeners = /* @__PURE__ */ new Set();
-  let disposeWorkspace;
   let target;
   const notify = () => {
     for (const listener of listeners) listener();
   };
+  const isSelected = () => client.layout?.panelInfo?.getSnapshot?.()?.activePanelId === PANEL_ID;
   const close = () => {
-    if (disposeWorkspace === void 0) return;
-    const dispose = disposeWorkspace;
-    disposeWorkspace = void 0;
-    dispose();
+    if (isSelected()) {
+      try { client.layout.selectPanel(null); } catch (_error) { /* panel already cleared */ }
+    }
+    // Drop deep-link so the next panellist open is the default management view,
+    // not a stale writeback/document target left from openDocument().
+    target = void 0;
     notify();
   };
   let controller;
   const open = () => {
-    if (disposeWorkspace !== void 0) return;
+    rememberMountContext(client.sessions.list);
     beforeOpen();
     activatePluginWorkspace(PLUGIN_ID);
-    disposeWorkspace = registerMainPanel(client, PLUGIN_ID, -1, (props) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(KnowledgeWorkspace, { ...props, client, workspace: controller }), close);
+    try { client.layout.selectPanel(PANEL_ID); } catch (error) {
+      console.error("knowledge: could not open main panel", error);
+    }
+    notify();
   };
   controller = {
-    isOpen: () => disposeWorkspace !== void 0,
+    isOpen: () => isSelected(),
     open: () => {
       target = void 0;
       open();
-      notify();
     },
     toggle: () => {
-      if (disposeWorkspace !== void 0) return close();
+      if (isSelected()) return close();
       target = void 0;
       open();
-      notify();
     },
     openDocument: (nextTarget) => {
       target = nextTarget;
       open();
-      notify();
     },
     currentTarget: () => target,
     close,
     subscribe: (listener) => {
       listeners.add(listener);
+      const offPanel = typeof client.layout?.panelInfo?.subscribe === "function"
+        ? client.layout.panelInfo.subscribe(() => {
+          // Host may deselect the panel without calling close(); clear deep-link then.
+          if (!isSelected() && target !== void 0) target = void 0;
+          listener();
+        })
+        : () => {};
       return () => {
         listeners.delete(listener);
+        offPanel();
       };
     }
   };
@@ -4654,7 +4697,7 @@ function KnowledgeLauncher({ wide, useSessions, workspace, activity, docked }) {
         title: open ? "\u8FD4\u56DE\u5BF9\u8BDD" : "\u6253\u5F00\u77E5\u8BC6\u5E93\u5DE5\u4F5C\u533A",
         onClick: () => workspace.toggle(),
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconDataOutline16, { size: wide ? 16 : 18 }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconDataOutlineRegular, { size: wide ? 16 : 18 }),
           wide && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { children: "\u77E5\u8BC6\u5E93" })
         ]
       }
@@ -4671,14 +4714,18 @@ function KnowledgeLauncher({ wide, useSessions, workspace, activity, docked }) {
         onClick: () => {
           if (currentSessionId !== void 0) activity.toggle(currentSessionId);
         },
-        children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconPanelLeftOutline16, { size: 16, className: "dsh-knowledge-panel-right-icon" })
+        children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconPanelLeftOutlineRegular, { size: 16, className: "dsh-knowledge-panel-right-icon" })
       }
     )
   ] });
 }
+function sessionProjectId(row) {
+  if (row === null || typeof row !== "object") return void 0;
+  const cwd = row.cwd ?? row.header?.cwd;
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : void 0;
+}
 function KnowledgeWorkspace({
   sessionId: scopedSessionId,
-  useSessions,
   client,
   workspace
 }) {
@@ -4687,9 +4734,19 @@ function KnowledgeWorkspace({
   const [managementPath, setManagementPath] = (0, import_react6.useState)(cachedManagementPath);
   const [panelError, setPanelError] = (0, import_react6.useState)("");
   const [target, setTarget] = (0, import_react6.useState)(workspace.currentTarget());
-  const selectedSessionId = useSessions((state) => state.current);
-  const sessionId = scopedSessionId ?? selectedSessionId;
-  const projectId = useSessions((state) => sessionId === void 0 ? void 0 : state.byId[sessionId]?.cwd);
+  // 0.2.1 root `main` may clear `current`; fall back to last non-blank session we observed.
+  const scopedId = normalizeSessionId(scopedSessionId);
+  const list = client.sessions.list;
+  const sessionId = (0, import_react6.useSyncExternalStore)(
+    (onStoreChange) => list.subscribe(onStoreChange),
+    () => resolveMountSessionId(scopedId, list),
+    () => resolveMountSessionId(scopedId, list)
+  );
+  const projectId = (0, import_react6.useSyncExternalStore)(
+    (onStoreChange) => list.subscribe(onStoreChange),
+    () => resolveMountProjectId(scopedId, list),
+    () => resolveMountProjectId(scopedId, list)
+  );
   const knowledgeUrl = managementPath === void 0 ? void 0 : knowledgePanelUrl(managementPath, sessionId, projectId, target);
   const frame = (0, import_react6.useRef)(null);
   const themeFrame = (0, import_react6.useRef)(0);
@@ -4754,8 +4811,8 @@ function KnowledgeWorkspace({
   }, [client, scheduleTheme, sendTheme]);
   return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("section", { className: "dsh-knowledge-workspace", "data-knowledge-surface": "workspace", "aria-labelledby": "dsh-knowledge-workspace-title", children: [
     /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("header", { className: "dsh-knowledge-workspace-header", children: /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { children: [
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { type: "button", "data-knowledge-workspace-close": true, onClick: workspace.close, "aria-label": "\u8FD4\u56DE\u4F1A\u8BDD", title: "\u8FD4\u56DE\u4F1A\u8BDD", children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconChevronLeftOutline14, { size: 15 }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconDataOutline16, { size: 18 }),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { type: "button", "data-knowledge-workspace-close": true, onClick: workspace.close, "aria-label": "\u8FD4\u56DE\u4F1A\u8BDD", title: "\u8FD4\u56DE\u4F1A\u8BDD", children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconChevronLeftOutlineRegular, { size: 15 }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(import_dsh_client_ui_primitives3.IconDataOutlineRegular, { size: 18 }),
       /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("span", { children: [
         /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("h2", { id: "dsh-knowledge-workspace-title", children: "\u77E5\u8BC6\u5E93" }),
         /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("p", { children: "\u6587\u6863\u3001\u5BA1\u6838\u3001\u6302\u8F7D\u4E0E\u8BBF\u95EE\u7BA1\u7406" })
@@ -4775,8 +4832,10 @@ function KnowledgeWorkspace({
 }
 function knowledgePanelUrl(managementPath, sessionId, projectId, target) {
   const params = new URLSearchParams();
-  if (sessionId !== void 0) params.set("sessionId", sessionId);
-  if (projectId !== void 0) params.set("projectId", projectId);
+  const sid = normalizeSessionId(sessionId);
+  const pid = typeof projectId === "string" && projectId.length > 0 ? projectId : void 0;
+  if (sid !== void 0) params.set("sessionId", sid);
+  if (pid !== void 0) params.set("projectId", pid);
   if (target !== void 0) {
     if (target.view === "writeback") {
       params.set("view", "writeback");

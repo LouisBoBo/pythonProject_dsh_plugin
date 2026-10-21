@@ -222,11 +222,20 @@ function readTool(provider, codec) {
         async execute(raw, exec) {
             const agent = requireAgent(exec);
             const args = asRecord(raw);
-            const handle = requireNonEmptyString(args.handle, 'handle', 4096);
+            const handle = requireNonEmptyString(args.handle, 'handle', 4096).trim();
             const offset = optionalInteger(args.offset, 'offset', 0, 1_000_000) ?? 0;
             const maxChars = optionalInteger(args.maxChars, 'maxChars', 500, 20_000) ?? 12_000;
-            const { entry, mount } = await readMountedKnowledge(provider, agent, handle, codec, exec.signal);
-            return formatKnowledgeEntry(entry, mount, offset, maxChars);
+            try {
+                const { entry, mount } = await readMountedKnowledge(provider, agent, handle, codec, exec.signal);
+                return formatKnowledgeEntry(entry, mount, offset, maxChars);
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (message === 'invalid knowledge handle' || message === 'knowledge handle does not belong to this session') {
+                    throw new Error(`${message}. knowledge_read 只能使用本轮 knowledge_search 返回的完整 handle（k1.…），禁止自造、截断或把 mes_company_knowledge / 文档路径当作 handle。请先 knowledge_base_search → knowledge_search，再原样传入 handle。`);
+                }
+                throw error;
+            }
         },
     };
 }

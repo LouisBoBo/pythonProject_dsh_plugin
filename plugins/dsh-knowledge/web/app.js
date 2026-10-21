@@ -43,9 +43,9 @@ const DOCUMENT_STATE_LABELS = { open: '进行中', resolved: '已解决', comple
 const DOCUMENT_LAYOUT_KEY = 'dsh-knowledge.document-layout'
 const KNOWLEDGE_DOCUMENT_DRAG_TYPE = 'application/x-dsh-knowledge-document-id'
 const NOTE_MAX_FILE_SIZE = 64 * 1024 * 1024
-/** 侧栏只展示这两项；其它 view（待审核、回写、笔记等）仍可通过 URL / 宿主深链打开。 */
+/** 侧栏只展示知识文档；挂载页已下线（免挂载）。其它 view 仍可通过 URL / 宿主深链打开。 */
 const SIDEBAR_NAV_GROUPS = [
-  ['知识工作区', [['entries', '知识文档'], ['bases', '知识库与挂载']]],
+  ['知识工作区', [['entries', '知识文档']]],
 ]
 const pageParams = new URLSearchParams(location.search)
 const initialKnowledgeBaseId = pageParams.get('knowledgeBaseId')?.trim() || ''
@@ -1741,11 +1741,11 @@ function renderShell() {
     element('main', { class: 'main' },
       element('header', { class: 'topbar' },
         element('div', { class: 'topbar-title' },
+          // Compact-only nav drawer (CSS hides on wide desktop). Main-pane hide toggle stays removed.
           actionButton(interfaceIcon('menu'), () => setMenuOpen(!state.menuOpen), 'ghost mobile-menu', {
             'aria-label': state.menuOpen ? '关闭导航菜单' : '打开导航菜单',
             'aria-expanded': String(state.menuOpen),
           }),
-          paneToggleButton('main', !state.documentView.sidebarHidden, () => setSidebarHidden(!state.documentView.sidebarHidden), '主导航栏'),
           renderContextPaneToggle(),
           element('div', { class: 'topbar-heading' },
             element('span', { class: 'topbar-kicker' }, `KNOWLEDGE / ${viewIndexes[state.view] || '00'}`),
@@ -1854,6 +1854,10 @@ function setSidebarWidth(width, shell, handle) {
   handle?.setAttribute('aria-valuenow', String(width))
 }
 
+function compactChrome() {
+  return window.matchMedia('(max-width: 1120px), (hover: none) and (pointer: coarse) and (max-width: 1400px)').matches
+}
+
 function setMenuOpen(open) {
   state.menuOpen = open
   const shell = app.querySelector('.app-shell')
@@ -1879,7 +1883,7 @@ function applySidebarVisibility(shell, hidden) {
   const resizer = shell.querySelector(':scope > .app-sidebar-resizer')
   const main = shell.querySelector(':scope > .main')
   const toggle = shell.querySelector('.pane-toggle-button[data-pane="main"]')
-  const compact = window.matchMedia('(max-width: 1120px), (hover: none) and (pointer: coarse) and (max-width: 1400px)').matches
+  const compact = compactChrome()
   const sidebarUnavailable = compact ? !state.menuOpen : hidden
   sidebar?.toggleAttribute('inert', sidebarUnavailable)
   resizer?.toggleAttribute('inert', hidden)
@@ -2003,7 +2007,6 @@ function renderKnowledgeBases() {
   const activeBases = state.knowledgeBases.filter(base => base.status === 'active')
   const archivedBases = state.knowledgeBases.filter(base => base.status === 'archived')
   if (state.knowledgeBaseView === 'detail') return renderKnowledgeBaseDetail()
-  const contextAvailable = Boolean(state.mountContext.projectId || state.mountContext.sessionId)
   const query = state.knowledgeBaseQuery.trim().toLocaleLowerCase()
   const matchesQuery = base => !query || [base.name, base.group, base.description, base.defaultTags.join(' ')]
     .some(value => String(value || '').toLocaleLowerCase().includes(query))
@@ -2061,20 +2064,20 @@ function renderKnowledgeBases() {
     mountToolbar,
     element('section', { class: 'mount-section', 'aria-labelledby': 'mounts-heading' },
       element('div', { class: 'section-heading' }, element('div', {},
-        element('h2', { id: 'mounts-heading' }, '挂载范围'),
-        element('p', {}, '先用下方「项目 / 会话」切换挂载维度；会话默认继承项目，只有需要差异时才创建会话覆盖。'),
+        element('h2', { id: 'mounts-heading' }, '知识库可用性'),
+        element('p', {}, '免挂载：上传或创建后的可用知识库对所有工作区自动可见，对话召回不再依赖项目/会话挂载。'),
       )),
-      contextAvailable
-        ? element('div', { class: 'mount-context' },
-          state.mountContext.projectId ? contextPill('项目', state.mountContext.projectId) : contextPill('项目', '当前页面未提供'),
-          state.mountContext.sessionId ? contextPill('会话', state.mountContext.sessionId) : contextPill('会话', '当前页面未提供'),
+      element('div', { class: 'mount-context' }, contextPill('范围', '全部工作区')),
+      activeBases.length
+        ? element('div', { class: 'mount-global-list', role: 'list' },
+          ...activeBases.map(base => element('div', { class: 'mount-global-row', role: 'listitem' },
+            element('strong', {}, base.name),
+            element('span', {}, base.group || '未分组'),
+            badge('全局可用', 'success'),
+            actionButton('打开文档', () => { void openKnowledgeBaseDocuments(base) }, 'ghost small'),
+          )),
         )
-        : element('div', { class: 'context-warning' }, '请从 DSH 当前会话的左侧“知识库”入口打开，才能管理当前项目和会话的挂载。'),
-      !contextAvailable
-        ? null
-        : activeBases.length
-          ? renderMountManager(activeBases)
-          : emptyState('还没有可用知识库', '点上方「创建知识库」后再回到这里挂载。'),
+        : emptyState('还没有可用知识库', '点上方「创建知识库」或「管理知识库」导入文档。'),
     ),
   )
 }

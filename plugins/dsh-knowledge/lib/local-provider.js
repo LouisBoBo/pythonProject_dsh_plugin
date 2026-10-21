@@ -405,22 +405,51 @@ export class LocalKnowledgeProvider {
     }
     async resolveMounts(sessionId, projectId) {
         this.assertOpen();
+        // 免挂载：无显式挂载时，active 库自动可召回（writeMode=none）。
+        // 显式挂载仍可关闭整库（enabled=false）或仅关召回（recallEnabled=false），并覆盖 writeMode/标签。
+        const bases = (await this.listKnowledgeBases()).filter(base => base.status === 'active');
         const project = projectId === undefined ? [] : await this.listMounts('project', projectId);
-        const session = await this.listMounts('session', sessionId);
-        const resolved = new Map();
-        for (const mount of project)
-            resolved.set(mount.knowledgeBaseId, { mount, inheritedFrom: 'project' });
-        for (const mount of session)
-            resolved.set(mount.knowledgeBaseId, { mount });
-        const bases = new Map((await this.listKnowledgeBases()).map(base => [base.id, base]));
+        const session = sessionId ? await this.listMounts('session', sessionId) : [];
+        const explicit = new Map();
+        for (const mount of project) {
+            explicit.set(mount.knowledgeBaseId, { mount, inheritedFrom: 'project' });
+        }
+        for (const mount of session) {
+            explicit.set(mount.knowledgeBaseId, { mount });
+        }
+        const targetId = sessionId || 'global';
+        const timestamp = nowIso();
         const output = [];
-        for (const { mount, inheritedFrom } of resolved.values()) {
-            if (!mount.enabled)
+        for (const base of bases) {
+            const hit = explicit.get(base.id);
+            if (hit !== undefined) {
+                if (!hit.mount.enabled)
+                    continue;
+                output.push({
+                    ...hit.mount,
+                    enabled: true,
+                    recallEnabled: hit.mount.recallEnabled,
+                    base,
+                    ...hit.inheritedFrom === undefined ? {} : { inheritedFrom: hit.inheritedFrom },
+                });
                 continue;
-            const base = bases.get(mount.knowledgeBaseId);
-            if (base === undefined || base.status !== 'active')
-                continue;
-            output.push({ ...mount, base, ...inheritedFrom === undefined ? {} : { inheritedFrom } });
+            }
+            output.push({
+                id: `global:${base.id}`,
+                targetKind: 'session',
+                targetId,
+                knowledgeBaseId: base.id,
+                enabled: true,
+                recallEnabled: true,
+                // 全局免挂载只开放召回；回写仍需显式挂载，避免写到全部库。
+                writeMode: 'none',
+                includeTags: [],
+                excludeTags: [],
+                extractionInstructions: '',
+                createdAt: base.createdAt ?? timestamp,
+                updatedAt: base.updatedAt ?? timestamp,
+                base,
+            });
         }
         return output.sort((left, right) => left.base.name.localeCompare(right.base.name, 'zh-CN'));
     }

@@ -1,30 +1,44 @@
 ---
-description: 插件改完必须同步到浏览器宿主（~/.dsh），禁止只改仓库就当验收完成
+description: 插件改完必须同步到桌面宿主（默认）与浏览器；禁止只改仓库就当验收完成
 alwaysApply: true
 ---
 
-# 插件开发验收 = 浏览器宿主（必同步）
+# 插件开发验收 = 桌面宿主（必同步）
 
-日常验收入口是 **浏览器**（WorkBuddy 网页壳，默认 `http://127.0.0.1:3081`，`DSH_HOME=~/.dsh`）。  
-改完 `plugins/dsh-*` **不等于**浏览器已更新：浏览器读的是 Profile 里已装包。
+当前对接与日常验收入口是 **桌面 WorkBuddy**（江西中软工作助手）。  
+改完 `plugins/dsh-*` **不等于**桌面已更新：桌面读的是 Profile 里已装包。
+
+插件装在 **DSH Profile**，不跟侧栏工作区/「新项目」走；换项目不会自动装新版本。
+
+## 主同步路径（桌面，默认 · 本机实测）
+
+进程参数里的 profile（优先）：
+
+`%LOCALAPPDATA%\ZR_DSH\dsh-home\profiles\desktop\node_modules\@zhongruan\dsh-<name>\`
+
+备选（旧/浏览器一体包曾用）：
+
+`%APPDATA%\zr-workbuddy-desktop\dsh-home\profiles\web\node_modules\@zhongruan\dsh-<name>\`
+
+改完后两处都覆盖更稳；**以进程 CommandLine 里的 `...\profiles\desktop` 为准**。
 
 ## 硬要求（每次改插件 UI / 客户端 / 运行时代码后）
 
 1. 改仓库 `plugins/dsh-<name>/`（`src` → `build` / 同步 `lib`）。
-2. **立刻同步**到浏览器宿主安装目录，至少：
+2. **立刻同步**到上式桌面 profile；若改了 `client.js`：覆盖该包下的 `lib/client.js`。
+3. **同时**同步浏览器壳（次要）：
    - `~/.dsh/profiles/web/node_modules/@zhongruan/dsh-<name>/`
-   - 若改了 `client.js`：覆盖该包下的 `lib/client.js`（及同路径 `src/client.js` 若存在）
-3. 需要整包覆盖时可用：
+4. 需要整包覆盖时可用：
    `PREFER_LOCAL=1 ./scripts/internal-market/install-latest.sh dsh-<name>`
-   （脚本会优先装到已检测到的 WorkBuddy / `~/.dsh` Profile）
-4. 告知用户：**⌘⇧R** 强刷；客户端仍旧则 `scripts/host.sh restart-web`。
-5. **未同步到 `~/.dsh` 不得说「已好」「刷新即可」**。
+5. 告知用户：**完全退出**江西中软工作助手再开；必要时清  
+   `%APPDATA%\@deepseek-ai\dsh-desktop\` 下 `Cache` / `Code Cache`。  
+   未同步到进程实际用的 profile **不得**说「已好」「刷新即可」。
 
 ## 禁止
 
 ```text
-❌ 只改 plugins/dsh-xxx 源码 → 让用户浏览器刷新
-✅ 改源码 → 同步 ~/.dsh 已装包 → 再让用户 ⌘⇧R / 必要时重启 3081
+❌ 只改 plugins/dsh-xxx 源码 → 让用户刷新
+❌ 只同步 ~/.dsh 或 zr-workbuddy-desktop，却用 ZR_DSH desktop profile 验收
+❌ 以为「新开工作区/项目」会带上仓库里的插件改动
+✅ 改源码 → 同步 Local\ZR_DSH\...\profiles\desktop → 完全退出再开桌面助手
 ```
-
-桌面一体包（Application Support / :13080）若本次也在用，一并同步；**默认以浏览器 :3081 / `~/.dsh` 为准**。
