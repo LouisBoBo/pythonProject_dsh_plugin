@@ -84,6 +84,7 @@ const UNMOUNTED_NOTICE = [
     '当前工作目录未挂载知识库。',
     '若这次是在查制度、细则、规范或知识库文档：不要搜索工作区，不要新建文件，不要加载技能。只回复用户：当前工作目录未挂载知识库，请先挂载后再查询。',
     '若用户要改当前项目里的代码，忽略以上限制，按原请求继续。',
+    '若用户要把对话里已经写好的文档存入资料库、保存到资料库或放到 MOM 目录：这不是知识库挂载，不要要求先挂载，不要禁止写文件。有 zr_mom_save 就调用它。',
 ].join('\n');
 function isKnowledgeSurfaceMessage(message) {
     const source = message.source;

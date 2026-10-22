@@ -1,0 +1,53 @@
+{
+  "name": "@zhongruan/dsh-mom-docs",
+  "version": "0.1.6",
+  "description": "本地资料库：把对话中的文档保存到工作区 MOM/当天日期/文件",
+  "dshMarket": {
+    "zh": "本地资料库：把对话文档保存到工作区 MOM，并在侧栏按工作目录查看",
+    "en": "Local library: save chat documents under workspace MOM and browse them by workspace"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "cordis.patch.yml"],
+  "scripts": {
+    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/client.js','lib/client.js')\"",
+    "self-test": "node lib/self-test.js"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "http://175.178.238.31/dsh-plugins/npm/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

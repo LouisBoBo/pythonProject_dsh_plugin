@@ -1,0 +1,4 @@
+- insert:
+    - id: mom-docs
+      name: '@zhongruan/dsh-mom-docs'
+      config: {}
