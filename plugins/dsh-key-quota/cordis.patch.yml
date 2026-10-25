@@ -1,0 +1,12 @@
+# 只做 Key 用量限额。默认 client，不监听局域网。
+# 你的电脑改 role: server、listen: 0.0.0.0，并把 quotaBaseUrl 留给同事填写。
+- insert:
+    - id: key-quota
+      name: '@zhongruan/dsh-key-quota'
+      config:
+        enabled: true
+        role: client
+        listen: 127.0.0.1
+        port: 18790
+        quotaBaseUrl: ''
+        reportToken: ''
