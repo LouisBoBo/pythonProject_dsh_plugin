@@ -79,13 +79,6 @@ window.__ModuleLoader__.load({
           if (!chosen && row && row.retainedBy && Number(row.retainedBy.mainView || 0) > 0) chosen = row
         })
         if (!chosen && state.current) chosen = byId[state.current]
-        if (!chosen) {
-          Object.keys(byId).forEach(function (id) {
-            var row = byId[id]
-            var cwd = row && (row.cwd || (row.header && row.header.cwd))
-            if (!chosen && cwd) chosen = row
-          })
-        }
         var path = chosen && (chosen.cwd || (chosen.header && chosen.header.cwd))
         return typeof path === 'string' ? path : ''
       } catch (err) {
@@ -342,6 +335,10 @@ window.__ModuleLoader__.load({
             ),
             !directory
               ? h('div', { className: 'mom-lib-empty' }, '当前会话还没有工作目录。')
+              : count === 0
+              ? h('div', { className: 'mom-lib-empty' }, query.trim() || starOnly || kind !== 'all'
+                ? '没有符合条件的文件。'
+                : '这个工作目录的 MOM 里还没有文件。')
               : h('div', null,
                   h('button', {
                     type: 'button',
@@ -352,9 +349,6 @@ window.__ModuleLoader__.load({
                     h('span', { className: 'mom-lib-workspace', title: workspaceName(workspacePath) }, workspaceName(workspacePath)),
                     h('span', { className: 'mom-lib-badge' }, count + ' 个文件'),
                   ),
-                  openGroup && count === 0
-                    ? h('div', { className: 'mom-lib-empty' }, '这个工作目录的 MOM 里还没有文件。')
-                    : null,
                   openGroup ? shown.map(function (day) {
                     return h('div', { key: day.date },
                       h('div', { className: 'mom-lib-day' }, day.date),
