@@ -32,7 +32,10 @@ window.__ModuleLoader__.load({
         '.kq-root .wb-usage-tabs td.active{background:rgba(15,23,42,.06)}',
         '.kq-root .wb-usage-tabs td.active button{color:#111827;font-weight:600}',
         '.kq-root .wb-usage-view-body{padding:0 20px 28px}',
-        '.kq-root .wb-usage-page{padding-top:12px;font:13px/1.5 -apple-system,PingFang SC,Microsoft YaHei,sans-serif}',
+        '.kq-root .wb-usage-page{padding-top:0;font:13px/1.5 -apple-system,PingFang SC,Microsoft YaHei,sans-serif}',
+        '.kq-root .kq-sticky{position:sticky;top:0;z-index:8;background:#fff;margin:0 -20px 12px;padding:12px 20px 10px;border-bottom:1px solid #e8edf2}',
+        '.kq-root .kq-sticky .kq-page-title{margin:0 0 12px}',
+        '.kq-root .kq-sticky .wb-usage-filter{margin:0}',
         '.kq-root .kq-keyline{margin:0 0 10px;color:#64748b;font-size:12px}',
         '.kq-root .kq-token{font-family:ui-monospace,monospace;word-break:break-all;background:#f8fafc;border-radius:8px;padding:8px 10px;margin:4px 0 10px}',
         '.kq-root .kq-setup p{margin:6px 0;color:#475569;font-size:12px}',
@@ -45,7 +48,13 @@ window.__ModuleLoader__.load({
         '.kq-root .kq-add input.kq-key{flex:1 1 460px;min-width:360px;max-width:100%}',
         '.kq-root .kq-limit{min-width:148px}',
         '.kq-root .kq-actions{display:flex;gap:6px;justify-content:flex-end}',
+        '.kq-root .kq-task{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.kq-root .kq-pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:10px;color:#64748b;font-size:12px}',
+        '.kq-root .kq-pager .kq-btn:disabled{opacity:.45;cursor:default}',
+        '.kq-root .kq-page-title{margin:2px 0 14px;font-size:18px;font-weight:700;color:#0f172a;line-height:1.3}',
         '.kq-root .wb-usage-filter{display:flex;align-items:center;gap:8px;margin:0 0 12px;flex-wrap:wrap}',
+        '.kq-root .kq-corner{margin-left:auto;display:flex;align-items:center;gap:8px}',
+        '.kq-root .kq-corner .wb-set-msg{margin-right:0}',
         '.kq-root .wb-usage-filter label{font-size:12px;color:#64748b;font-weight:600}',
         '.kq-root .wb-usage-filter input,.kq-root .wb-usage-filter select{border:1px solid #d1d5db;border-radius:8px;padding:6px 10px;font:13px inherit;color:#111827;background:#fff}',
         '.kq-root .wb-usage-kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 18px}',
@@ -428,6 +437,122 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function modelTable(usage) {
+      var llm = (usage && usage.llm && usage.llm.models) || []
+      var cursor = (usage && usage.cursor && usage.cursor.models) || []
+      var rows = llm.map(function (r) {
+        return { provider: r.provider || '', model: r.model || '', side: 'LLM', calls: r.calls || 0, tokens: r.tokens || 0 }
+      }).concat(cursor.map(function (r) {
+        return { provider: r.provider || '', model: r.model || '', side: '写码', calls: r.calls || 0, tokens: r.tokens || 0 }
+      }))
+      return h('div', { className: 'wb-set-card' },
+        h('h3', null, '各模型'),
+        h('div', { className: 'body' },
+          rows.length ? h('table', { className: 'kq-table' },
+            h('thead', null, h('tr', null,
+              h('th', null, '供应商'),
+              h('th', null, '模型'),
+              h('th', null, '用途'),
+              h('th', null, '次数'),
+              h('th', null, 'Token'),
+            )),
+            h('tbody', null, rows.map(function (r, i) {
+              return h('tr', { key: r.provider + '\0' + r.model + '\0' + r.side + i },
+                h('td', null, r.provider || '—'),
+                h('td', null, r.model || '—'),
+                h('td', null, r.side),
+                h('td', null, String(r.calls)),
+                h('td', { title: fmtFull(r.tokens) }, fmtTokens(r.tokens)),
+              )
+            })),
+          ) : h('p', null, '这一天还没有读到模型调用。'),
+        ),
+      )
+    }
+
+    function shortWhen(ts) {
+      var text = String(ts || '')
+      return text.length >= 16 ? text.slice(5, 16).replace('T', ' ') : text
+    }
+
+    function taskRows(rows) {
+      var map = {}
+      var order = []
+      rows.forEach(function (row) {
+        var task = row.task || ''
+        var bucket = map[task]
+        if (!bucket) {
+          bucket = { task: task, tokens: 0, calls: 0, providers: [], models: [], first: row.ts || '', last: row.ts || '' }
+          map[task] = bucket
+          order.push(task)
+        }
+        bucket.tokens += Number(row.tokens) || 0
+        bucket.calls += 1
+        if (row.provider && bucket.providers.indexOf(row.provider) < 0) bucket.providers.push(row.provider)
+        if (row.model && bucket.models.indexOf(row.model) < 0) bucket.models.push(row.model)
+        if (row.ts && (!bucket.first || row.ts < bucket.first)) bucket.first = row.ts
+        if (row.ts && row.ts > bucket.last) bucket.last = row.ts
+      })
+      return order.map(function (task) { return map[task] }).sort(function (a, b) {
+        return a.last < b.last ? 1 : a.last > b.last ? -1 : 0
+      })
+    }
+
+    function detailTable(usage, page, setPage) {
+      var pageSize = 10
+      var raw = (usage && usage.detail) || []
+      var rows = taskRows(raw)
+      var pages = Math.max(1, Math.ceil(rows.length / pageSize))
+      var current = page < 1 ? 1 : (page > pages ? pages : page)
+      var start = (current - 1) * pageSize
+      var slice = rows.slice(start, start + pageSize)
+      return h('div', { className: 'wb-set-card' },
+        h('h3', null, '调用明细'),
+        h('div', { className: 'body' },
+          rows.length ? h('table', { className: 'kq-table' },
+            h('thead', null, h('tr', null,
+              h('th', null, '时间'),
+              h('th', null, '任务名称'),
+              h('th', null, '供应商'),
+              h('th', null, '模型'),
+              h('th', null, '次数'),
+              h('th', null, 'Token'),
+            )),
+            h('tbody', null, slice.map(function (r, i) {
+              var begin = shortWhen(r.first)
+              var end = shortWhen(r.last)
+              var when = begin === end ? begin : (begin.slice(0, 6) === end.slice(0, 6) ? begin + '–' + end.slice(6) : begin + '–' + end)
+              var task = r.task || '—'
+              return h('tr', { key: task + (start + i) },
+                h('td', null, when),
+                h('td', { className: 'kq-task', title: task }, task),
+                h('td', null, r.providers.join('、') || '—'),
+                h('td', null, r.models.join('、') || '—'),
+                h('td', null, String(r.calls)),
+                h('td', { title: fmtFull(r.tokens) }, fmtTokens(r.tokens)),
+              )
+            })),
+          ) : h('p', null, '这一天还没有调用明细。'),
+          rows.length > pageSize ? h('div', { className: 'kq-pager' },
+            h('button', {
+              type: 'button',
+              className: 'kq-btn',
+              disabled: current <= 1,
+              onClick: function () { setPage(current - 1) },
+            }, '上一页'),
+            h('span', null, (start + 1) + '–' + (start + slice.length) + ' / ' + rows.length),
+            h('button', {
+              type: 'button',
+              className: 'kq-btn',
+              disabled: current >= pages,
+              onClick: function () { setPage(current + 1) },
+            }, '下一页'),
+          ) : null,
+          raw.length >= 200 ? h('p', null, '只列出最近 200 条调用，再按任务合并。上面的次数和 Token 仍是全部合计。') : null,
+        ),
+      )
+    }
+
     function peopleNode(title, subtitle, rows) {
       var list = (rows || []).slice().sort(function (a, b) {
         var ta = (Number(a.llm_tokens) || 0) + (Number(a.cursor_tokens) || 0)
@@ -600,6 +725,9 @@ window.__ModuleLoader__.load({
       var scopeState = useState('personal')
       var scope = scopeState[0]
       var setScope = scopeState[1]
+      var detailPageState = useState(1)
+      var detailPage = detailPageState[0]
+      var setDetailPage = detailPageState[1]
 
       function reload() {
         return load(onDate, grain, scope)
@@ -669,6 +797,8 @@ window.__ModuleLoader__.load({
         return function () { stopped = true; clearTimeout(timer) }
       }, [onDate, grain, scope])
 
+      useEffect(function () { setDetailPage(1) }, [onDate, grain, scope])
+
       var usage = (data && data.usage) || null
       var monthMode = grain === 'month'
       var isAdmin = Boolean(data && ((data.viewer && data.viewer.admin) || data.viewerAdmin))
@@ -711,6 +841,38 @@ window.__ModuleLoader__.load({
           ) : null,
           h('div', { className: 'wb-usage-view-body' },
             h('div', { className: 'wb-usage-page' },
+              h('div', { className: 'kq-sticky' },
+                h('h2', { className: 'kq-page-title' }, '用量统计'),
+                showKeys ? null : h('div', { className: 'wb-usage-filter' },
+                  h('label', null, monthMode ? '月份' : '日期'),
+                  h('input', {
+                    type: monthMode ? 'month' : 'date',
+                    value: monthMode ? String(onDate).slice(0, 7) : onDate,
+                    onChange: function (ev) {
+                      var v = ev.target.value
+                      if (!v) return
+                      setOnDate(v.length === 7 ? v + '-01' : v)
+                    },
+                  }),
+                  h('label', null, '统计粒度'),
+                  h('select', {
+                    value: grain,
+                    onChange: function (ev) { setGrain(ev.target.value === 'month' ? 'month' : 'day') },
+                  },
+                    h('option', { value: 'day' }, '按日'),
+                    h('option', { value: 'month' }, '按月'),
+                  ),
+                  h('div', { className: 'kq-corner' },
+                    h('button', {
+                      type: 'button',
+                      className: 'wb-set-btn',
+                      disabled: busy,
+                      onClick: function () { load(onDate, grain, scope) },
+                    }, busy ? '刷新中…' : '刷新'),
+                    msg ? h('span', { className: 'wb-set-msg' + (err ? ' err' : ' ok') }, msg) : null,
+                  ),
+                ),
+              ),
               showKeys ? h('div', { className: 'wb-set-card kq-setup' },
                 h('div', { className: 'body' },
                   data && data.viewer
@@ -719,26 +881,6 @@ window.__ModuleLoader__.load({
                 ),
               ) : null,
               showKeys ? null : h('div', null,
-              h('div', { className: 'wb-usage-filter' },
-                h('label', null, monthMode ? '月份' : '日期'),
-                h('input', {
-                  type: monthMode ? 'month' : 'date',
-                  value: monthMode ? String(onDate).slice(0, 7) : onDate,
-                  onChange: function (ev) {
-                    var v = ev.target.value
-                    if (!v) return
-                    setOnDate(v.length === 7 ? v + '-01' : v)
-                  },
-                }),
-                h('label', null, '统计粒度'),
-                h('select', {
-                  value: grain,
-                  onChange: function (ev) { setGrain(ev.target.value === 'month' ? 'month' : 'day') },
-                },
-                  h('option', { value: 'day' }, '按日'),
-                  h('option', { value: 'month' }, '按月'),
-                ),
-              ),
               h('div', { className: 'wb-usage-kpis' },
                 h('div', { className: 'wb-usage-kpi' },
                   h('div', { className: 'k' }, dayLab + ' · LLM'),
@@ -774,15 +916,8 @@ window.__ModuleLoader__.load({
                   ' · 按合计 Token 从高到低 · 含全部账号（含管理员）· 共 ' + String(people.length) + ' 人',
                 people,
               ) : null,
-              h('div', { className: 'wb-set-bar' },
-                h('button', {
-                  type: 'button',
-                  className: 'wb-set-btn',
-                  disabled: busy,
-                  onClick: function () { load(onDate, grain, scope) },
-                }, busy ? '刷新中…' : '刷新'),
-                msg ? h('span', { className: 'wb-set-msg' + (err ? ' err' : ' ok') }, msg) : null,
-              ),
+              modelTable(usage),
+              detailTable(usage, detailPage, setDetailPage),
               ),
             ),
           ),

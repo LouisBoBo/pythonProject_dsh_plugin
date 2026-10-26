@@ -161,9 +161,146 @@ describe('engine usage files', () => {
       assert.equal(view.usage.today.llm.calls, 1)
       assert.equal(view.usage.today.llm.tokens, 15588)
       assert.equal(view.usage.llm.models[0].model, 'deepseek-flash')
+      assert.equal(view.usage.llm.models[0].provider, 'deepseek-official')
       assert.equal(view.usage.today.cursor.calls, 1)
       assert.equal(view.usage.today.cursor.tokens, 28)
       assert.equal(view.usage.cursor.models[0].model, 'composer-2')
+      assert.equal(view.usage.cursor.models[0].provider, 'cursor')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a 10-digit session time as unix seconds and keeps providers apart', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-sec-'))
+    const sessionDir = join(dir, 'local', 'ZR_DSH', 'dsh-home', 'sessions', 'ws', 'session-abc')
+    await mkdir(sessionDir, { recursive: true })
+    const sec = Math.floor(Date.parse('2026-10-26T15:00:00+08:00') / 1000)
+    assert.ok(sec < 1e12)
+    const lines = [
+      { seq: 1, time: sec, type: 'session/title', data: { title: '临时标题', source: { kind: 'fallback' } } },
+      { seq: 2, time: sec, type: 'assistant/message', data: { usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 }, message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } },
+      { seq: 3, time: sec + 60, type: 'assistant/message', data: { usage: { inputTokens: 40, outputTokens: 8, totalTokens: 48 }, message: { source: { provider: 'zhipu', model: 'glm-5.3' } } } },
+      { seq: 4, time: sec + 90, type: 'session/title', data: { title: 'GLM5.3模型推理能力评估', source: { kind: 'provider' } } },
+    ]
+    await writeFile(join(sessionDir, 'session.v4.jsonl.zstd'), Buffer.concat(lines.map((row) => zstdCompressSync(Buffer.from(JSON.stringify(row) + '\n')))))
+    try {
+      const bundle = loadEngineBundle({
+        APPDATA: join(dir, 'no-appdata'),
+        DSH_HOME: join(dir, 'empty-home'),
+        LOCALAPPDATA: join(dir, 'local'),
+      }, dir)
+      const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
+      assert.equal(view.usage.today.llm.calls, 2)
+      assert.equal(view.usage.today.llm.tokens, 168)
+      assert.deepEqual(view.usage.llm.models.map((row) => row.provider + '/' + row.model), [
+        'deepseek-official/deepseek-flash',
+        'zhipu/glm-5.3',
+      ])
+      assert.equal(view.usage.detail.length, 2)
+      assert.equal(view.usage.detail[0].task, 'GLM5.3模型推理能力评估')
+      assert.equal(view.usage.detail[1].task, 'GLM5.3模型推理能力评估')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('adds title and web-search provider usage and does not count the same call twice', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-side-'))
+    const sideDir = join(dir, '.dsh', 'key-quota')
+    const meterDir = join(dir, '.dsh', 'llm-meter')
+    await mkdir(sideDir, { recursive: true })
+    await mkdir(meterDir, { recursive: true })
+    const title = {
+      id: 'kqside_20261026111643_abc',
+      ts: '2026-10-26T11:16:43+08:00',
+      source: 'dsh_title',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      quality: 'provider',
+      prompt_tokens: 400,
+      completion_tokens: 20,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 30,
+      total_tokens: 450,
+      task: '会话标题',
+    }
+    const search = {
+      id: 'kqside_20261026155120_def',
+      ts: '2026-10-26T15:51:20+08:00',
+      source: 'dsh_search',
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+      quality: 'provider',
+      prompt_tokens: 1000,
+      completion_tokens: 80,
+      cache_read_tokens: 200,
+      cache_write_tokens: 16,
+      reasoning_tokens: 0,
+      total_tokens: 1296,
+      task: '网页搜索',
+    }
+    await writeFile(join(sideDir, 'side-usage.jsonl'), `${JSON.stringify(title)}\n${JSON.stringify(search)}\n`)
+    await writeFile(join(meterDir, 'events.jsonl'), JSON.stringify({
+      ...title,
+      id: 'meter_same_title',
+    }) + '\n')
+    const sessionDir = join(dir, 'local', 'ZR_DSH', 'dsh-home', 'sessions', 'ws', 'session-same-second')
+    await mkdir(sessionDir, { recursive: true })
+    const sec = Math.floor(Date.parse('2026-10-26T11:16:43+08:00') / 1000)
+    const sessionLines = [
+      { seq: 1, time: sec, type: 'session/title', data: { title: '同一秒的对话' } },
+      { seq: 2, time: sec, type: 'assistant/message', data: { usage: { inputTokens: 400, outputTokens: 20, totalTokens: 420 }, message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } },
+    ]
+    await writeFile(join(sessionDir, 'session.v4.jsonl.zstd'), Buffer.concat(sessionLines.map((row) => zstdCompressSync(Buffer.from(JSON.stringify(row) + '\n')))))
+    try {
+      const bundle = loadEngineBundle({
+        APPDATA: join(dir, 'no-appdata'),
+        DSH_HOME: join(dir, 'empty-home'),
+        LOCALAPPDATA: join(dir, 'local'),
+      }, dir)
+      const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
+      assert.equal(view.usage.today.llm.calls, 3)
+      assert.equal(view.usage.today.llm.tokens, 420 + 1296 + 420)
+      const tasks = view.usage.detail.map((row) => row.task).sort()
+      assert.deepEqual(tasks, ['会话标题', '同一秒的对话', '网页搜索'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps another account off a side-usage row that names its user', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-side-user-'))
+    const root = join(dir, 'zr-workbuddy-desktop', 'persist', 'engine-data')
+    await mkdir(join(root, 'usage'), { recursive: true })
+    await mkdir(join(root, 'auth'), { recursive: true })
+    await mkdir(join(dir, '.dsh', 'key-quota'), { recursive: true })
+    await writeFile(join(root, 'usage', 'events.jsonl'), '')
+    await writeFile(join(root, 'auth', 'active.json'), JSON.stringify({
+      id: 'u_admin', role: 'admin', display_name: '管理员',
+    }))
+    await writeFile(join(dir, '.dsh', 'key-quota', 'side-usage.jsonl'), JSON.stringify({
+      id: 'kqside_20261026120000_abc',
+      ts: '2026-10-26T12:00:00+08:00',
+      source: 'dsh_title',
+      provider: 'zhipu',
+      model: 'glm-5.3',
+      user_id: 'u_other',
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      total_tokens: 12,
+      task: '会话标题',
+    }) + '\n')
+    try {
+      const bundle = loadEngineBundle({
+        APPDATA: dir,
+        DSH_HOME: join(dir, 'empty-home'),
+        LOCALAPPDATA: join(dir, 'no-local'),
+      }, dir)
+      const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
+      assert.equal(view.usage.today.llm.calls, 0)
+      assert.equal(view.usage.today.llm.tokens, 0)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

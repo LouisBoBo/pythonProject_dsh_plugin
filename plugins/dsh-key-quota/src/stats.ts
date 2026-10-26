@@ -3,6 +3,7 @@
 export type UsageEvent = {
   ts: string
   source: string
+  provider?: string
   model: string
   userId: string
   prompt: number
@@ -11,6 +12,19 @@ export type UsageEvent = {
   total: number
   jobId?: string
   lane?: string
+  task?: string
+  /** 仅标题/网页搜索补记。对话行没有这个字段，合计口径不变。 */
+  cacheWrite?: number
+}
+
+export type UsageDetailRow = {
+  ts: string
+  provider: string
+  model: string
+  source: string
+  lane: string
+  tokens: number
+  task: string
 }
 
 export type DayRow = {
@@ -43,8 +57,9 @@ export type UsageSummary = {
   hourly: DayRow[]
   daily: DayRow[]
   monthly: DayRow[]
-  llm: { models: Array<{ model: string, tokens: number }> }
-  cursor: { models: Array<{ model: string, tokens: number }> }
+  llm: { models: Array<{ provider: string, model: string, tokens: number, calls: number }> }
+  cursor: { models: Array<{ provider: string, model: string, tokens: number, calls: number }> }
+  detail: UsageDetailRow[]
 }
 
 export type PersonRow = {
@@ -101,7 +116,9 @@ function chartParts(evt: UsageEvent): { tokens: number, hit: number, miss: numbe
     ? prompt
     : (prompt ? Math.max(0, prompt - hit) : (output === 0 && stored ? stored : 0))
   const stack = miss + hit + output
-  return { tokens: stack > 0 ? stack : stored, hit, miss, out: output }
+  const write = n(evt.cacheWrite || 0)
+  const tokens = stack > 0 ? stack + write : stored
+  return { tokens, hit, miss, out: output }
 }
 
 function add(slot: DayRow, evt: UsageEvent): void {
@@ -167,7 +184,11 @@ export function summarizeUsage(events: UsageEvent[], opts: {
   const dayMap = new Map<string, DayRow>()
   const hourMap = new Map<number, DayRow>()
   for (let h = 0; h < 24; h++) hourMap.set(h, { ...emptyDay(), hour: h })
-  const models = { llm: new Map<string, number>(), cursor: new Map<string, number>() }
+  const models = {
+    llm: new Map<string, { provider: string, model: string, tokens: number, calls: number }>(),
+    cursor: new Map<string, { provider: string, model: string, tokens: number, calls: number }>(),
+  }
+  const detail: UsageDetailRow[] = []
 
   for (const evt of events) {
     if (!inUser(evt)) continue
@@ -176,13 +197,28 @@ export function summarizeUsage(events: UsageEvent[], opts: {
     const src = evt.source === 'cursor' ? 'cursor' : 'llm'
     const inMonth = stamp.ymd >= span.from && stamp.ymd <= span.to
     const onFocus = stamp.ymd === on
-    const inModelWindow = grain === 'month'
-      ? inMonth
-      : stamp.ymd >= ymdAdd(on, -6) && stamp.ymd <= on
+    const inModelWindow = grain === 'month' ? inMonth : onFocus
+    const parts = chartParts(evt)
     if (inModelWindow) {
+      const provider = (evt.provider || '').trim()
       const model = (evt.model || '').trim() || 'unknown'
-      const parts = chartParts(evt)
-      models[src].set(model, (models[src].get(model) || 0) + parts.tokens)
+      const key = `${provider}\0${model}`
+      const bucket = models[src].get(key) || { provider, model, tokens: 0, calls: 0 }
+      bucket.tokens += parts.tokens
+      bucket.calls += 1
+      models[src].set(key, bucket)
+    }
+    const inDetail = grain === 'month' ? inMonth : onFocus
+    if (inDetail) {
+      detail.push({
+        ts: evt.ts,
+        provider: (evt.provider || '').trim(),
+        model: (evt.model || '').trim() || 'unknown',
+        source: src,
+        lane: evt.lane || '',
+        tokens: parts.tokens,
+        task: (evt.task || '').trim(),
+      })
     }
     if (!inMonth) continue
     if (grain === 'month' || onFocus) {
@@ -209,9 +245,9 @@ export function summarizeUsage(events: UsageEvent[], opts: {
       }, emptyDay())
     : focus
 
-  const modelList = (src: 'llm' | 'cursor') => [...models[src].entries()]
-    .map(([model, tokens]) => ({ model, tokens }))
-    .sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model))
+  const modelList = (src: 'llm' | 'cursor') => [...models[src].values()]
+    .sort((a, b) => b.tokens - a.tokens || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model))
+  detail.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
 
   return {
     ok: true,
@@ -229,6 +265,7 @@ export function summarizeUsage(events: UsageEvent[], opts: {
     monthly,
     llm: { models: modelList('llm') },
     cursor: { models: modelList('cursor') },
+    detail: detail.slice(0, 200),
   }
 }
 

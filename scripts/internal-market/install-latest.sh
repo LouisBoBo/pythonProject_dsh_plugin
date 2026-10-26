@@ -21,17 +21,33 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REG_DIR="$ROOT/company-registry"
 PROFILE="${DSH_PROFILE:-web}"
-# WorkBuddy 桌面端装在 Application Support，不是 ~/.dsh/profiles/web
-WB_WEB="$HOME/Library/Application Support/zr-workbuddy-desktop/dsh-home/profiles/$PROFILE"
-if [[ -z "${DSH_PROFILE_DIR:-}" && -d "$WB_WEB/node_modules/@zhongruan" ]]; then
-  WEB="$WB_WEB"
-  echo "==> 检测到 WorkBuddy Profile，安装目标: $WEB"
-else
-  WEB="${DSH_PROFILE_DIR:-$HOME/.dsh/profiles/$PROFILE}"
-fi
 NPM_REG="${COMPANY_NPM_REGISTRY:-http://175.178.238.31/dsh-plugins/npm/}"
 MARKET_URL="${DSHM_REGISTRY_URL:-http://175.178.238.31/dsh-plugins/plugins.json}"
 PREFER_LOCAL="${PREFER_LOCAL:-0}"
+
+# 安装目标（优先级）：显式 DSH_PROFILE_DIR → ZR_DSH 桌面 → WorkBuddy Application Support → ~/.dsh
+# 江西中软工作助手桌面进程实际用: .../ZR_DSH/dsh-home/profiles/desktop
+pick_profile_dir() {
+  if [[ -n "${DSH_PROFILE_DIR:-}" ]]; then
+    printf '%s\n' "$DSH_PROFILE_DIR"
+    return
+  fi
+  local c
+  for c in \
+    "$HOME/AppData/Local/ZR_DSH/dsh-home/profiles/desktop" \
+    "$HOME/Library/Application Support/ZR_DSH/dsh-home/profiles/desktop" \
+    "$HOME/Library/Application Support/zr-workbuddy-desktop/dsh-home/profiles/$PROFILE" \
+    "$HOME/.dsh/profiles/$PROFILE"
+  do
+    if [[ -d "$c" ]]; then
+      printf '%s\n' "$c"
+      return
+    fi
+  done
+  printf '%s\n' "$HOME/.dsh/profiles/$PROFILE"
+}
+WEB="$(pick_profile_dir)"
+echo "==> 安装目标 Profile: $WEB"
 
 if [[ ! -d "$WEB" ]]; then
   echo "错误: 找不到 Profile 目录: $WEB" >&2
@@ -44,7 +60,7 @@ NPMRC="$WEB/.npmrc"
 # 只补缺的源，不覆盖已有 .npmrc（里面可能有其它 scope / token）
 append_npmrc_line() {
   local key="$1" line="$2"
-  if [[ -f "$NPMRC" ]] && grep -q "^${key}=" "$NPMRC" 2>/dev/null; then
+  if [[ -f "$NPMRC" ]] && grep -qE "^${key}=" "$NPMRC" 2>/dev/null; then
     return 0
   fi
   if [[ -s "$NPMRC" ]] && [[ -n "$(tail -c 1 "$NPMRC" || true)" ]]; then
@@ -53,9 +69,13 @@ append_npmrc_line() {
   printf '%s\n' "$line" >>"$NPMRC"
   echo "==> 已补 ${key} → $NPMRC"
 }
+# 缺 .npmrc 时 @zhongruan 会落到 registry.npmjs.org → 404，装/卸全挂
+append_npmrc_line "registry" "registry=https://registry.npmmirror.com/"
 append_npmrc_line "@zhongruan:registry" "@zhongruan:registry=${NPM_REG%/}/"
 append_npmrc_line "@cursor:registry" "@cursor:registry=${NPM_REG%/}/"
 append_npmrc_line "strict-ssl" "strict-ssl=false"
+# DSH 内置 pnpm 默认 minimum-release-age=24h；公司包当日发版，不置 0 则装/卸卡供应链校验
+append_npmrc_line "minimum-release-age" "minimum-release-age=0"
 
 FILTER="${1:-}"
 export ROOT REG_DIR MARKET_URL FILTER PREFER_LOCAL

@@ -1,6 +1,6 @@
 import type { Server } from 'node:http'
 import { assignDenyMessage, resolveAssignedKey, usesDeepseekApiKey } from './bind.js'
-import { METER_SOURCES } from './classify.js'
+import { classifyCall, METER_SOURCES } from './classify.js'
 import { resolveConfig, type QuotaConfig } from './config.js'
 import { denyMessage, type Snap } from './decide.js'
 import { platformSession } from './engine-usage.js'
@@ -12,6 +12,7 @@ import { advertiseUrls, loadClientPanel, loadReportToken, registerQuotaWeb, star
 import { installAssignedKeyTransport, pullWithAssignedKey } from './transport.js'
 import { KeyVault } from './vault.js'
 import { readDeepseekApiKey } from './workbuddy-key.js'
+import { installWebSearchUsageCapture, recordTitleUsage, setSideUsageUser } from './side-usage.js'
 import { gateStream, quotaFinishChunk, type GateArgs } from './wrap.js'
 
 export { Config } from './config.js'
@@ -34,10 +35,32 @@ type Host = {
   credentials?: Credentials
 }
 
-function credentialsOf(ctx: Host): Credentials | undefined {
-  const found = ctx.credentials ?? (typeof ctx.get === 'function' ? ctx.get('credentials') : undefined)
+/**
+ * 取 credentials 服务。禁止读 `ctx.credentials`：未在 inject 声明时 Cordis 会抛
+ * `cannot get property "credentials" without inject`，整插件启用失败。
+ */
+export function resolveCredentialsService(ctx: Host): Credentials | undefined {
+  let found: unknown
+  try {
+    found = typeof ctx.get === 'function' ? ctx.get('credentials') : undefined
+  } catch {
+    return undefined
+  }
   if (!found || typeof found !== 'object' || typeof (found as Credentials).resolve !== 'function') return undefined
   return found as Credentials
+}
+
+function installCredentialsTransport(ctx: Host): void {
+  installAssignedKeyTransport(resolveCredentialsService(ctx))
+  if (typeof ctx.inject !== 'function') return
+  try {
+    // credentials 可能晚于本插件就绪；挂上后再补一层 resolve 拦截
+    ctx.inject(['credentials'], (credCtx) => {
+      installAssignedKeyTransport(resolveCredentialsService(credCtx as Host))
+    })
+  } catch {
+    // 宿主无 credentials 服务时保持仅 fetch 改写
+  }
 }
 
 type Prepared = GateArgs | { pass: true }
@@ -77,7 +100,9 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
   const pending = new PendingStore(cfg.dataDir)
   const ledger = new Ledger(cfg.dataDir)
   const vault = new KeyVault(cfg.dataDir)
-  installAssignedKeyTransport(credentialsOf(ctx))
+  installCredentialsTransport(ctx)
+  let sideUserId = ''
+  setSideUsageUser(() => sideUserId)
   const reportToken = loadReportToken(cfg.dataDir, cfg.reportToken, cfg.role === 'server')
   let server: Server | null = null
 
@@ -122,13 +147,26 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
     // 宿主没有 effect 时随进程退出
   }
 
+  try {
+    installWebSearchUsageCapture()
+  } catch (err) {
+    logger?.warn?.(`key-quota: 网页搜索用量未挂上（${err instanceof Error ? err.message : String(err)}）。搜索结果不受影响。`)
+  }
+
   if (typeof ctx.on !== 'function') return
 
   try {
     ctx.on('llm/stream', (options, next) => {
-      if (!usesDeepseekApiKey(options)) return next()
+      const title = classifyCall(options).source === 'dsh_title'
+      if (!usesDeepseekApiKey(options)) {
+        if (title) {
+          try { sideUserId = platformSession().viewer?.id || '' } catch { sideUserId = '' }
+        }
+        return title ? recordTitleUsage(options, next()) : next()
+      }
       return (async function* () {
         const viewerId = platformSession().viewer?.id || ''
+        sideUserId = viewerId
         const bound = resolveAssignedKey({
           viewerId,
           rows: ledger.entries(),
@@ -155,8 +193,9 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
           yield quotaFinishChunk('key_unassigned', assignDenyMessage('key_unassigned'))
           return
         }
-        installAssignedKeyTransport(credentialsOf(ctx))
-        yield* pullWithAssignedKey(bound.apiKey, gateStream(options, next, prepared))
+        installAssignedKeyTransport(resolveCredentialsService(ctx))
+        const stream = pullWithAssignedKey(bound.apiKey, gateStream(options, next, prepared))
+        yield* title ? recordTitleUsage(options, stream) : stream
       })()
     }, { global: true })
   } catch (err) {

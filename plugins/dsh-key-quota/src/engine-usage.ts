@@ -2,6 +2,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
+import { sideUsagePath } from './side-usage.js'
 import { peopleUsage, summarizeUsage, type PersonRow, type UsageEvent, type UsageSummary } from './stats.js'
 
 type UserRow = { id: string, username: string, displayName: string, role: string }
@@ -46,6 +47,7 @@ function parseEvents(text: string): UsageEvent[] {
       rows.push({
         ts,
         source: String(raw.source || 'llm'),
+        provider: String(raw.provider || ''),
         model: String(raw.model || ''),
         userId: String(raw.user_id || ''),
         prompt: num(raw.prompt_tokens),
@@ -182,7 +184,7 @@ export function loadEngineBundle(
   const withMeter = mergeMeter(events, auth.active?.id || '', env, home, read)
   const ledgerTs = events.reduce((max, evt) => evt.ts > max ? evt.ts : max, '')
   return {
-    events: mergeSessions(withMeter, auth.active?.id || '', env, ledgerTs),
+    events: mergeSessions(withMeter, auth.active?.id || '', env, home, ledgerTs),
     users: auth.users,
     active: auth.active,
   }
@@ -211,7 +213,11 @@ function realFile(path: string): boolean {
   }
 }
 
-/** 引擎尚未收进 usage 账本的 meter 行。归当前登录人，已有 job_id 不重复计入。 */
+function eventFingerprint(evt: UsageEvent): string {
+  return `${evt.ts.slice(0, 19)}|${evt.provider || ''}|${evt.model}|${evt.total}|${evt.prompt}|${evt.completion}`
+}
+
+/** 引擎尚未收进 usage 账本的 meter 行，加上标题生成和网页搜索的供应商用量。归当前登录人。 */
 function mergeMeter(
   events: UsageEvent[],
   activeId: string,
@@ -220,13 +226,25 @@ function mergeMeter(
   read: (path: string) => string | null,
 ): UsageEvent[] {
   const known = new Set(events.map((evt) => evt.jobId).filter(Boolean))
+  const seen = new Set(events.map(eventFingerprint))
   const extra: UsageEvent[] = []
+  const take = (row: UsageEvent, dedupeFingerprint: boolean) => {
+    if (!row.jobId || known.has(row.jobId)) return
+    const fp = eventFingerprint(row)
+    if (dedupeFingerprint && seen.has(fp)) return
+    known.add(row.jobId)
+    seen.add(fp)
+    extra.push({ ...row, userId: row.userId || activeId })
+  }
   for (const path of meterFiles(env, home)) {
     if (!realFile(path)) continue
-    for (const row of parseMeter(read(path) || '')) {
-      if (known.has(row.jobId)) continue
-      known.add(row.jobId)
-      extra.push({ ...row, userId: activeId })
+    for (const row of parseMeter(read(path) || '')) take(row, false)
+  }
+  const side = sideUsagePath(home)
+  if (realFile(side)) {
+    for (const row of parseMeter(read(side) || '')) {
+      if (row.total <= 0) continue
+      take(row, true)
     }
   }
   return extra.length ? events.concat(extra) : events
@@ -250,17 +268,21 @@ function parseMeter(text: string): UsageEvent[] {
       if (total <= 0) total = base
       else if (reasoning > 0 && total === base + reasoning) total = base
       const lane = String(raw.source || 'dsh_other')
+      const task = typeof raw.task === 'string' ? raw.task.trim() : ''
       rows.push({
         ts: String(raw.ts || ''),
         source: 'llm',
+        provider: String(raw.provider || ''),
         model: String(raw.model || ''),
-        userId: '',
+        userId: String(raw.user_id || ''),
         prompt,
         completion,
         cacheRead,
         total,
-        jobId: rawId.startsWith('meter_') ? rawId : `meter_${rawId}`.slice(0, 80),
+        jobId: rawId.startsWith('meter_') || rawId.startsWith('kqside_') ? rawId.slice(0, 80) : `meter_${rawId}`.slice(0, 80),
         lane: lane.startsWith('dsh_') ? lane : 'dsh_other',
+        ...(task ? { task } : {}),
+        ...(rawId.startsWith('kqside_') && cacheWrite > 0 ? { cacheWrite } : {}),
       })
     } catch {
       // 坏行跳过
@@ -269,9 +291,15 @@ function parseMeter(text: string): UsageEvent[] {
   return rows.filter((row) => row.ts)
 }
 
-function sessionRoot(env: NodeJS.ProcessEnv): string {
+function sessionRoot(env: NodeJS.ProcessEnv, home: string): string {
+  const candidates: string[] = []
   const local = (env.LOCALAPPDATA || '').trim()
-  return local ? join(local, 'ZR_DSH', 'dsh-home', 'sessions') : ''
+  if (local) candidates.push(join(local, 'ZR_DSH', 'dsh-home', 'sessions'))
+  candidates.push(join(home, 'AppData', 'Local', 'ZR_DSH', 'dsh-home', 'sessions'))
+  for (const path of candidates) {
+    if (existsSync(path)) return path
+  }
+  return ''
 }
 
 function shanghaiIso(ms: number): string {
@@ -280,8 +308,28 @@ function shanghaiIso(ms: number): string {
   return `${sh.getUTCFullYear()}-${p(sh.getUTCMonth() + 1)}-${p(sh.getUTCDate())}T${p(sh.getUTCHours())}:${p(sh.getUTCMinutes())}:${p(sh.getUTCSeconds())}+08:00`
 }
 
+/** 侧栏上的会话标题。文件按追加写入，最后一条 session/title 是当前任务名。 */
+function sessionTaskName(text: string): string {
+  let title = ''
+  for (const line of text.split('\n')) {
+    if (!line.includes('"session/title"')) continue
+    let ev: Record<string, unknown>
+    try {
+      ev = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    if (ev.type !== 'session/title') continue
+    const data = ev.data && typeof ev.data === 'object' ? ev.data as Record<string, unknown> : {}
+    const name = String(data.title || '').trim()
+    if (name) title = name
+  }
+  return title
+}
+
 /** 会话里的供应商 usage。引擎账本停更之后的才补，避免和已入库的流水叠记。 */
 function usageFromSession(text: string, sessionId: string, afterTs: string): UsageEvent[] {
+  const task = sessionTaskName(text)
   const rows: UsageEvent[] = []
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
@@ -295,6 +343,7 @@ function usageFromSession(text: string, sessionId: string, afterTs: string): Usa
     const seq = Number(ev.seq)
     const time = Number(ev.time)
     if (!Number.isInteger(seq) || seq < 0 || !Number.isFinite(time)) continue
+    const ms = time < 1e12 ? time * 1000 : time
     const data = ev.data && typeof ev.data === 'object' ? ev.data as Record<string, unknown> : {}
     const usage = data.usage && typeof data.usage === 'object' ? data.usage as Record<string, unknown> : null
     if (!usage) continue
@@ -308,7 +357,7 @@ function usageFromSession(text: string, sessionId: string, afterTs: string): Usa
     if (total <= 0) total = base
     else if (reasoning > 0 && total === base + reasoning) total = base
     if (base <= 0 && total <= 0) continue
-    const ts = shanghaiIso(time)
+    const ts = shanghaiIso(ms)
     if (afterTs && ts <= afterTs) continue
     const message = data.message && typeof data.message === 'object' ? data.message as Record<string, unknown> : {}
     const source = message.source && typeof message.source === 'object' ? message.source as Record<string, unknown> : {}
@@ -317,7 +366,8 @@ function usageFromSession(text: string, sessionId: string, afterTs: string): Usa
     rows.push({
       ts,
       source: cursor ? 'cursor' : 'llm',
-      model: String(source.model || provider || ''),
+      provider,
+      model: String(source.model || ''),
       userId: '',
       prompt,
       completion,
@@ -325,16 +375,99 @@ function usageFromSession(text: string, sessionId: string, afterTs: string): Usa
       total: total > 0 ? total : base,
       jobId: `sess_${sessionId}_${seq}`.slice(0, 80),
       lane: cursor ? 'cursor_code' : 'dsh_chat',
+      task,
     })
   }
   return rows
 }
 
-function mergeSessions(events: UsageEvent[], activeId: string, env: NodeJS.ProcessEnv, afterTs: string): UsageEvent[] {
-  const root = sessionRoot(env)
+function isZstdMagic(buf: Buffer, offset: number): boolean {
+  return offset + 4 <= buf.length
+    && buf[offset] === 0x28 && buf[offset + 1] === 0xb5
+    && buf[offset + 2] === 0x2f && buf[offset + 3] === 0xfd
+}
+
+/** 按帧头和块长度算出这一帧的字节数。压缩块里碰巧出现魔数时不会被当成新帧。 */
+function zstdFrameSize(buf: Buffer, offset: number): number | null {
+  if (!isZstdMagic(buf, offset) || offset + 6 > buf.length) return null
+  let p = offset + 4
+  const desc = buf[p++]
+  if ((desc & 0x08) !== 0) return null
+  const fcsFlag = desc >>> 6
+  const single = (desc & 0x20) !== 0
+  const checksum = (desc & 0x04) !== 0
+  const didFlag = desc & 0x03
+  if (!single) {
+    if (p >= buf.length) return null
+    p += 1
+  }
+  p += [0, 1, 2, 4][didFlag]
+  const fcsSize = single && fcsFlag === 0 ? 1 : [0, 2, 4, 8][fcsFlag]
+  p += fcsSize
+  if (p > buf.length) return null
+  while (p + 3 <= buf.length) {
+    const header = buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16)
+    p += 3
+    const last = header & 1
+    const type = (header >>> 1) & 3
+    const size = header >>> 3
+    if (type === 0) p += size
+    else if (type === 1) p += 1
+    else if (type === 2) p += size
+    else return null
+    if (p > buf.length) return null
+    if (last) {
+      if (checksum) p += 4
+      if (p > buf.length) return null
+      return p - offset
+    }
+  }
+  return null
+}
+
+function sessionTextByMagic(buf: Buffer): string {
+  const starts: number[] = []
+  for (let i = 0; i <= buf.length - 4; i++) {
+    if (isZstdMagic(buf, i)) starts.push(i)
+  }
+  if (starts.length <= 1) return zstdDecompressSync(buf).toString('utf8')
+  const parts: string[] = []
+  for (let n = 0; n < starts.length; n++) {
+    try {
+      parts.push(zstdDecompressSync(buf.subarray(starts[n], starts[n + 1] ?? buf.length)).toString('utf8'))
+    } catch {
+      // 这一段解不开就跳过，后面的帧继续
+    }
+  }
+  if (!parts.length) return zstdDecompressSync(buf).toString('utf8')
+  return parts.join('\n')
+}
+
+/** 会话文件是多帧 zstd 拼在一起，每帧一行。单帧整文件（测试夹具）也能解开。 */
+function sessionText(buf: Buffer): string {
+  if (!isZstdMagic(buf, 0)) return zstdDecompressSync(buf).toString('utf8')
+  const parts: string[] = []
+  let offset = 0
+  while (offset < buf.length) {
+    const size = zstdFrameSize(buf, offset)
+    if (!size) return sessionTextByMagic(buf)
+    try {
+      parts.push(zstdDecompressSync(buf.subarray(offset, offset + size)).toString('utf8'))
+    } catch {
+      return sessionTextByMagic(buf)
+    }
+    offset += size
+  }
+  return parts.join('\n')
+}
+
+function mergeSessions(events: UsageEvent[], activeId: string, env: NodeJS.ProcessEnv, home: string, afterTs: string): UsageEvent[] {
+  const root = sessionRoot(env, home)
   if (!root || !existsSync(root)) return events
   const known = new Set(events.map((evt) => evt.jobId).filter(Boolean))
-  const fingerprints = new Set(events.map((evt) => `${evt.ts.slice(0, 19)}|${evt.model}|${evt.total}|${evt.prompt}|${evt.completion}`))
+  const fingerprints = new Set(events
+    .filter((evt) => evt.lane !== 'dsh_title' && evt.lane !== 'dsh_search')
+    .map((evt) => `${evt.ts.slice(0, 19)}|${evt.model}|${evt.total}|${evt.prompt}|${evt.completion}`))
   const extra: UsageEvent[] = []
   let workspaces: string[] = []
   try {
@@ -355,7 +488,7 @@ function mergeSessions(events: UsageEvent[], activeId: string, env: NodeJS.Proce
       if (!existsSync(file)) continue
       let text = ''
       try {
-        text = zstdDecompressSync(readFileSync(file)).toString('utf8')
+        text = sessionText(readFileSync(file))
       } catch {
         continue
       }
