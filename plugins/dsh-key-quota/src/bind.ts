@@ -43,6 +43,14 @@ export function assignDenyMessage(code: 'not_signed_in' | 'key_unassigned' | 'ke
   return '当前账号还没有可用的 Key。请管理员在 Key 管理里重新保存。'
 }
 
+/**
+ * 账本里还没有分给任何平台账号的 Key 时，不拦截官方路线。
+ * 宿主继续用系统配置里的 Key。一旦有人被分配，未分配账号仍拒绝。
+ */
+export function hasAssignee(rows: readonly { assigneeUserId?: string }[]): boolean {
+  return rows.some((row) => typeof row.assigneeUserId === 'string' && row.assigneeUserId.trim().length > 0)
+}
+
 /** 官方 API Key 路线才换 Key。账号登录路线保持原样。 */
 export function usesDeepseekApiKey(options: unknown): boolean {
   const provider = options && typeof options === 'object' ? (options as { provider?: unknown }).provider : undefined

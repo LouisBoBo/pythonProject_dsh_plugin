@@ -1,7 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { registerMomHttp } from './http.js'
-import { listDocuments, readDocument, saveDocument } from './store.js'
+import { listDocuments, readDocument, saveDocument, setWorkspaceCatalog } from './store.js'
 import { MomError, type MomCode } from './types.js'
 
 export const name = 'mom-docs'
@@ -23,6 +25,7 @@ const MOM_PROMPT =
   'directory 填当前工程根目录的绝对路径。'
 
 export function apply(ctx: Context): void {
+  setWorkspaceCatalog(join(homedir(), '.dsh', 'mom-docs', 'workspaces.txt'))
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const transformed = await next()
     const contexts = (transformed.contexts ?? []).filter(

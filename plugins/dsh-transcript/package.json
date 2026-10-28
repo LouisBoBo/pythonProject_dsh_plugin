@@ -1,0 +1,59 @@
+{
+  "name": "@zhongruan/dsh-transcript",
+  "version": "0.1.0",
+  "description": "把每一轮主聊天结束时的内容存成本机 Markdown 目录。聊天仍以 DSH 会话为准。",
+  "dshMarket": {
+    "zh": "把每一轮主聊天存成本机 Markdown 目录。",
+    "en": "Save each completed chat turn as local Markdown"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "transcript"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test test/*.test.mjs",
+    "self-test": "tsc && node --test test/*.test.mjs"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "http://175.178.238.31/dsh-plugins/npm/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

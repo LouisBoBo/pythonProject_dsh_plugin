@@ -18,9 +18,13 @@ window.__ModuleLoader__.load({
 
     function ensureCss() {
       if (typeof document === 'undefined') return
-      if (document.getElementById('kq-css')) return
+      var cssVersion = '9'
+      var old = document.getElementById('kq-css')
+      if (old && old.getAttribute('data-v') === cssVersion) return
+      if (old && old.parentNode) old.parentNode.removeChild(old)
       var style = document.createElement('style')
       style.id = 'kq-css'
+      style.setAttribute('data-v', cssVersion)
       style.textContent = [
         '.kq-root{height:100%;overflow:auto;background:#fff;color:#0f172a}',
         '.kq-root .wb-usage-view{box-sizing:border-box;display:flex;flex-direction:column;width:100%;max-width:920px;margin:0 auto;background:#fff}',
@@ -49,8 +53,35 @@ window.__ModuleLoader__.load({
         '.kq-root .kq-limit{min-width:148px}',
         '.kq-root .kq-actions{display:flex;gap:6px;justify-content:flex-end}',
         '.kq-root .kq-task{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-        '.kq-root .kq-pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:10px;color:#64748b;font-size:12px}',
-        '.kq-root .kq-pager .kq-btn:disabled{opacity:.45;cursor:default}',
+        '.kq-root .kq-detail-scroll{overflow-x:auto;max-width:100%}',
+        '.kq-root .kq-table.kq-grid{width:100%;border-collapse:separate;border-spacing:0;margin-top:4px}',
+        '.kq-root .kq-table.kq-grid th,.kq-root .kq-table.kq-grid td{padding:10px 14px;border-bottom:1px solid #eef2f6;white-space:nowrap;vertical-align:middle}',
+        '.kq-root .kq-table.kq-grid th{background:#f8fafc;color:#64748b;font-size:12px;font-weight:600}',
+        '.kq-root .kq-table.kq-grid tbody tr:last-child td{border-bottom:none}',
+        '.kq-root .kq-table.kq-grid tbody tr:hover td{background:#f8fafc}',
+        '.kq-root .kq-table.kq-grid th.num,.kq-root .kq-table.kq-grid td.num{text-align:right;font-variant-numeric:tabular-nums}',
+        '.kq-root .kq-detail-scroll .kq-table.kq-grid{width:max-content;min-width:100%}',
+        '.kq-root .wb-set-card .body .kq-detail-scroll{margin:6px -16px 0}',
+        '.kq-root .kq-table.kq-grid th:first-child,.kq-root .kq-table.kq-grid td:first-child{padding-left:16px}',
+        '.kq-root .kq-table.kq-grid th:last-child,.kq-root .kq-table.kq-grid td:last-child{padding-right:16px}',
+        '.kq-root .kq-id{max-width:148px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}',
+        '.kq-root .kq-table.kq-grid .kq-session{max-width:none;min-width:0;white-space:nowrap;word-break:normal;font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}',
+        '.kq-root .kq-table.kq-grid .kq-dialogue{white-space:nowrap;min-width:0}',
+        '.kq-root .kq-table.kq-grid .kq-keymask{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px;letter-spacing:.02em;color:#0f172a}',
+        '.kq-root .kq-pager{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 2px;padding:10px 16px 6px;color:#94a3b8;font-size:13px}',
+        '.kq-root .kq-pager-total{white-space:nowrap;flex:0 0 auto}',
+        '.kq-root .kq-pager-right{display:flex;align-items:center;gap:8px;flex:0 0 auto}',
+        '.kq-root .kq-pager-size{position:relative;flex:0 0 112px;width:112px}',
+        '.kq-root .kq-pager-size-btn{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:space-between;width:112px;min-width:112px;max-width:112px;height:32px;min-height:32px;padding:0 10px;gap:6px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;color:#334155;font:13px/1 -apple-system,PingFang SC,Microsoft YaHei,sans-serif;cursor:pointer;white-space:nowrap;flex:0 0 112px}',
+        '.kq-root .kq-pager-caret{display:inline-block;flex:0 0 auto;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid #94a3b8}',
+        '.kq-root .kq-pager-size-btn.open .kq-pager-caret{border-top:none;border-bottom:5px solid #94a3b8}',
+        '.kq-root .kq-pager-menu{position:absolute;right:0;bottom:calc(100% + 6px);width:112px;min-width:112px;box-sizing:border-box;padding:6px;border-radius:12px;background:#fff;box-shadow:0 8px 24px rgba(15,23,42,.12);z-index:6}',
+        '.kq-root .kq-pager-menu button{display:block;width:100%;border:none;background:transparent;text-align:left;padding:8px 12px;border-radius:8px;font:inherit;font-size:13px;color:#334155;cursor:pointer;white-space:nowrap}',
+        '.kq-root .kq-pager-menu button.on,.kq-root .kq-pager-menu button:hover{background:#f1f5f9}',
+        '.kq-root .kq-pager-arrow,.kq-root .kq-pager-num{box-sizing:border-box;width:32px;min-width:32px;height:32px;min-height:32px;flex:0 0 32px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;color:#334155;display:inline-flex;align-items:center;justify-content:center;font:13px/1 -apple-system,PingFang SC,Microsoft YaHei,sans-serif;font-size:16px}',
+        '.kq-root .kq-pager-arrow{padding:0;cursor:pointer}',
+        '.kq-root .kq-pager-arrow:disabled{opacity:.35;cursor:default}',
+        '.kq-root .kq-pager-num{font-size:13px;font-variant-numeric:tabular-nums}',
         '.kq-root .kq-page-title{margin:2px 0 14px;font-size:18px;font-weight:700;color:#0f172a;line-height:1.3}',
         '.kq-root .wb-usage-filter{display:flex;align-items:center;gap:8px;margin:0 0 12px;flex-wrap:wrap}',
         '.kq-root .kq-corner{margin-left:auto;display:flex;align-items:center;gap:8px}',
@@ -437,7 +468,90 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function modelTable(usage) {
+    var PAGE_SIZES = [10, 50, 100]
+
+    function pageSizeOf(size) {
+      return size === 50 || size === 100 ? size : 10
+    }
+
+    function pageWindow(total, page, size) {
+      var pageSize = pageSizeOf(size)
+      var pages = Math.max(1, Math.ceil((total || 0) / pageSize))
+      var current = page < 1 ? 1 : (page > pages ? pages : page)
+      var start = (current - 1) * pageSize
+      return { pages: pages, current: current, start: start, end: Math.min(total || 0, start + pageSize), pageSize: pageSize }
+    }
+
+    function Pager(props) {
+      var openState = useState(false)
+      var open = openState[0]
+      var setOpen = openState[1]
+      var total = props.total || 0
+      useEffect(function () {
+        if (!open) return undefined
+        function close() { setOpen(false) }
+        document.addEventListener('click', close)
+        return function () { document.removeEventListener('click', close) }
+      }, [open])
+      if (!total) return null
+      var win = pageWindow(total, props.page, props.pageSize)
+      return h('div', { className: 'kq-pager' },
+        h('span', { className: 'kq-pager-total' }, '共 ' + total + ' 条数据'),
+        h('div', { className: 'kq-pager-right' },
+          h('div', { className: 'kq-pager-size' },
+            h('button', {
+              type: 'button',
+              className: 'kq-pager-size-btn' + (open ? ' open' : ''),
+              onClick: function (event) {
+                event.stopPropagation()
+                setOpen(!open)
+              },
+            }, String(win.pageSize) + '条/页', h('i', { className: 'kq-pager-caret', 'aria-hidden': 'true' })),
+            open ? h('div', {
+              className: 'kq-pager-menu',
+              onClick: function (event) { event.stopPropagation() },
+            }, PAGE_SIZES.map(function (n) {
+              return h('button', {
+                type: 'button',
+                key: String(n),
+                className: n === win.pageSize ? 'on' : '',
+                onClick: function () {
+                  setOpen(false)
+                  if (n !== win.pageSize) {
+                    props.setPageSize(n)
+                    props.setPage(1)
+                  }
+                },
+              }, n + '条/页')
+            })) : null,
+          ),
+          h('button', {
+            type: 'button',
+            className: 'kq-pager-arrow',
+            disabled: win.current <= 1,
+            onClick: function () { props.setPage(win.current - 1) },
+          }, '‹'),
+          h('span', { className: 'kq-pager-num' }, String(win.current)),
+          h('button', {
+            type: 'button',
+            className: 'kq-pager-arrow',
+            disabled: win.current >= win.pages,
+            onClick: function () { props.setPage(win.current + 1) },
+          }, '›'),
+        ),
+      )
+    }
+
+    function providerKeyMask(provider, keys) {
+      if (!keys) return ''
+      var name = String(provider || '')
+      if (/deepseek/i.test(name)) return keys.deepseek || ''
+      if (/zhipu|bigmodel|vision/i.test(name)) return keys.zhipu || ''
+      if (/cursor/i.test(name)) return keys.cursor || ''
+      return ''
+    }
+
+    function modelTable(usage, isAdmin, providerKeys, page, setPage, pageSize, setPageSize) {
       var llm = (usage && usage.llm && usage.llm.models) || []
       var cursor = (usage && usage.cursor && usage.cursor.models) || []
       var rows = llm.map(function (r) {
@@ -445,27 +559,41 @@ window.__ModuleLoader__.load({
       }).concat(cursor.map(function (r) {
         return { provider: r.provider || '', model: r.model || '', side: '写码', calls: r.calls || 0, tokens: r.tokens || 0 }
       }))
+      var win = pageWindow(rows.length, page, pageSize)
+      var slice = rows.slice(win.start, win.end)
+      var head = [h('th', null, '供应商')]
+      if (isAdmin) head.push(h('th', { title: '系统配置里该供应商的 Key，只显示前几位和后四位' }, 'Key'))
+      head.push(
+        h('th', null, '模型'),
+        h('th', null, '用途'),
+        h('th', { className: 'num' }, '次数'),
+        h('th', { className: 'num' }, 'Token'),
+      )
+      var table = h('table', { className: 'kq-table kq-grid' },
+        h('thead', null, h.apply(null, ['tr', null].concat(head))),
+        h('tbody', null, slice.map(function (r, i) {
+          var cells = [h('td', null, r.provider || '—')]
+          if (isAdmin) {
+            var mask = providerKeyMask(r.provider, providerKeys) || '—'
+            cells.push(h('td', {
+              className: 'kq-keymask',
+              title: mask === '—' ? '系统配置里没有读到这把 Key' : '系统配置里该供应商的 Key，只显示前几位和后四位',
+            }, mask))
+          }
+          cells.push(
+            h('td', null, r.model || '—'),
+            h('td', null, r.side),
+            h('td', { className: 'num' }, String(r.calls)),
+            h('td', { className: 'num', title: fmtFull(r.tokens) }, fmtTokens(r.tokens)),
+          )
+          return h.apply(null, ['tr', { key: r.provider + '\0' + r.model + '\0' + r.side + i }].concat(cells))
+        })),
+      )
       return h('div', { className: 'wb-set-card' },
         h('h3', null, '各模型'),
         h('div', { className: 'body' },
-          rows.length ? h('table', { className: 'kq-table' },
-            h('thead', null, h('tr', null,
-              h('th', null, '供应商'),
-              h('th', null, '模型'),
-              h('th', null, '用途'),
-              h('th', null, '次数'),
-              h('th', null, 'Token'),
-            )),
-            h('tbody', null, rows.map(function (r, i) {
-              return h('tr', { key: r.provider + '\0' + r.model + '\0' + r.side + i },
-                h('td', null, r.provider || '—'),
-                h('td', null, r.model || '—'),
-                h('td', null, r.side),
-                h('td', null, String(r.calls)),
-                h('td', { title: fmtFull(r.tokens) }, fmtTokens(r.tokens)),
-              )
-            })),
-          ) : h('p', null, '这一天还没有读到模型调用。'),
+          rows.length ? h('div', { className: 'kq-detail-scroll' }, table) : h('p', null, '这一天还没有读到模型调用。'),
+          h(Pager, { total: rows.length, page: page, setPage: setPage, pageSize: pageSize, setPageSize: setPageSize }),
         ),
       )
     }
@@ -475,7 +603,34 @@ window.__ModuleLoader__.load({
       return text.length >= 16 ? text.slice(5, 16).replace('T', ' ') : text
     }
 
-    function taskRows(rows) {
+    function pushUnique(list, value) {
+      var text = String(value || '')
+      if (!text || list.indexOf(text) >= 0) return
+      list.push(text)
+    }
+
+    function formatDialogues(items) {
+      var by = {}
+      var order = []
+      items.forEach(function (item) {
+        var turn = Number(item && item.turn)
+        if (!turn || turn !== Math.floor(turn) || turn <= 0) return
+        if (!by[turn]) { by[turn] = []; order.push(turn) }
+        var step = Number(item && item.step)
+        if (step && step === Math.floor(step) && step > 0 && by[turn].indexOf(step) < 0) by[turn].push(step)
+      })
+      if (!order.length) return ''
+      return order.map(function (turn) {
+        var steps = by[turn].slice().sort(function (a, b) { return a - b })
+        if (!steps.length) return '第' + turn + '轮'
+        if (steps.length === 1) return '第' + turn + '轮第' + steps[0] + '步'
+        var consecutive = steps.every(function (value, index) { return index === 0 || value === steps[index - 1] + 1 })
+        if (consecutive) return '第' + turn + '轮第' + steps[0] + '–' + steps[steps.length - 1] + '步'
+        return '第' + turn + '轮第' + steps.join('、') + '步'
+      }).join('；')
+    }
+
+    function taskRows(rows, admin) {
       var map = {}
       var order = []
       rows.forEach(function (row) {
@@ -483,6 +638,15 @@ window.__ModuleLoader__.load({
         var bucket = map[task]
         if (!bucket) {
           bucket = { task: task, tokens: 0, calls: 0, providers: [], models: [], first: row.ts || '', last: row.ts || '' }
+          if (admin) {
+            bucket.users = []
+            bucket.sessionIds = []
+            bucket.dialogues = []
+            bucket.input = 0
+            bucket.cacheRead = 0
+            bucket.cacheWrite = 0
+            bucket.output = 0
+          }
           map[task] = bucket
           order.push(task)
         }
@@ -492,63 +656,99 @@ window.__ModuleLoader__.load({
         if (row.model && bucket.models.indexOf(row.model) < 0) bucket.models.push(row.model)
         if (row.ts && (!bucket.first || row.ts < bucket.first)) bucket.first = row.ts
         if (row.ts && row.ts > bucket.last) bucket.last = row.ts
+        if (admin) {
+          pushUnique(bucket.users, row.userName || row.userId)
+          pushUnique(bucket.sessionIds, row.sessionId)
+          if (row.turn) bucket.dialogues.push({ turn: row.turn, step: row.step })
+          bucket.input += Number(row.input) || 0
+          bucket.cacheRead += Number(row.cacheRead) || 0
+          bucket.cacheWrite += Number(row.cacheWrite) || 0
+          bucket.output += Number(row.output) || 0
+        }
       })
       return order.map(function (task) { return map[task] }).sort(function (a, b) {
         return a.last < b.last ? 1 : a.last > b.last ? -1 : 0
       })
     }
 
-    function detailTable(usage, page, setPage) {
-      var pageSize = 10
+    function tokenCell(n) {
+      return h('td', { className: 'num', title: fmtFull(n) }, fmtTokens(n))
+    }
+
+    function detailTable(usage, page, setPage, pageSize, setPageSize, admin) {
       var raw = (usage && usage.detail) || []
-      var rows = taskRows(raw)
-      var pages = Math.max(1, Math.ceil(rows.length / pageSize))
-      var current = page < 1 ? 1 : (page > pages ? pages : page)
-      var start = (current - 1) * pageSize
-      var slice = rows.slice(start, start + pageSize)
+      var rows = taskRows(raw, admin)
+      var win = pageWindow(rows.length, page, pageSize)
+      var slice = rows.slice(win.start, win.end)
+      var head = [
+        h('th', null, '时间'),
+        h('th', null, '任务名称'),
+      ]
+      if (admin) {
+        head.push(
+          h('th', null, '用户'),
+          h('th', null, '会话ID'),
+          h('th', null, '对话'),
+        )
+      }
+      head.push(
+        h('th', null, '供应商'),
+        h('th', null, '模型'),
+        h('th', { className: 'num' }, '次数'),
+      )
+      if (admin) {
+        head.push(
+          h('th', { className: 'num' }, '输入'),
+          h('th', { className: 'num' }, '缓存读取'),
+          h('th', { className: 'num' }, '缓存写入'),
+          h('th', { className: 'num' }, '输出'),
+          h('th', { className: 'num' }, '总用量'),
+        )
+      } else {
+        head.push(h('th', null, 'Token'))
+      }
+      var table = h('table', { className: 'kq-table kq-grid' },
+        h('thead', null, h.apply(null, ['tr', null].concat(head))),
+        h('tbody', null, slice.map(function (r, i) {
+          var begin = shortWhen(r.first)
+          var end = shortWhen(r.last)
+          var when = begin === end ? begin : (begin.slice(0, 6) === end.slice(0, 6) ? begin + '–' + end.slice(6) : begin + '–' + end)
+          var task = r.task || '—'
+          var cells = [
+            h('td', null, when),
+            h('td', { className: 'kq-task', title: task }, task),
+          ]
+          if (admin) {
+            var sessions = (r.sessionIds || []).join('\n') || '—'
+            var dialogue = formatDialogues(r.dialogues || []) || '—'
+            var users = (r.users || []).join('、') || '—'
+            cells.push(
+              h('td', { className: 'kq-id', title: users }, users),
+              h('td', { className: 'kq-session', title: sessions }, sessions),
+              h('td', { className: 'kq-dialogue', title: dialogue }, dialogue),
+            )
+          }
+          cells.push(
+            h('td', null, r.providers.join('、') || '—'),
+            h('td', null, r.models.join('、') || '—'),
+            h('td', { className: 'num' }, String(r.calls)),
+          )
+          if (admin) {
+            cells.push(tokenCell(r.input), tokenCell(r.cacheRead), tokenCell(r.cacheWrite), tokenCell(r.output), tokenCell(r.tokens))
+          } else {
+            cells.push(tokenCell(r.tokens))
+          }
+          return h.apply(null, ['tr', { key: task + (win.start + i) }].concat(cells))
+        })),
+      )
       return h('div', { className: 'wb-set-card' },
         h('h3', null, '调用明细'),
         h('div', { className: 'body' },
-          rows.length ? h('table', { className: 'kq-table' },
-            h('thead', null, h('tr', null,
-              h('th', null, '时间'),
-              h('th', null, '任务名称'),
-              h('th', null, '供应商'),
-              h('th', null, '模型'),
-              h('th', null, '次数'),
-              h('th', null, 'Token'),
-            )),
-            h('tbody', null, slice.map(function (r, i) {
-              var begin = shortWhen(r.first)
-              var end = shortWhen(r.last)
-              var when = begin === end ? begin : (begin.slice(0, 6) === end.slice(0, 6) ? begin + '–' + end.slice(6) : begin + '–' + end)
-              var task = r.task || '—'
-              return h('tr', { key: task + (start + i) },
-                h('td', null, when),
-                h('td', { className: 'kq-task', title: task }, task),
-                h('td', null, r.providers.join('、') || '—'),
-                h('td', null, r.models.join('、') || '—'),
-                h('td', null, String(r.calls)),
-                h('td', { title: fmtFull(r.tokens) }, fmtTokens(r.tokens)),
-              )
-            })),
-          ) : h('p', null, '这一天还没有调用明细。'),
-          rows.length > pageSize ? h('div', { className: 'kq-pager' },
-            h('button', {
-              type: 'button',
-              className: 'kq-btn',
-              disabled: current <= 1,
-              onClick: function () { setPage(current - 1) },
-            }, '上一页'),
-            h('span', null, (start + 1) + '–' + (start + slice.length) + ' / ' + rows.length),
-            h('button', {
-              type: 'button',
-              className: 'kq-btn',
-              disabled: current >= pages,
-              onClick: function () { setPage(current + 1) },
-            }, '下一页'),
-          ) : null,
-          raw.length >= 200 ? h('p', null, '只列出最近 200 条调用，再按任务合并。上面的次数和 Token 仍是全部合计。') : null,
+          rows.length ? h('div', { className: 'kq-detail-scroll' }, table) : h('p', null, '这一天还没有调用明细。'),
+          h(Pager, { total: rows.length, page: page, setPage: setPage, pageSize: pageSize, setPageSize: setPageSize }),
+          raw.length >= 200 ? h('p', null, admin
+            ? '只列出最近 200 条调用，再按任务合并。上面的次数和总用量仍是全部合计。'
+            : '只列出最近 200 条调用，再按任务合并。上面的次数和 Token 仍是全部合计。') : null,
         ),
       )
     }
@@ -728,6 +928,15 @@ window.__ModuleLoader__.load({
       var detailPageState = useState(1)
       var detailPage = detailPageState[0]
       var setDetailPage = detailPageState[1]
+      var modelPageState = useState(1)
+      var modelPage = modelPageState[0]
+      var setModelPage = modelPageState[1]
+      var detailSizeState = useState(10)
+      var detailPageSize = detailSizeState[0]
+      var setDetailPageSize = detailSizeState[1]
+      var modelSizeState = useState(10)
+      var modelPageSize = modelSizeState[0]
+      var setModelPageSize = modelSizeState[1]
 
       function reload() {
         return load(onDate, grain, scope)
@@ -797,7 +1006,7 @@ window.__ModuleLoader__.load({
         return function () { stopped = true; clearTimeout(timer) }
       }, [onDate, grain, scope])
 
-      useEffect(function () { setDetailPage(1) }, [onDate, grain, scope])
+      useEffect(function () { setDetailPage(1); setModelPage(1) }, [onDate, grain, scope])
 
       var usage = (data && data.usage) || null
       var monthMode = grain === 'month'
@@ -916,8 +1125,8 @@ window.__ModuleLoader__.load({
                   ' · 按合计 Token 从高到低 · 含全部账号（含管理员）· 共 ' + String(people.length) + ' 人',
                 people,
               ) : null,
-              modelTable(usage),
-              detailTable(usage, detailPage, setDetailPage),
+              modelTable(usage, isAdmin, data && data.providerKeys, modelPage, setModelPage, modelPageSize, setModelPageSize),
+              detailTable(usage, detailPage, setDetailPage, detailPageSize, setDetailPageSize, isAdmin),
               ),
             ),
           ),

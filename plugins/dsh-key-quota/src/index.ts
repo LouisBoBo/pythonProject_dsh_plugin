@@ -1,5 +1,5 @@
 import type { Server } from 'node:http'
-import { assignDenyMessage, resolveAssignedKey, usesDeepseekApiKey } from './bind.js'
+import { assignDenyMessage, hasAssignee, resolveAssignedKey, usesDeepseekApiKey } from './bind.js'
 import { classifyCall, METER_SOURCES } from './classify.js'
 import { resolveConfig, type QuotaConfig } from './config.js'
 import { denyMessage, type Snap } from './decide.js'
@@ -158,7 +158,8 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
   try {
     ctx.on('llm/stream', (options, next) => {
       const title = classifyCall(options).source === 'dsh_title'
-      if (!usesDeepseekApiKey(options)) {
+      // 还没有任何分配时不换 Key、不拒绝。有分配之后，未分到的账号才走 key_unassigned。
+      if (!usesDeepseekApiKey(options) || !hasAssignee(ledger.entries())) {
         if (title) {
           try { sideUserId = platformSession().viewer?.id || '' } catch { sideUserId = '' }
         }

@@ -1,4 +1,4 @@
-import { listLibrary, readDocument } from './store.js'
+import { listLibraries, readDocument } from './store.js'
 import { MomError } from './types.js'
 
 export const MOM_HTTP_PREFIX = '/mom-docs/v1'
@@ -84,11 +84,12 @@ export function handleMomRequest(req: MomHttpRequest, res: MomHttpResponse): voi
     return
   }
   const relative = url.pathname.slice(MOM_HTTP_PREFIX.length).replace(/^\/+|\/+$/g, '')
-  const directory = url.searchParams.get('directory') || ''
+  const directories = url.searchParams.getAll('directory')
+  const directory = directories[0] || ''
   try {
     if (relative === 'files') {
-      const listed = listLibrary(directory)
-      const body = { ok: true, directory: listed.directory, days: listed.days }
+      const listed = listLibraries(directories)
+      const body = { ok: true, workspaces: listed.workspaces }
       if (req.method === 'HEAD') {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end()

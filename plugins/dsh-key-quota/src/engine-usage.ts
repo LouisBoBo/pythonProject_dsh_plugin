@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import { sideUsagePath } from './side-usage.js'
-import { peopleUsage, summarizeUsage, type PersonRow, type UsageEvent, type UsageSummary } from './stats.js'
+import { peopleUsage, summarizeUsage, type PersonRow, type UsageDetailRow, type UsageEvent, type UsageSummary } from './stats.js'
 
 type UserRow = { id: string, username: string, displayName: string, role: string }
 
@@ -36,6 +36,17 @@ function num(v: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }
 
+/** 只认明确的 id 字段。不从 jobId 里拆会话号或消息号。 */
+function idField(value: unknown): string {
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text || text.length > 80) return ''
+    return text
+  }
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value < 1e15) return String(value)
+  return ''
+}
+
 function parseEvents(text: string): UsageEvent[] {
   const rows: UsageEvent[] = []
   for (const line of text.split('\n')) {
@@ -44,6 +55,8 @@ function parseEvents(text: string): UsageEvent[] {
       const raw = JSON.parse(line) as Record<string, unknown>
       const ts = String(raw.ts || '')
       if (!ts) continue
+      const sessionId = idField(raw.session_id)
+      const messageId = idField(raw.message_id)
       rows.push({
         ts,
         source: String(raw.source || 'llm'),
@@ -56,6 +69,8 @@ function parseEvents(text: string): UsageEvent[] {
         total: num(raw.total_tokens),
         jobId: String(raw.job_id || ''),
         lane: String(raw.lane || ''),
+        ...(sessionId ? { sessionId } : {}),
+        ...(messageId ? { messageId } : {}),
       })
     } catch {
       // 坏行跳过
@@ -106,7 +121,83 @@ function fileMtime(path: string): number {
   try { return statSync(path).mtimeMs } catch { return -1 }
 }
 
-/** 登录和账本经常不在同一份副本里。认最新一份未过期的会话。 */
+function newestFile(env: NodeJS.ProcessEnv, home: string, name: string): string {
+  let best = ''
+  let bestMtime = -1
+  for (const root of roots(env, home)) {
+    const path = join(root, 'auth', name)
+    const mtime = fileMtime(path)
+    if (mtime >= 0 && mtime >= bestMtime) {
+      best = path
+      bestMtime = mtime
+    }
+  }
+  return best
+}
+
+/** 桌面侧栏的当前登录。只读用户名和角色，不读密码。 */
+function desktopLoginDirs(env: NodeJS.ProcessEnv, home: string): string[] {
+  const out: string[] = []
+  const push = (path: string) => {
+    if (path && !out.includes(path)) out.push(path)
+  }
+  const appData = (env.APPDATA || '').trim()
+  if (appData) push(join(appData, '@deepseek-ai', 'dsh-desktop', 'local-login'))
+  push(join(home, 'Library', 'Application Support', '@deepseek-ai', 'dsh-desktop', 'local-login'))
+  push(join(home, 'AppData', 'Roaming', '@deepseek-ai', 'dsh-desktop', 'local-login'))
+  return out
+}
+
+function parseDesktopSession(text: string, now: number): { username: string, displayName: string } | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown>
+    const username = String(raw.username || '').trim()
+    if (!username || username.length > 80) return null
+    const exp = Number(raw.expiresAt)
+    if (!Number.isFinite(exp) || exp <= 0) return null
+    const expMs = exp > 1e12 ? exp : exp * 1000
+    if (expMs <= now) return null
+    const displayName = typeof raw.displayName === 'string' ? raw.displayName.trim().slice(0, 80) : ''
+    return { username, displayName }
+  } catch {
+    return null
+  }
+}
+
+function desktopRole(text: string, username: string): string {
+  try {
+    const raw = JSON.parse(text) as { users?: unknown }
+    const list = Array.isArray(raw.users) ? raw.users : []
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue
+      const row = item as Record<string, unknown>
+      if (String(row.username || '') !== username) continue
+      const role = String(row.role || '')
+      return role === 'admin' || role === 'user' ? role : ''
+    }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
+function pickDesktopLogin(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  read: (path: string) => string | null,
+  now: number,
+): { username: string, displayName: string, role: string } | null {
+  for (const dir of desktopLoginDirs(env, home)) {
+    const session = parseDesktopSession(read(join(dir, 'session.json')) || '', now)
+    if (!session) continue
+    const role = desktopRole(read(join(dir, 'users.json')) || '', session.username)
+    if (!role) continue
+    return { username: session.username, displayName: session.displayName || session.username, role }
+  }
+  return null
+}
+
+/** 登录和账本经常不在同一份副本里。引擎会话过期时，认桌面侧栏仍有效的登录。 */
 function pickAuth(
   env: NodeJS.ProcessEnv,
   home: string,
@@ -127,10 +218,30 @@ function pickAuth(
     bestMtime = mtime
     best = parsed
   }
-  if (!bestPath || !best) return { users: [], active: null }
+  if (bestPath && best) {
+    return {
+      users: parseUsers(read(join(bestPath, '..', 'users.json')) || ''),
+      active: { id: best.id, role: best.role, displayName: best.displayName },
+    }
+  }
+  const usersPath = newestFile(env, home, 'users.json')
+  const users = usersPath ? parseUsers(read(usersPath) || '') : []
+  const login = pickDesktopLogin(env, home, read, now)
+  if (!login) return { users, active: null }
+  const matched = users.find((user) => user.username === login.username)
+  const listed = users.length ? users : [{
+    id: login.username,
+    username: login.username,
+    displayName: login.displayName,
+    role: login.role,
+  }]
   return {
-    users: parseUsers(read(join(bestPath, '..', 'users.json')) || ''),
-    active: { id: best.id, role: best.role, displayName: best.displayName },
+    users: listed,
+    active: {
+      id: matched?.id || login.username,
+      role: matched?.role || login.role,
+      displayName: matched?.displayName || login.displayName || login.username,
+    },
   }
 }
 
@@ -269,6 +380,8 @@ function parseMeter(text: string): UsageEvent[] {
       else if (reasoning > 0 && total === base + reasoning) total = base
       const lane = String(raw.source || 'dsh_other')
       const task = typeof raw.task === 'string' ? raw.task.trim() : ''
+      const sessionId = idField(raw.session_id)
+      const messageId = idField(raw.message_id)
       rows.push({
         ts: String(raw.ts || ''),
         source: 'llm',
@@ -283,6 +396,8 @@ function parseMeter(text: string): UsageEvent[] {
         lane: lane.startsWith('dsh_') ? lane : 'dsh_other',
         ...(task ? { task } : {}),
         ...(rawId.startsWith('kqside_') && cacheWrite > 0 ? { cacheWrite } : {}),
+        ...(sessionId ? { sessionId } : {}),
+        ...(messageId ? { messageId } : {}),
       })
     } catch {
       // 坏行跳过
@@ -359,6 +474,8 @@ function usageFromSession(text: string, sessionId: string, afterTs: string): Usa
     if (base <= 0 && total <= 0) continue
     const ts = shanghaiIso(ms)
     if (afterTs && ts <= afterTs) continue
+    const turn = Number(data.turn)
+    const step = Number(data.step)
     const message = data.message && typeof data.message === 'object' ? data.message as Record<string, unknown> : {}
     const source = message.source && typeof message.source === 'object' ? message.source as Record<string, unknown> : {}
     const provider = String(source.provider || '')
@@ -376,6 +493,10 @@ function usageFromSession(text: string, sessionId: string, afterTs: string): Usa
       jobId: `sess_${sessionId}_${seq}`.slice(0, 80),
       lane: cursor ? 'cursor_code' : 'dsh_chat',
       task,
+      ...(sessionId.trim() ? { sessionId: sessionId.trim().slice(0, 80) } : {}),
+      messageId: String(seq),
+      ...(Number.isInteger(turn) && turn > 0 ? { turn } : {}),
+      ...(Number.isInteger(step) && step > 0 ? { step } : {}),
     })
   }
   return rows
@@ -504,6 +625,65 @@ function mergeSessions(events: UsageEvent[], activeId: string, env: NodeJS.Proce
   return extra.length ? events.concat(extra) : events
 }
 
+function namesOf(bundle: EngineBundle): Map<string, string> {
+  const names = new Map<string, string>()
+  for (const user of bundle.users) {
+    const name = user.displayName || user.username || ''
+    if (user.id && name) names.set(user.id, name)
+  }
+  if (bundle.active?.id && bundle.active.displayName && !names.has(bundle.active.id)) {
+    names.set(bundle.active.id, bundle.active.displayName)
+  }
+  return names
+}
+
+function memberDetail(row: UsageDetailRow): UsageDetailRow {
+  return {
+    ts: row.ts,
+    provider: row.provider,
+    model: row.model,
+    source: row.source,
+    lane: row.lane,
+    tokens: row.tokens,
+    task: row.task,
+  }
+}
+
+/** 同一用户出现两把不同的后四位时不猜是哪一把。 */
+export function tailsByUser(assigned: Array<{ assigneeUserId?: string, tail?: string }>): Map<string, string> {
+  const found = new Map<string, string[]>()
+  for (const row of assigned) {
+    const id = String(row.assigneeUserId || '').trim()
+    const tail = String(row.tail || '').trim()
+    if (!id || !tail || tail.length > 8) continue
+    const list = found.get(id) || []
+    if (!list.includes(tail)) list.push(tail)
+    found.set(id, list)
+  }
+  const out = new Map<string, string>()
+  for (const [id, tails] of found) {
+    if (tails.length === 1) out.set(id, tails[0])
+  }
+  return out
+}
+
+export function keyTailForCall(provider: string, userId: string, tails: ReadonlyMap<string, string>): string {
+  if (!userId || !/deepseek/i.test(provider)) return ''
+  return tails.get(userId) || ''
+}
+
+/** 只写入后四位。调用方传入的密文、keyId 不会出现在结果里。 */
+export function stampKeyTails(
+  rows: UsageDetailRow[],
+  assigned: Array<{ assigneeUserId?: string, tail?: string }>,
+): UsageDetailRow[] {
+  const tails = tailsByUser(assigned)
+  return rows.map((row) => ({
+    ...row,
+    keyTail: keyTailForCall(row.provider, row.userId || '', tails),
+  }))
+}
+
 export function panelQuery(url: string): { on: string, grain: 'day' | 'month', scope: 'personal' | 'enterprise' } {
   const q = url.includes('?') ? url.slice(url.indexOf('?') + 1) : ''
   const params = new URLSearchParams(q)
@@ -526,6 +706,14 @@ export function panelUsage(url: string, bundle = loadEngineBundle()): {
   const scope = query.scope === 'enterprise' && viewerAdmin ? 'enterprise' : 'personal'
   const userId = scope === 'personal' ? (bundle.active?.id || null) : null
   const usage = summarizeUsage(bundle.events, { on: query.on, grain: query.grain, userId })
+  const names = namesOf(bundle)
+  usage.detail = viewerAdmin
+    ? usage.detail.map((row) => ({
+      ...row,
+      userId: row.userId || '',
+      userName: names.get(row.userId || '') || '',
+    }))
+    : usage.detail.map(memberDetail)
   const from = query.grain === 'month' ? usage.month_from : usage.on
   const to = query.grain === 'month' ? usage.month_to : usage.on
   const people = scope === 'enterprise' ? peopleUsage(bundle.events, bundle.users, from, to) : null

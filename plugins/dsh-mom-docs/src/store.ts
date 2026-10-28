@@ -9,7 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { extname, join } from 'node:path'
+import { dirname, extname, join } from 'node:path'
 import {
   assertCalendarDate,
   assertInside,
@@ -22,6 +22,15 @@ import { MomError, type LibraryDay, type LibraryFile, type ListedDoc, type SaveR
 
 export const MAX_BYTES = 512 * 1024
 const MAX_INDEX_BYTES = 1024 * 1024
+const MAX_CATALOG_BYTES = 256 * 1024
+const MAX_WORKSPACES = 200
+
+let catalogFile: string | null = null
+
+/** 记住保存过的工作区。未设置时不写本机目录，测试不会碰到用户目录。 */
+export function setWorkspaceCatalog(file: string | null): void {
+  catalogFile = file
+}
 
 function withTrailingNewline(content: string): string {
   return content.endsWith('\n') ? content : `${content}\n`
@@ -169,6 +178,7 @@ export function saveDocument(input: {
     JSON.stringify({ savedAt: now.toISOString(), date, fileName, title, bytes }) + '\n',
   )
 
+  rememberWorkspace(workspace)
   return {
     filePath,
     relativePath: toPortableRelative(workspace, filePath),
@@ -177,6 +187,44 @@ export function saveDocument(input: {
     bytes,
     title,
     indexWritten,
+  }
+}
+
+function readCatalog(): string[] {
+  const file = catalogFile
+  if (!file) return []
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(file)
+  } catch {
+    return []
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_CATALOG_BYTES) return []
+  const lines = readFileSync(file, 'utf8').split(/\r?\n/)
+  const out: string[] = []
+  for (const line of lines) {
+    const text = line.trim()
+    if (!text || out.includes(text)) continue
+    out.push(text)
+    if (out.length >= MAX_WORKSPACES) break
+  }
+  return out
+}
+
+function rememberWorkspace(workspace: string): void {
+  const file = catalogFile
+  if (!file) return
+  try {
+    const known = readCatalog()
+    if (known.includes(workspace) || known.length >= MAX_WORKSPACES) return
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    if (existsSync(file)) {
+      const stat = lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile()) return
+    }
+    appendFileSync(file, `${workspace}\n`, { encoding: 'utf8', mode: 0o600 })
+  } catch {
+    // 记不住目录不影响已经写好的文件
   }
 }
 
@@ -329,4 +377,28 @@ export function listLibrary(directory: string): { directory: string; days: Libra
     if (items.length > 0) days.push({ date, items })
   }
   return { directory: workspace, days }
+}
+
+/** 列出这些目录以及曾经保存过的工作区。无效目录跳过，没有文件的目录不出现。 */
+export function listLibraries(directories: string[]): { workspaces: Array<{ directory: string; days: LibraryDay[] }> } {
+  const seen = new Set<string>()
+  const workspaces: Array<{ directory: string; days: LibraryDay[] }> = []
+  for (const raw of [...directories, ...readCatalog()]) {
+    if (workspaces.length >= MAX_WORKSPACES) break
+    let listed: { directory: string; days: LibraryDay[] }
+    try {
+      listed = listLibrary(raw)
+    } catch {
+      continue
+    }
+    if (seen.has(listed.directory) || listed.days.length === 0) continue
+    seen.add(listed.directory)
+    workspaces.push(listed)
+  }
+  workspaces.sort((a, b) => {
+    const left = a.days[0]?.items[0]?.mtimeMs || 0
+    const right = b.days[0]?.items[0]?.mtimeMs || 0
+    return right - left || a.directory.localeCompare(b.directory)
+  })
+  return { workspaces }
 }

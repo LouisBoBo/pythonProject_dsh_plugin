@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { MomError } from './types.js'
 import { assertCalendarDate, resolveWorkspaceDir, safeFileName, shanghaiDate } from './paths.js'
 import { handleMomRequest } from './http.js'
-import { MAX_BYTES, listDocuments, listLibrary, readDocument, saveDocument } from './store.js'
+import { MAX_BYTES, listDocuments, listLibraries, listLibrary, readDocument, saveDocument, setWorkspaceCatalog } from './store.js'
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
@@ -208,7 +208,9 @@ function testStore(): void {
     assert(!library.days.some((day) => day.items.some((item) => item.fileName.startsWith('_'))), 'index hidden')
     const page = captureMom('GET', `/mom-docs/v1/files?directory=${encodeURIComponent(workspace)}`)
     assert(page.status === 200 && page.json.ok === true, 'http list')
-    assert(Array.isArray(page.json.days) && page.json.days.length === 2, 'http days')
+    const workspaces = page.json.workspaces || []
+    assert(workspaces.length === 1, 'http workspace')
+    assert((workspaces[0]?.days || []).length === 2, 'http days')
     const denied = captureMom(
       'GET',
       `/mom-docs/v1/file?directory=${encodeURIComponent(workspace)}&date=2026-10-22&name=次日.md`,
@@ -248,13 +250,37 @@ function captureMom(method: string, url: string, headers: Record<string, string>
       },
     },
   )
-  let json: { ok?: boolean; days?: unknown[]; content?: string } = {}
+  let json: { ok?: boolean; days?: unknown[]; content?: string; workspaces?: Array<{ directory?: string; days?: unknown[] }> } = {}
   try {
-    json = JSON.parse(body) as { ok?: boolean; days?: unknown[]; content?: string }
+    json = JSON.parse(body) as { ok?: boolean; days?: unknown[]; content?: string; workspaces?: Array<{ directory?: string; days?: unknown[] }> }
   } catch {
     json = {}
   }
   return { status, json }
+}
+
+function testAllWorkspaces(): void {
+  const root = mkdtempSync(join(tmpdir(), 'mom-docs-all-'))
+  const first = join(root, 'alpha')
+  const second = join(root, 'beta')
+  const catalog = join(root, 'workspaces.txt')
+  mkdirSync(first)
+  mkdirSync(second)
+  setWorkspaceCatalog(catalog)
+  try {
+    const now = new Date('2026-10-21T02:00:00Z')
+    saveDocument({ directory: first, filename: '甲.md', title: '甲', content: '甲', now })
+    saveDocument({ directory: second, filename: '乙.md', title: '乙', content: '乙', now })
+    const listed = listLibraries([first, join(root, 'missing')])
+    assert(listed.workspaces.length === 2, 'both saved workspaces')
+    const files = listed.workspaces.flatMap((item) => item.days.flatMap((day) => day.items.map((file) => file.fileName))).sort()
+    assert(files.join(',') === '乙.md,甲.md', 'each workspace keeps its own file')
+    const page = captureMom('GET', `/mom-docs/v1/files?directory=${encodeURIComponent(first)}`)
+    assert(page.status === 200 && page.json.workspaces?.length === 2, 'http keeps the other workspace')
+  } finally {
+    setWorkspaceCatalog(null)
+    rmSync(root, { recursive: true, force: true })
+  }
 }
 
 function main(): void {
@@ -262,6 +288,7 @@ function main(): void {
   testNames()
   testStore()
   testEscapes()
+  testAllWorkspaces()
   console.log('[mom-docs self-test] ok')
 }
 

@@ -1,6 +1,6 @@
 /**
- * 左侧栏「资料库」：读取当前工作目录 MOM 下已保存的文件。
- * 分组标题显示工作目录，不占用知识库或其它插件的面板 id。
+ * 左侧栏「资料库」：列出所有保存过的工作区 MOM 文件。
+ * 分组标题是工作目录名，不占用知识库或其它插件的面板 id。
  */
 window.__ModuleLoader__.load({
   id: '@zhongruan/dsh-mom-docs',
@@ -67,22 +67,29 @@ window.__ModuleLoader__.load({
       document.head.appendChild(style)
     }
 
-    function readCwd(client) {
+    function sessionCwd(row) {
+      var path = row && (row.cwd || (row.header && row.header.cwd))
+      return typeof path === 'string' ? path : ''
+    }
+
+    function readWorkspaces(client) {
       try {
         var list = client && client.sessions && client.sessions.list
-        if (!list || typeof list.getSnapshot !== 'function') return ''
+        if (!list || typeof list.getSnapshot !== 'function') return []
         var state = list.getSnapshot() || {}
         var byId = state.byId || {}
-        var chosen = null
-        Object.keys(byId).forEach(function (id) {
-          var row = byId[id]
-          if (!chosen && row && row.retainedBy && Number(row.retainedBy.mainView || 0) > 0) chosen = row
-        })
-        if (!chosen && state.current) chosen = byId[state.current]
-        var path = chosen && (chosen.cwd || (chosen.header && chosen.header.cwd))
-        return typeof path === 'string' ? path : ''
+        var seen = {}
+        var paths = []
+        function add(path) {
+          if (!path || seen[path]) return
+          seen[path] = true
+          paths.push(path)
+        }
+        Object.keys(byId).forEach(function (id) { add(sessionCwd(byId[id])) })
+        if (state.current) add(sessionCwd(byId[state.current]))
+        return paths
       } catch (err) {
-        return ''
+        return []
       }
     }
 
@@ -171,9 +178,9 @@ window.__ModuleLoader__.load({
     function LibraryView(props) {
       var client = props.client
       var workspace = props.workspace
-      var cwdState = useState(function () { return readCwd(client) })
-      var directory = cwdState[0]
-      var setDirectory = cwdState[1]
+      var dirsState = useState(function () { return readWorkspaces(client) })
+      var directories = dirsState[0]
+      var setDirectories = dirsState[1]
       var dataState = useState(null)
       var data = dataState[0]
       var setData = dataState[1]
@@ -192,9 +199,9 @@ window.__ModuleLoader__.load({
       var starsState = useState(loadStars)
       var stars = starsState[0]
       var setStars = starsState[1]
-      var openGroupState = useState(true)
-      var openGroup = openGroupState[0]
-      var setOpenGroup = openGroupState[1]
+      var closedState = useState({})
+      var closed = closedState[0]
+      var setClosed = closedState[1]
       var selectedState = useState(null)
       var selected = selectedState[0]
       var setSelected = selectedState[1]
@@ -205,19 +212,18 @@ window.__ModuleLoader__.load({
       useEffect(function () {
         var list = client && client.sessions && client.sessions.list
         if (!list || typeof list.subscribe !== 'function') return undefined
-        function pull() { setDirectory(readCwd(client)) }
+        function pull() { setDirectories(readWorkspaces(client)) }
         pull()
         return list.subscribe(pull)
       }, [client])
 
       useEffect(function () {
-        if (!directory) {
-          setData(null)
-          return undefined
-        }
         var stopped = false
         function load() {
-          var path = '/mom-docs/v1/files?directory=' + encodeURIComponent(directory)
+          var query = directories.map(function (dir) {
+            return 'directory=' + encodeURIComponent(dir)
+          }).join('&')
+          var path = '/mom-docs/v1/files' + (query ? '?' + query : '')
           momFetch(path).then(function (res) {
             if (stopped) return
             if (!res.body || res.body.ok !== true) {
@@ -237,15 +243,15 @@ window.__ModuleLoader__.load({
           stopped = true
           clearInterval(timer)
         }
-      }, [directory])
+      }, [directories.join('\n')])
 
       useEffect(function () {
-        if (!selected || !directory) {
+        if (!selected || !selected.directory) {
           setArticle('')
           return undefined
         }
         var stopped = false
-        var path = '/mom-docs/v1/file?directory=' + encodeURIComponent(directory) +
+        var path = '/mom-docs/v1/file?directory=' + encodeURIComponent(selected.directory) +
           '&date=' + encodeURIComponent(selected.date) +
           '&name=' + encodeURIComponent(selected.fileName)
         momFetch(path).then(function (res) {
@@ -259,25 +265,25 @@ window.__ModuleLoader__.load({
           if (!stopped) setArticle('打不开这份文件')
         })
         return function () { stopped = true }
-      }, [directory, selected && selected.date, selected && selected.fileName])
+      }, [selected && selected.directory, selected && selected.date, selected && selected.fileName])
 
       var shown = useMemo(function () {
-        var days = (data && data.days) || []
+        var groups = (data && data.workspaces) || []
         var q = query.trim().toLocaleLowerCase('zh-CN')
-        return days.map(function (day) {
-          var items = day.items.filter(function (item) {
-            if (kind !== 'all' && item.kind !== kind) return false
-            var key = fileKey(directory, day.date, item.fileName)
-            if (starOnly && stars.indexOf(key) < 0) return false
-            if (!q) return true
-            return (item.fileName + ' ' + (item.title || '')).toLocaleLowerCase('zh-CN').indexOf(q) >= 0
-          })
-          return { date: day.date, items: items }
-        }).filter(function (day) { return day.items.length > 0 })
-      }, [data, query, kind, starOnly, stars, directory])
-
-      var count = shown.reduce(function (sum, day) { return sum + day.items.length }, 0)
-      var workspacePath = (data && data.directory) || directory
+        return groups.map(function (group) {
+          var days = (group.days || []).map(function (day) {
+            var items = day.items.filter(function (item) {
+              if (kind !== 'all' && item.kind !== kind) return false
+              var key = fileKey(group.directory, day.date, item.fileName)
+              if (starOnly && stars.indexOf(key) < 0) return false
+              if (!q) return true
+              return (item.fileName + ' ' + (item.title || '')).toLocaleLowerCase('zh-CN').indexOf(q) >= 0
+            })
+            return { date: day.date, items: items }
+          }).filter(function (day) { return day.items.length > 0 })
+          return { directory: group.directory, days: days }
+        }).filter(function (group) { return group.days.length > 0 })
+      }, [data, query, kind, starOnly, stars])
 
       function toggleStar(event, key) {
         event.stopPropagation()
@@ -333,38 +339,47 @@ window.__ModuleLoader__.load({
               h('span', null, '更新时间'),
               h('span', null, '大小'),
             ),
-            !directory
-              ? h('div', { className: 'mom-lib-empty' }, '当前会话还没有工作目录。')
-              : count === 0
+            shown.length === 0
               ? h('div', { className: 'mom-lib-empty' }, query.trim() || starOnly || kind !== 'all'
                 ? '没有符合条件的文件。'
-                : '这个工作目录的 MOM 里还没有文件。')
-              : h('div', null,
+                : '还没有保存过文件。')
+              : h('div', null, shown.map(function (group) {
+                  var open = !closed[group.directory]
+                  var count = group.days.reduce(function (sum, day) { return sum + day.items.length }, 0)
+                  return h('div', { key: group.directory },
                   h('button', {
                     type: 'button',
                     className: 'mom-lib-group',
-                    onClick: function () { setOpenGroup(!openGroup) },
+                    onClick: function () {
+                      setClosed(function (prev) {
+                        var next = Object.assign({}, prev)
+                        if (next[group.directory]) delete next[group.directory]
+                        else next[group.directory] = true
+                        return next
+                      })
+                    },
                   },
-                    h('span', null, openGroup ? '▾' : '▸'),
-                    h('span', { className: 'mom-lib-workspace', title: workspaceName(workspacePath) }, workspaceName(workspacePath)),
+                    h('span', null, open ? '▾' : '▸'),
+                    h('span', { className: 'mom-lib-workspace', title: group.directory }, workspaceName(group.directory)),
                     h('span', { className: 'mom-lib-badge' }, count + ' 个文件'),
                   ),
-                  openGroup ? shown.map(function (day) {
-                    return h('div', { key: day.date },
+                  open ? group.days.map(function (day) {
+                    return h('div', { key: group.directory + '\n' + day.date },
                       h('div', { className: 'mom-lib-day' }, day.date),
                       day.items.map(function (item) {
-                        var key = fileKey(directory, day.date, item.fileName)
-                        var on = selected && selected.date === day.date && selected.fileName === item.fileName
+                        var key = fileKey(group.directory, day.date, item.fileName)
+                        var picked = { directory: group.directory, date: day.date, fileName: item.fileName, title: item.title }
+                        var on = selected && selected.directory === group.directory && selected.date === day.date && selected.fileName === item.fileName
                         return h('div', {
                           key: key,
                           role: 'button',
                           tabIndex: 0,
                           className: 'mom-lib-file' + (on ? ' on' : ''),
-                          onClick: function () { setSelected({ date: day.date, fileName: item.fileName, title: item.title }) },
+                          onClick: function () { setSelected(picked) },
                           onKeyDown: function (event) {
                             if (event.key === 'Enter' || event.key === ' ') {
                               event.preventDefault()
-                              setSelected({ date: day.date, fileName: item.fileName, title: item.title })
+                              setSelected(picked)
                             }
                           },
                         },
@@ -386,7 +401,8 @@ window.__ModuleLoader__.load({
                       }),
                     )
                   }) : null,
-                ),
+                  )
+                })),
           ),
         ),
         selected ? h('section', {

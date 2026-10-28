@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { zstdCompressSync } from 'node:zlib'
-import { loadEngineBundle, panelUsage } from '../lib/engine-usage.js'
+import { loadEngineBundle, panelUsage, stampKeyTails } from '../lib/engine-usage.js'
 
 describe('engine usage files', () => {
   it('keeps the admin login when the newest usage copy has no session file', async () => {
@@ -301,6 +301,235 @@ describe('engine usage files', () => {
       const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
       assert.equal(view.usage.today.llm.calls, 0)
       assert.equal(view.usage.today.llm.tokens, 0)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('shows call identity to an admin and leaves a member on the old detail', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-admin-detail-'))
+    const root = join(dir, 'zr-workbuddy-desktop', 'persist', 'engine-data')
+    const sessionDir = join(dir, 'local', 'ZR_DSH', 'dsh-home', 'sessions', 'ws', 'session-abc')
+    await mkdir(join(root, 'usage'), { recursive: true })
+    await mkdir(join(root, 'auth'), { recursive: true })
+    await mkdir(sessionDir, { recursive: true })
+    await mkdir(join(dir, '.dsh', 'key-quota'), { recursive: true })
+    await writeFile(join(root, 'usage', 'events.jsonl'), JSON.stringify({
+      ts: '2026-10-26T14:00:00+08:00',
+      source: 'llm',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      user_id: 'u_admin',
+      prompt_tokens: 3,
+      completion_tokens: 1,
+      total_tokens: 4,
+      job_id: 'sess_not-a-session_9',
+    }) + '\n')
+    await writeFile(join(dir, '.dsh', 'key-quota', 'side-usage.jsonl'), JSON.stringify({
+      id: 'kqside_20261026170000_abc',
+      ts: '2026-10-26T17:00:00+08:00',
+      source: 'dsh_title',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      user_id: 'u_admin',
+      session_id: 'title-session',
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      total_tokens: 12,
+      task: '会话标题',
+    }) + '\n')
+    await writeFile(join(root, 'auth', 'users.json'), JSON.stringify({
+      users: [{ id: 'u_admin', username: 'admin', display_name: '管理员', role: 'admin' }],
+    }))
+    const active = join(root, 'auth', 'active.json')
+    await writeFile(active, JSON.stringify({
+      id: 'u_admin', role: 'admin', display_name: '管理员', exp: 4_000_000_000,
+    }))
+    const sec = Math.floor(Date.parse('2026-10-26T15:00:00+08:00') / 1000)
+    const lines = [
+      { seq: 1, time: sec, type: 'session/title', data: { title: '项目功能介绍' } },
+      { seq: 2, time: sec, type: 'assistant/message', data: { turn: 1, step: 1, usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 }, message: { source: { provider: 'deepseek-official', model: 'deepseek-flash' } } } },
+      { seq: 8, time: sec + 60, type: 'assistant/message', data: { turn: 1, step: 2, usage: { inputTokens: 40, outputTokens: 8, totalTokens: 48 }, message: { source: { provider: 'zhipu', model: 'glm-5.3' } } } },
+    ]
+    await writeFile(join(sessionDir, 'session.v4.jsonl.zstd'), Buffer.concat(lines.map((row) => zstdCompressSync(Buffer.from(JSON.stringify(row) + '\n')))))
+    const env = {
+      APPDATA: dir,
+      DSH_HOME: join(dir, 'empty-home'),
+      LOCALAPPDATA: join(dir, 'local'),
+    }
+    try {
+      const admin = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', loadEngineBundle(env, dir))
+      assert.equal(admin.viewerAdmin, true)
+      assert.equal(admin.usage.today.llm.tokens, 120 + 48 + 4 + 12)
+      const chat = admin.usage.detail.filter((row) => row.task === '项目功能介绍')
+      assert.equal(chat.length, 2)
+      assert.deepEqual(chat.map((row) => row.messageId).sort(), ['2', '8'])
+      for (const row of chat) {
+        assert.equal(row.sessionId, 'abc')
+        assert.equal(row.userName, '管理员')
+        assert.equal(row.userId, 'u_admin')
+        assert.equal(row.input + row.cacheRead + row.cacheWrite + row.output, row.tokens)
+      }
+      const zhipu = chat.find((row) => row.provider === 'zhipu')
+      const deepseek = chat.find((row) => row.provider === 'deepseek-official')
+      assert.equal(zhipu.input, 40)
+      assert.equal(zhipu.output, 8)
+      assert.equal(zhipu.turn, 1)
+      assert.equal(zhipu.step, 2)
+      assert.equal(deepseek.input, 100)
+      assert.equal(deepseek.output, 20)
+      assert.equal(deepseek.turn, 1)
+      assert.equal(deepseek.step, 1)
+      const titled = admin.usage.detail.find((row) => row.task === '会话标题')
+      assert.equal(titled.sessionId, 'title-session')
+      assert.equal(titled.messageId, '')
+      const fromJob = admin.usage.detail.find((row) => row.tokens === 4)
+      assert.equal(fromJob.sessionId, '')
+      assert.equal(fromJob.messageId, '')
+      const stamped = stampKeyTails(admin.usage.detail, [
+        { assigneeUserId: 'u_admin', tail: 'ab12', sealed: 'sk-secret-value', keyId: 'a'.repeat(64) },
+      ])
+      assert.equal(stamped.find((row) => row.provider === 'deepseek-official' && row.task === '项目功能介绍').keyTail, 'ab12')
+      assert.equal(stamped.find((row) => row.provider === 'zhipu').keyTail, '')
+      assert.equal(JSON.stringify(stamped).includes('sk-secret'), false)
+      assert.equal(JSON.stringify(stamped).includes('a'.repeat(64)), false)
+      const ambiguous = stampKeyTails(admin.usage.detail, [
+        { assigneeUserId: 'u_admin', tail: 'ab12' },
+        { assigneeUserId: 'u_admin', tail: 'zz99' },
+      ])
+      assert.equal(ambiguous.find((row) => row.provider === 'deepseek-official').keyTail, '')
+      const hidden = stampKeyTails(admin.usage.detail, [
+        { assigneeUserId: 'u_admin', tail: 'sk-this-is-a-full-key' },
+      ])
+      assert.equal(hidden.find((row) => row.provider === 'deepseek-official').keyTail, '')
+
+      await writeFile(active, JSON.stringify({
+        id: 'u_admin', role: 'member', display_name: '管理员', exp: 4_000_000_000,
+      }))
+      const member = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', loadEngineBundle(env, dir))
+      assert.equal(member.viewerAdmin, false)
+      assert.equal(member.usage.today.llm.tokens, admin.usage.today.llm.tokens)
+      assert.equal(member.usage.today.llm.calls, admin.usage.today.llm.calls)
+      for (const row of member.usage.detail) {
+        assert.deepEqual(Object.keys(row).sort(), ['lane', 'model', 'provider', 'source', 'task', 'tokens', 'ts'])
+      }
+      assert.equal(JSON.stringify(member.usage.detail).includes('title-session'), false)
+      assert.equal(JSON.stringify(member.usage.detail).includes('ab12'), false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('treats the desktop sidebar login as admin after the engine session expires', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-desktop-login-'))
+    const root = join(dir, 'zr-workbuddy-desktop', 'persist', 'engine-data')
+    const login = join(dir, '@deepseek-ai', 'dsh-desktop', 'local-login')
+    await mkdir(join(root, 'usage'), { recursive: true })
+    await mkdir(join(root, 'auth'), { recursive: true })
+    await mkdir(login, { recursive: true })
+    await writeFile(join(root, 'usage', 'events.jsonl'), JSON.stringify({
+      ts: '2026-10-26T11:16:00+08:00',
+      source: 'llm',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      user_id: 'u_admin',
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      total_tokens: 120,
+    }) + '\n')
+    await writeFile(join(root, 'auth', 'users.json'), JSON.stringify({
+      users: [{
+        id: 'u_admin',
+        username: 'admin',
+        display_name: '管理员',
+        role: 'admin',
+        password_hash: 'engine-secret',
+      }],
+    }))
+    await writeFile(join(root, 'auth', 'active.json'), JSON.stringify({
+      id: 'u_admin', username: 'admin', role: 'admin', display_name: '管理员', exp: 1_700_000_000,
+    }))
+    await writeFile(join(login, 'session.json'), JSON.stringify({
+      username: 'admin', displayName: 'admin', expiresAt: Date.now() + 86_400_000,
+    }))
+    await writeFile(join(login, 'users.json'), JSON.stringify({
+      users: [{ username: 'admin', displayName: 'admin', role: 'admin', passwordHash: 'desktop-secret' }],
+    }))
+    const env = { APPDATA: dir, DSH_HOME: join(dir, 'empty-home') }
+    try {
+      const bundle = loadEngineBundle(env, dir)
+      assert.equal(bundle.active && bundle.active.id, 'u_admin')
+      assert.equal(bundle.active && bundle.active.role, 'admin')
+      assert.equal(JSON.stringify(bundle).includes('engine-secret'), false)
+      assert.equal(JSON.stringify(bundle).includes('desktop-secret'), false)
+      const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
+      assert.equal(view.viewerAdmin, true)
+      assert.equal(view.usage.today.llm.tokens, 120)
+      assert.equal(view.usage.detail[0].userName, '管理员')
+      assert.equal(view.usage.detail[0].userId, 'u_admin')
+
+      await writeFile(join(login, 'session.json'), JSON.stringify({
+        username: 'admin', displayName: 'admin', expiresAt: Date.now() - 1000,
+      }))
+      const expired = loadEngineBundle(env, dir)
+      assert.equal(expired.active, null)
+      assert.equal(panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26', expired).viewerAdmin, false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a normal engine user off the admin detail even if the desktop login says admin', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-member-login-'))
+    const root = join(dir, 'zr-workbuddy-desktop', 'persist', 'engine-data')
+    const login = join(dir, '@deepseek-ai', 'dsh-desktop', 'local-login')
+    await mkdir(join(root, 'usage'), { recursive: true })
+    await mkdir(join(root, 'auth'), { recursive: true })
+    await mkdir(login, { recursive: true })
+    await writeFile(join(root, 'usage', 'events.jsonl'), JSON.stringify({
+      ts: '2026-10-26T11:16:00+08:00',
+      source: 'llm',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      user_id: 'u_admin',
+      prompt_tokens: 100,
+      completion_tokens: 20,
+      total_tokens: 120,
+    }) + '\n' + JSON.stringify({
+      ts: '2026-10-26T12:00:00+08:00',
+      source: 'llm',
+      provider: 'zhipu',
+      model: 'glm-5.3',
+      user_id: 'u_hebo',
+      prompt_tokens: 40,
+      completion_tokens: 8,
+      total_tokens: 48,
+    }) + '\n')
+    await writeFile(join(root, 'auth', 'users.json'), JSON.stringify({
+      users: [
+        { id: 'u_admin', username: 'admin', display_name: '管理员', role: 'admin' },
+        { id: 'u_hebo', username: 'hebo', display_name: 'Hebo', role: 'user' },
+      ],
+    }))
+    await writeFile(join(root, 'auth', 'active.json'), JSON.stringify({
+      id: 'u_admin', username: 'admin', role: 'admin', exp: 1_700_000_000,
+    }))
+    await writeFile(join(login, 'session.json'), JSON.stringify({
+      username: 'hebo', displayName: 'hebo', expiresAt: Date.now() + 86_400_000,
+    }))
+    await writeFile(join(login, 'users.json'), JSON.stringify({
+      users: [{ username: 'hebo', displayName: 'hebo', role: 'admin', passwordHash: 'desktop-secret' }],
+    }))
+    try {
+      const bundle = loadEngineBundle({ APPDATA: dir, DSH_HOME: join(dir, 'empty-home') }, dir)
+      assert.equal(bundle.active && bundle.active.id, 'u_hebo')
+      assert.equal(bundle.active && bundle.active.role, 'user')
+      assert.equal(JSON.stringify(bundle).includes('desktop-secret'), false)
+      const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
+      assert.equal(view.viewerAdmin, false)
+      assert.equal(view.usage.today.llm.tokens, 48)
+      assert.equal(view.usage.detail.length, 1)
+      assert.deepEqual(Object.keys(view.usage.detail[0]).sort(), ['lane', 'model', 'provider', 'source', 'task', 'tokens', 'ts'])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

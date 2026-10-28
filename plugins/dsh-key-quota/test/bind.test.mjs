@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { resolveAssignedKey, usesDeepseekApiKey } from '../lib/bind.js'
+import { hasAssignee, resolveAssignedKey, usesDeepseekApiKey } from '../lib/bind.js'
 import { dispatch } from '../lib/http.js'
 import { keyIdOf, tailOf } from '../lib/key-id.js'
 import { Ledger } from '../lib/ledger.js'
@@ -17,6 +17,12 @@ async function vaultDir() {
 }
 
 describe('assigned key', () => {
+  it('does not gate chat until some account has been assigned a key', () => {
+    assert.equal(hasAssignee([]), false)
+    assert.equal(hasAssignee([{ assigneeUserId: '' }, { assigneeUserId: '   ' }]), false)
+    assert.equal(hasAssignee([{ assigneeUserId: 'u_admin' }]), true)
+  })
+
   it('binds the official route and leaves the account route alone', () => {
     assert.equal(usesDeepseekApiKey({ provider: 'deepseek-official' }), true)
     assert.equal(usesDeepseekApiKey({ provider: 'deepseek-account' }), false)

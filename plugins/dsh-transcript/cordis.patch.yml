@@ -1,0 +1,8 @@
+# 一轮主聊天结束时，把该轮已落在 DSH 会话里的内容写成家目录 transcripts/。
+# 不改会话事件，不挂 llm/stream，写失败只记日志。
+- insert:
+    - id: transcript
+      name: '@zhongruan/dsh-transcript'
+      config:
+        enabled: true
+        archiveRoot: !!js dshHomePath('transcripts')

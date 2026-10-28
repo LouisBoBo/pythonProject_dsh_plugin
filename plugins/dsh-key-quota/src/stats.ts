@@ -15,6 +15,13 @@ export type UsageEvent = {
   task?: string
   /** 仅标题/网页搜索补记。对话行没有这个字段，合计口径不变。 */
   cacheWrite?: number
+  /** 会话目录上的 id。不从 jobId 反解。 */
+  sessionId?: string
+  /** 会话消息 seq。标题和网页搜索没有这个字段。 */
+  messageId?: string
+  /** 这一次模型调用属于会话里的第几轮、第几步。 */
+  turn?: number
+  step?: number
 }
 
 export type UsageDetailRow = {
@@ -25,6 +32,19 @@ export type UsageDetailRow = {
   lane: string
   tokens: number
   task: string
+  /** 以下字段只出现在管理员的明细里。分项来自 chartParts，不另算一套合计。 */
+  userId?: string
+  userName?: string
+  sessionId?: string
+  messageId?: string
+  input?: number
+  cacheRead?: number
+  cacheWrite?: number
+  output?: number
+  turn?: number
+  step?: number
+  /** DeepSeek 当前分配 Key 的后四位。不是完整密钥。 */
+  keyTail?: string
 }
 
 export type DayRow = {
@@ -76,6 +96,33 @@ const OFFSET = 8 * 60 * 60 * 1000
 
 function n(v: number): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0
+}
+
+/** 管理员明细里的对话：第几轮、第几步。不展示会话文件里的内部序号。 */
+export function formatDialogues(items: Array<{ turn?: number, step?: number }>): string {
+  const by = new Map<number, number[]>()
+  const order: number[] = []
+  for (const item of items) {
+    const turn = item.turn
+    if (!turn || !Number.isInteger(turn) || turn <= 0) continue
+    let steps = by.get(turn)
+    if (!steps) {
+      steps = []
+      by.set(turn, steps)
+      order.push(turn)
+    }
+    const step = item.step
+    if (step && Number.isInteger(step) && step > 0 && !steps.includes(step)) steps.push(step)
+  }
+  if (!order.length) return ''
+  return order.map((turn) => {
+    const steps = (by.get(turn) || []).slice().sort((a, b) => a - b)
+    if (!steps.length) return `第${turn}轮`
+    if (steps.length === 1) return `第${turn}轮第${steps[0]}步`
+    const consecutive = steps.every((value, index) => index === 0 || value === steps[index - 1] + 1)
+    if (consecutive) return `第${turn}轮第${steps[0]}–${steps[steps.length - 1]}步`
+    return `第${turn}轮第${steps.join('、')}步`
+  }).join('；')
 }
 
 export function shanghaiStamp(ts: string): { ymd: string, hour: number } | null {
@@ -218,6 +265,15 @@ export function summarizeUsage(events: UsageEvent[], opts: {
         lane: evt.lane || '',
         tokens: parts.tokens,
         task: (evt.task || '').trim(),
+        userId: evt.userId || '',
+        sessionId: evt.sessionId || '',
+        messageId: evt.messageId || '',
+        input: parts.miss,
+        cacheRead: parts.hit,
+        cacheWrite: n(evt.cacheWrite || 0),
+        output: parts.out,
+        ...(evt.turn ? { turn: evt.turn } : {}),
+        ...(evt.step ? { step: evt.step } : {}),
       })
     }
     if (!inMonth) continue

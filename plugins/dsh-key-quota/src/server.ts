@@ -4,9 +4,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { syncCursorUsage } from './cursor-ledger.js'
-import { panelUsage } from './engine-usage.js'
+import { panelUsage, stampKeyTails } from './engine-usage.js'
 import { dispatch, isLoopback, type DispatchDeps, type DispatchResult } from './http.js'
 import { keyIdOf, tailOf } from './key-id.js'
+import { readProviderKeyMasks, type ProviderKeyMasks } from './workbuddy-key.js'
 
 /** 同事要填的地址。本机回环一定有，再附上当前网卡的 IPv4。 */
 export function advertiseUrls(port: number): string[] {
@@ -156,12 +157,30 @@ function headerValue(value: string | string[] | undefined): string {
   return String(raw || '').split(',')[0]?.trim() || ''
 }
 
-async function withUsage(result: DispatchResult, url: string, remoteAddress: string): Promise<DispatchResult> {
+async function withUsage(
+  result: DispatchResult,
+  url: string,
+  remoteAddress: string,
+  ledger?: DispatchDeps['ledger'],
+): Promise<DispatchResult> {
   const path = url.split('?')[0]
   if (result.status !== 200 || path !== '/v1/local/panel' || !isLoopback(remoteAddress)) return result
   try {
     await syncCursorUsage()
-    return { status: 200, body: { ...result.body, ...panelUsage(url) } }
+    const panel = panelUsage(url)
+    const detail = panel.viewerAdmin && ledger
+      ? stampKeyTails(panel.usage.detail, ledger.entries())
+      : panel.usage.detail
+    const providerKeys: ProviderKeyMasks | undefined = panel.viewerAdmin ? readProviderKeyMasks() : undefined
+    return {
+      status: 200,
+      body: {
+        ...result.body,
+        ...panel,
+        ...(providerKeys ? { providerKeys } : {}),
+        usage: { ...panel.usage, detail },
+      },
+    }
   } catch {
     return result
   }
@@ -178,7 +197,7 @@ export async function serveQuota(opts: QuotaHttpOpts, input: {
   if (opts.deps.role !== 'server') {
     if (input.method === 'GET' && path === '/v1/local/panel' && isLoopback(input.remoteAddress)) {
       const body = opts.clientPanel ? await opts.clientPanel() : { ok: true, self: null, keys: null, canAppoint: false }
-      return await withUsage({ status: 200, body }, input.url, input.remoteAddress)
+      return await withUsage({ status: 200, body }, input.url, input.remoteAddress, opts.deps.ledger)
     }
     return { status: 404, body: { ok: false, error: { code: 'not_found', message: '这台电脑不提供额度账本。' } } }
   }
@@ -193,7 +212,7 @@ export async function serveQuota(opts: QuotaHttpOpts, input: {
   }, {
     ...opts.deps,
     localKeyId: loopback ? (key ? keyIdOf(key) : '') : undefined,
-  }), input.url, input.remoteAddress)
+  }), input.url, input.remoteAddress, opts.deps.ledger)
 }
 
 export const QUOTA_WEB_PREFIX = '/key-quota'

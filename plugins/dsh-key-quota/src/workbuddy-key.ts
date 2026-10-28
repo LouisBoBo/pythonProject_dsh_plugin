@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { maskApiKey } from './key-id.js'
 
 function isMasked(v: string): boolean {
   const s = v.trim()
@@ -101,6 +102,17 @@ export function deepseekConfigCandidates(env: NodeJS.ProcessEnv = process.env, h
   return out
 }
 
+function sectionField(yaml: string, section: string, field: string, defaultProvider = ''): string {
+  const flat = parseSection(yaml, section)
+  const provider = (flat.provider || defaultProvider).trim()
+  const nested = provider ? parseByProvider(yaml, section, provider) : {}
+  return flat[field] || nested[field] || ''
+}
+
+function deepseekKeyIn(yaml: string): string {
+  return sectionField(yaml, 'deepseek', 'api_key', 'deepseek')
+}
+
 /** 只读 deepseek.api_key。不写回系统配置，不打印密钥。 */
 export function readDeepseekApiKey(
   readFile: (path: string) => string | null = readYaml,
@@ -110,13 +122,34 @@ export function readDeepseekApiKey(
   for (const path of deepseekConfigCandidates(env, home)) {
     const yaml = readFile(path)
     if (!yaml) continue
-    const flat = parseSection(yaml, 'deepseek')
-    const provider = (flat.provider || 'deepseek').trim() || 'deepseek'
-    const nested = parseByProvider(yaml, 'deepseek', provider)
-    const key = flat.api_key || nested.api_key || ''
+    const key = deepseekKeyIn(yaml)
     if (key) return key
   }
   return ''
+}
+
+export type ProviderKeyMasks = {
+  deepseek: string
+  zhipu: string
+  cursor: string
+}
+
+/** 只返回遮罩。调用方拿不到系统配置里的原文。 */
+export function readProviderKeyMasks(
+  readFile: (path: string) => string | null = readYaml,
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): ProviderKeyMasks {
+  const out: ProviderKeyMasks = { deepseek: '', zhipu: '', cursor: '' }
+  for (const path of deepseekConfigCandidates(env, home)) {
+    const yaml = readFile(path)
+    if (!yaml) continue
+    if (!out.deepseek) out.deepseek = maskApiKey(deepseekKeyIn(yaml))
+    if (!out.zhipu) out.zhipu = maskApiKey(sectionField(yaml, 'vision', 'api_key'))
+    if (!out.cursor) out.cursor = maskApiKey(sectionField(yaml, 'code_dev', 'cursor_api_key'))
+    if (out.deepseek && out.zhipu && out.cursor) break
+  }
+  return out
 }
 
 function readYaml(path: string): string | null {

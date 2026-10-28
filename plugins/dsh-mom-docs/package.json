@@ -1,9 +1,9 @@
 {
   "name": "@zhongruan/dsh-mom-docs",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "本地资料库：把对话中的文档保存到工作区 MOM/当天日期/文件",
   "dshMarket": {
-    "zh": "本地资料库：把对话文档保存到工作区 MOM，并在侧栏按工作目录查看",
+    "zh": "本地资料库：把对话文档保存到工作区 MOM，侧栏列出所有保存过的工作区",
     "en": "Local library: save chat documents under workspace MOM and browse them by workspace"
   },
   "type": "module",
