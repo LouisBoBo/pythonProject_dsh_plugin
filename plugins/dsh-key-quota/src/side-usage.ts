@@ -9,6 +9,11 @@ export function sideUsagePath(home = homedir()): string {
   return join(home, '.dsh', 'key-quota', 'side-usage.jsonl')
 }
 
+/** 插件自己的用户用量台账。每次 LLM 调用都记当前登录人，用量与账号一一对应，不依赖引擎 user_id。 */
+export function userUsagePath(home = homedir()): string {
+  return join(home, '.dsh', 'key-quota', 'user-usage.jsonl')
+}
+
 const WEB_SEARCH_TOOL = 'web_search_20250305'
 
 let readUserId = (): string => ''
@@ -81,6 +86,12 @@ export function appendSideLine(line: string, home = homedir()): void {
   appendFileSync(path, line.endsWith('\n') ? line : `${line}\n`, { encoding: 'utf8', mode: 0o600 })
 }
 
+export function appendUserLine(line: string, home = homedir()): void {
+  const path = userUsagePath(home)
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  appendFileSync(path, line.endsWith('\n') ? line : `${line}\n`, { encoding: 'utf8', mode: 0o600 })
+}
+
 /**
  * 标题生成走 llm/stream，purpose 为 session-title。
  * 流上的 usage 块原样转给调用方，供应商数字另记一行。没有 usage 不记。
@@ -115,6 +126,41 @@ export async function* recordTitleUsage(
         }))
       } catch {
         // 记账失败不打断标题生成
+      }
+    }
+  }
+}
+
+/**
+ * 所有 LLM 调用都走这里：流上的 usage 块原样转给调用方，
+ * 同时把用量连带当前登录人写进用户台账。用量与账号一一对应，不依赖引擎 user_id。
+ */
+export async function* recordUserUsage(
+  options: unknown,
+  source: AsyncIterable<unknown>,
+  write: (line: string) => void = (line) => appendUserLine(line),
+): AsyncGenerator<unknown> {
+  const meta = classifyCall(options)
+  let usage: TokenBreakdown | null = null
+  try {
+    for await (const chunk of source) {
+      const parsed = pickUsage(chunk)
+      if (parsed) usage = parsed
+      yield chunk
+    }
+  } finally {
+    if (usage && usage.total > 0) {
+      try {
+        write(sideEventLine({
+          provider: meta.provider,
+          model: meta.model,
+          usage,
+          task: meta.source === 'dsh_title' ? '会话标题' : meta.source,
+          lane: meta.source,
+          sessionId: meta.sessionId,
+        }))
+      } catch {
+        // 记账失败不打断对话
       }
     }
   }
@@ -199,7 +245,7 @@ export function usageFromAnthropic(usage: unknown): TokenBreakdown | null {
  */
 export function installWebSearchUsageCapture(
   target: FetchBox = globalThis as FetchBox,
-  write: (line: string) => void = (line) => appendSideLine(line),
+  write: (line: string) => void = (line) => { appendSideLine(line); appendUserLine(line) },
 ): void {
   if (target.__kqWebSearchFetch) return
   const original = target.fetch

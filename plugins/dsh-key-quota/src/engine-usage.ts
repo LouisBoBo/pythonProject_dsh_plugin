@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
-import { sideUsagePath } from './side-usage.js'
+import { sideUsagePath, userUsagePath } from './side-usage.js'
 import { peopleUsage, summarizeUsage, type PersonRow, type UsageDetailRow, type UsageEvent, type UsageSummary } from './stats.js'
 
 type UserRow = { id: string, username: string, displayName: string, role: string }
@@ -20,8 +20,10 @@ function roots(env: NodeJS.ProcessEnv, home: string): string[] {
   }
   const appData = (env.APPDATA || '').trim()
   const dsh = (env.DSH_HOME || '').trim() || join(home, '.dsh')
-  if (appData) {
-    const desktop = join(appData, 'zr-workbuddy-desktop')
+  const desktops: string[] = []
+  if (appData) desktops.push(join(appData, 'zr-workbuddy-desktop'))
+  desktops.push(join(home, 'Library', 'Application Support', 'zr-workbuddy-desktop'))
+  for (const desktop of desktops) {
     push(join(desktop, 'persist', 'engine-data'))
     push(join(desktop, 'runtime-app', 'apps', 'zr-workbuddy', 'engine', 'data'))
     push(join(desktop, 'dsh-home', 'link', 'DSH-ZR-WorkBuddy', 'apps', 'zr-workbuddy', 'engine', 'data'))
@@ -197,13 +199,39 @@ function pickDesktopLogin(
   return null
 }
 
-/** 登录和账本经常不在同一份副本里。引擎会话过期时，认桌面侧栏仍有效的登录。 */
+/** 登录和账本经常不在同一份副本里。桌面侧栏的登录是当前登录人的权威来源，
+ *  引擎 active.json 只是兜底。 */
 function pickAuth(
   env: NodeJS.ProcessEnv,
   home: string,
   read: (path: string) => string | null,
   now = Date.now(),
 ): { users: UserRow[], active: EngineBundle['active'] } {
+  // 先从引擎拿用户列表（id、role 映射）
+  const usersPath = newestFile(env, home, 'users.json')
+  const users = usersPath ? parseUsers(read(usersPath) || '') : []
+
+  // 桌面侧栏登录是权威来源
+  const login = pickDesktopLogin(env, home, read, now)
+  if (login) {
+    const matched = users.find((user) => user.username === login.username)
+    const listed = users.length ? users : [{
+      id: login.username,
+      username: login.username,
+      displayName: login.displayName,
+      role: login.role,
+    }]
+    return {
+      users: listed,
+      active: {
+        id: matched?.id || login.username,
+        role: matched?.role || login.role,
+        displayName: matched?.displayName || login.displayName || login.username,
+      },
+    }
+  }
+
+  // 兜底：引擎 active.json
   let bestPath = ''
   let bestMtime = -1
   let best: ReturnType<typeof parseActive> = null
@@ -219,30 +247,13 @@ function pickAuth(
     best = parsed
   }
   if (bestPath && best) {
+    const authUsers = parseUsers(read(join(bestPath, '..', 'users.json')) || '')
     return {
-      users: parseUsers(read(join(bestPath, '..', 'users.json')) || ''),
+      users: authUsers.length ? authUsers : users,
       active: { id: best.id, role: best.role, displayName: best.displayName },
     }
   }
-  const usersPath = newestFile(env, home, 'users.json')
-  const users = usersPath ? parseUsers(read(usersPath) || '') : []
-  const login = pickDesktopLogin(env, home, read, now)
-  if (!login) return { users, active: null }
-  const matched = users.find((user) => user.username === login.username)
-  const listed = users.length ? users : [{
-    id: login.username,
-    username: login.username,
-    displayName: login.displayName,
-    role: login.role,
-  }]
-  return {
-    users: listed,
-    active: {
-      id: matched?.id || login.username,
-      role: matched?.role || login.role,
-      displayName: matched?.displayName || login.displayName || login.username,
-    },
-  }
+  return { users, active: null }
 }
 
 export type PlatformViewer = { id: string, displayName: string, role: 'admin' | 'user' }
@@ -292,10 +303,12 @@ export function loadEngineBundle(
   }
   const events = best ? parseEvents(read(best) || '') : []
   const auth = pickAuth(env, home, read)
-  const withMeter = mergeMeter(events, auth.active?.id || '', env, home, read)
+  const withMeter = mergeMeter(events, env, home, read)
   const ledgerTs = events.reduce((max, evt) => evt.ts > max ? evt.ts : max, '')
+  const withSessions = mergeSessions(withMeter, env, home, ledgerTs, auth.users)
+  const withUser = mergeUserUsage(withSessions, home, read)
   return {
-    events: mergeSessions(withMeter, auth.active?.id || '', env, home, ledgerTs),
+    events: applyLedgerIdentity(withUser, home, read),
     users: auth.users,
     active: auth.active,
   }
@@ -328,16 +341,29 @@ function eventFingerprint(evt: UsageEvent): string {
   return `${evt.ts.slice(0, 19)}|${evt.provider || ''}|${evt.model}|${evt.total}|${evt.prompt}|${evt.completion}`
 }
 
-/** 引擎尚未收进 usage 账本的 meter 行，加上标题生成和网页搜索的供应商用量。归当前登录人。 */
+/** 从已有事件里建 sessionId → userId 映射，供补充事件继承用户身份。 */
+function sessionUserMap(events: UsageEvent[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const evt of events) {
+    const sid = (evt.sessionId || '').replace(/^session-/, '')
+    if (sid && evt.userId && !map.has(sid)) {
+      map.set(sid, evt.userId)
+    }
+  }
+  return map
+}
+
+/** 引擎尚未收进 usage 账本的 meter 行，加上标题生成和网页搜索的供应商用量。
+ *  用户身份优先用行内 user_id，其次按 sessionId 从引擎已有事件继承，都没有就留空。 */
 function mergeMeter(
   events: UsageEvent[],
-  activeId: string,
   env: NodeJS.ProcessEnv,
   home: string,
   read: (path: string) => string | null,
 ): UsageEvent[] {
   const known = new Set(events.map((evt) => evt.jobId).filter(Boolean))
   const seen = new Set(events.map(eventFingerprint))
+  const sessionUser = sessionUserMap(events)
   const extra: UsageEvent[] = []
   const take = (row: UsageEvent, dedupeFingerprint: boolean) => {
     if (!row.jobId || known.has(row.jobId)) return
@@ -345,7 +371,7 @@ function mergeMeter(
     if (dedupeFingerprint && seen.has(fp)) return
     known.add(row.jobId)
     seen.add(fp)
-    extra.push({ ...row, userId: row.userId || activeId })
+    extra.push({ ...row, userId: row.userId || sessionUser.get(row.sessionId || '') || '' })
   }
   for (const path of meterFiles(env, home)) {
     if (!realFile(path)) continue
@@ -406,21 +432,120 @@ function parseMeter(text: string): UsageEvent[] {
   return rows.filter((row) => row.ts)
 }
 
-function sessionRoot(env: NodeJS.ProcessEnv, home: string): string {
-  const candidates: string[] = []
-  const local = (env.LOCALAPPDATA || '').trim()
-  if (local) candidates.push(join(local, 'ZR_DSH', 'dsh-home', 'sessions'))
-  candidates.push(join(home, 'AppData', 'Local', 'ZR_DSH', 'dsh-home', 'sessions'))
-  for (const path of candidates) {
-    if (existsSync(path)) return path
+function sessionRoots(env: NodeJS.ProcessEnv, home: string): string[] {
+  const out: string[] = []
+  const push = (path: string) => {
+    if (path && existsSync(path) && !out.includes(path)) out.push(path)
   }
-  return ''
+  const local = (env.LOCALAPPDATA || '').trim()
+  if (local) push(join(local, 'ZR_DSH', 'dsh-home', 'sessions'))
+  push(join(home, 'AppData', 'Local', 'ZR_DSH', 'dsh-home', 'sessions'))
+  push(join(home, 'Library', 'Application Support', 'zr-workbuddy-desktop', 'dsh-home', 'sessions'))
+  push(join(home, '.dsh', 'sessions'))
+  const dsh = (env.DSH_HOME || '').trim() || join(home, '.dsh')
+  push(join(dsh, 'sessions'))
+  return out
 }
 
 function shanghaiIso(ms: number): string {
   const sh = new Date(ms + 8 * 60 * 60 * 1000)
   const p = (n: number) => String(n).padStart(2, '0')
   return `${sh.getUTCFullYear()}-${p(sh.getUTCMonth() + 1)}-${p(sh.getUTCDate())}T${p(sh.getUTCHours())}:${p(sh.getUTCMinutes())}:${p(sh.getUTCSeconds())}+08:00`
+}
+
+/** 一次遍历同时提取 title、cwd username、usage rows。避免 3 次 split + 3 次遍历。 */
+function parseSessionFile(
+  text: string,
+  sessionId: string,
+  afterTs: string,
+): { taskName: string, cwdUser: string, rows: UsageEvent[] } {
+  const lines = text.split('\n')
+  let taskName = ''
+  let cwdUser = ''
+  const rows: UsageEvent[] = []
+  // 文件只有 1 行（元信息）直接跳过 usage 解析
+  if (lines.length <= 1) {
+    const first = lines.find((l) => l.trim()) || ''
+    try {
+      const ev = JSON.parse(first) as Record<string, unknown>
+      if (ev.type === 'session' && typeof ev.cwd === 'string') {
+        const m = ev.cwd.match(/\/Users\/([^\/]+)/i) || ev.cwd.match(/\/home\/([^\/]+)/i) || ev.cwd.match(/[A-Z]:\\Users\\([^\\]+)/i)
+        if (m) cwdUser = m[1].toLowerCase()
+      }
+    } catch { /* ignore */ }
+    return { taskName, cwdUser, rows }
+  }
+  for (const line of lines) {
+    if (!line.trim()) continue
+    // 快速预判：先看行里有没有需要的关键字，避免每个都 JSON.parse
+    const has = line.includes('"type"')
+    if (!has) continue
+    let ev: Record<string, unknown>
+    try { ev = JSON.parse(line) as Record<string, unknown> } catch { continue }
+    const t = ev.type
+    // session/title → 任务名（最后一条覆盖前面的）
+    if (t === 'session/title') {
+      const data = ev.data && typeof ev.data === 'object' ? ev.data as Record<string, unknown> : {}
+      const name = String(data.title || '').trim()
+      if (name) taskName = name
+      continue
+    }
+    // session 元信息 → 提取 cwd 用户名
+    if (t === 'session' && typeof ev.cwd === 'string') {
+      if (!cwdUser) {
+        const m = ev.cwd.match(/\/Users\/([^\/]+)/i) || ev.cwd.match(/\/home\/([^\/]+)/i) || ev.cwd.match(/[A-Z]:\\Users\\([^\\]+)/i)
+        if (m) cwdUser = m[1].toLowerCase()
+      }
+      continue
+    }
+    // assistant/message → usage 行
+    if (t === 'assistant/message') {
+      const seq = Number(ev.seq)
+      const time = Number(ev.time)
+      if (!Number.isInteger(seq) || seq < 0 || !Number.isFinite(time)) continue
+      const ms = time < 1e12 ? time * 1000 : time
+      const data = ev.data && typeof ev.data === 'object' ? ev.data as Record<string, unknown> : {}
+      const usage = data.usage && typeof data.usage === 'object' ? data.usage as Record<string, unknown> : null
+      if (!usage) continue
+      const prompt = num(usage.inputTokens)
+      const completion = num(usage.outputTokens)
+      const cacheRead = num(usage.cacheReadTokens)
+      const cacheWrite = num(usage.cacheWriteTokens)
+      const reasoning = num(usage.reasoningTokens)
+      const base = prompt + completion + cacheRead + cacheWrite
+      let total = num(usage.totalTokens)
+      if (total <= 0) total = base
+      else if (reasoning > 0 && total === base + reasoning) total = base
+      if (base <= 0 && total <= 0) continue
+      const ts = shanghaiIso(ms)
+      if (afterTs && ts <= afterTs) continue
+      const turn = Number(data.turn)
+      const step = Number(data.step)
+      const message = data.message && typeof data.message === 'object' ? data.message as Record<string, unknown> : {}
+      const source = message.source && typeof message.source === 'object' ? message.source as Record<string, unknown> : {}
+      const provider = String(source.provider || '')
+      const cursor = /cursor/i.test(provider) && !/deepseek/i.test(provider)
+      rows.push({
+        ts,
+        source: cursor ? 'cursor' : 'llm',
+        provider,
+        model: String(source.model || ''),
+        userId: '',
+        prompt,
+        completion,
+        cacheRead,
+        total: total > 0 ? total : base,
+        jobId: `sess_${sessionId}_${seq}`.slice(0, 80),
+        lane: cursor ? 'cursor_code' : 'dsh_chat',
+        task: taskName,
+        ...(sessionId.trim() ? { sessionId: sessionId.trim().slice(0, 80) } : {}),
+        messageId: String(seq),
+        ...(Number.isInteger(turn) && turn > 0 ? { turn } : {}),
+        ...(Number.isInteger(step) && step > 0 ? { step } : {}),
+      })
+    }
+  }
+  return { taskName, cwdUser, rows }
 }
 
 /** 侧栏上的会话标题。文件按追加写入，最后一条 session/title 是当前任务名。 */
@@ -440,6 +565,16 @@ function sessionTaskName(text: string): string {
     if (name) title = name
   }
   return title
+}
+
+/** 从 session.jsonl.zstd 第一行（session 元信息）的 cwd 里提取操作系统用户名（/Users/XXX）。 */
+function sessionCwdUsername(text: string): string {
+  const first = text.split('\n').find((l) => l.includes('"type"') && l.includes('"session"') && !l.includes('session/title')) || ''
+  let ev: Record<string, unknown>
+  try { ev = JSON.parse(first) as Record<string, unknown> } catch { return '' }
+  const cwd = String(ev.cwd || '').trim()
+  const m = cwd.match(/\/Users\/([^\/]+)/i) || cwd.match(/\/home\/([^\/]+)/i) || cwd.match(/[A-Z]:\\Users\\([^\\]+)/i)
+  return m ? m[1].toLowerCase() : ''
 }
 
 /** 会话里的供应商 usage。引擎账本停更之后的才补，避免和已入库的流水叠记。 */
@@ -582,47 +717,180 @@ function sessionText(buf: Buffer): string {
   return parts.join('\n')
 }
 
-function mergeSessions(events: UsageEvent[], activeId: string, env: NodeJS.ProcessEnv, home: string, afterTs: string): UsageEvent[] {
-  const root = sessionRoot(env, home)
-  if (!root || !existsSync(root)) return events
+function mergeSessions(events: UsageEvent[], env: NodeJS.ProcessEnv, home: string, afterTs: string, users: Array<{ id: string, username?: string, displayName?: string }> = []): UsageEvent[] {
+  const roots = sessionRoots(env, home)
+  if (!roots.length) return events
   const known = new Set(events.map((evt) => evt.jobId).filter(Boolean))
   const fingerprints = new Set(events
     .filter((evt) => evt.lane !== 'dsh_title' && evt.lane !== 'dsh_search')
     .map((evt) => `${evt.ts.slice(0, 19)}|${evt.model}|${evt.total}|${evt.prompt}|${evt.completion}`))
-  const extra: UsageEvent[] = []
-  let workspaces: string[] = []
-  try {
-    workspaces = readdirSync(root, { withFileTypes: true }).filter((ent) => ent.isDirectory()).map((ent) => ent.name)
-  } catch {
-    return events
+  const sessionUser = sessionUserMap(events)
+  // 从已有事件里提取出现过的 sessionId，只处理这些 session（避免全量解压所有历史 session）
+  const activeSessionIds = new Set<string>()
+  for (const evt of events) {
+    const sid = (evt.sessionId || '').replace(/^session-/, '')
+    if (sid) activeSessionIds.add(sid)
   }
-  for (const workspace of workspaces) {
-    let sessions: string[] = []
+  // username (lower) → userId，用于从 session cwd 提取用户名后找 userId
+  const usernameToId = new Map<string, string>()
+  for (const u of users) {
+    if (u.username) usernameToId.set(u.username.toLowerCase(), u.id)
+    if (u.displayName) usernameToId.set(u.displayName.toLowerCase(), u.id)
+  }
+  const extra: UsageEvent[] = []
+  const sessionTaskMap = new Map<string, string>()
+  for (const root of roots) {
+    let workspaces: string[] = []
     try {
-      sessions = readdirSync(join(root, workspace), { withFileTypes: true }).filter((ent) => ent.isDirectory()).map((ent) => ent.name)
+      workspaces = readdirSync(root, { withFileTypes: true }).filter((ent) => ent.isDirectory()).map((ent) => ent.name)
     } catch {
       continue
     }
-    for (const name of sessions) {
-      if (!name.startsWith('session-')) continue
-      const file = join(root, workspace, name, 'session.v4.jsonl.zstd')
-      if (!existsSync(file)) continue
-      let text = ''
+    for (const workspace of workspaces) {
+      let sessions: string[] = []
       try {
-        text = sessionText(readFileSync(file))
+        sessions = readdirSync(join(root, workspace), { withFileTypes: true }).filter((ent) => ent.isDirectory()).map((ent) => ent.name)
       } catch {
         continue
       }
-      for (const row of usageFromSession(text, name.slice('session-'.length), afterTs)) {
-        const fingerprint = `${row.ts.slice(0, 19)}|${row.model}|${row.total}|${row.prompt}|${row.completion}`
-        if (!row.jobId || known.has(row.jobId) || fingerprints.has(fingerprint)) continue
-        known.add(row.jobId)
-        fingerprints.add(fingerprint)
-        extra.push({ ...row, userId: activeId })
+      for (const name of sessions) {
+        if (!name.startsWith('session-')) continue
+        const sessionId = name.slice('session-'.length)
+        // 生产环境 events.jsonl 有 sessionId → 只处理出现过的；测试/空数据 → 全量处理
+        const filterSessions = activeSessionIds.size > 0
+        if (filterSessions && !activeSessionIds.has(sessionId)) continue
+        let file = join(root, workspace, name, 'session.v4.jsonl.zstd')
+        if (!existsSync(file)) file = join(root, workspace, name, 'session.jsonl.zstd')
+        if (!existsSync(file)) continue
+        let text = ''
+        try {
+          text = sessionText(readFileSync(file))
+        } catch {
+          continue
+        }
+        const parsed = parseSessionFile(text, sessionId, afterTs)
+        if (parsed.taskName && !sessionTaskMap.has(sessionId)) sessionTaskMap.set(sessionId, parsed.taskName)
+        // 最后一条 session/title 是最终任务名，用它覆盖 rows 里中间态的 taskName
+        const finalTask = sessionTaskMap.get(sessionId) || parsed.taskName
+        if (!sessionUser.has(sessionId) && parsed.cwdUser) {
+          const uid = usernameToId.get(parsed.cwdUser) || ''
+          if (uid) sessionUser.set(sessionId, uid)
+        }
+        for (const row of parsed.rows) {
+          const fingerprint = `${row.ts.slice(0, 19)}|${row.model}|${row.total}|${row.prompt}|${row.completion}`
+          if (!row.jobId || known.has(row.jobId) || fingerprints.has(fingerprint)) continue
+          known.add(row.jobId)
+          fingerprints.add(fingerprint)
+          extra.push({ ...row, task: finalTask || row.task, userId: sessionUser.get(sessionId) || row.userId || '' })
+        }
+      }
+      // `.dsh/sessions` 部分目录不带 "session-" 前缀，兜底遍历
+      for (const name of sessions) {
+        if (name.startsWith('session-')) continue
+        if (!/^[0-9a-f]{8}-/i.test(name)) continue
+        const filterSessions = activeSessionIds.size > 0
+        if (filterSessions && !activeSessionIds.has(name)) continue
+        let file = join(root, workspace, name, 'session.jsonl.zstd')
+        if (!existsSync(file)) file = join(root, workspace, name, 'session.v4.jsonl.zstd')
+        if (!existsSync(file)) continue
+        let text = ''
+        try {
+          text = sessionText(readFileSync(file))
+        } catch {
+          continue
+        }
+        const sessionId = name
+        const parsed = parseSessionFile(text, sessionId, afterTs)
+        if (parsed.taskName && !sessionTaskMap.has(sessionId)) sessionTaskMap.set(sessionId, parsed.taskName)
+        const finalTask = sessionTaskMap.get(sessionId) || parsed.taskName
+        if (!sessionUser.has(sessionId) && parsed.cwdUser) {
+          const uid = usernameToId.get(parsed.cwdUser) || ''
+          if (uid) sessionUser.set(sessionId, uid)
+        }
+        for (const row of parsed.rows) {
+          const fingerprint = `${row.ts.slice(0, 19)}|${row.model}|${row.total}|${row.prompt}|${row.completion}`
+          if (!row.jobId || known.has(row.jobId) || fingerprints.has(fingerprint)) continue
+          known.add(row.jobId)
+          fingerprints.add(fingerprint)
+          extra.push({ ...row, task: finalTask || row.task, userId: sessionUser.get(sessionId) || row.userId || '' })
+        }
       }
     }
   }
-  return extra.length ? events.concat(extra) : events
+  // 回填已有事件的 task 和 userId
+  const merged = extra.length ? events.concat(extra) : events
+  for (const evt of merged) {
+    const sid = (evt.sessionId || '').replace(/^session-/, '')
+    if (!evt.task && sid && sessionTaskMap.has(sid)) {
+      evt.task = sessionTaskMap.get(sid) || ''
+    }
+    if (!evt.userId && sid && sessionUser.has(sid)) {
+      evt.userId = sessionUser.get(sid) || ''
+    }
+  }
+  return merged
+}
+
+/** 插件自己的用户用量台账是用户身份的权威来源。
+ *  按指纹匹配已有事件，用台账里的 user_id 覆盖（修正引擎可能写错/漏写的身份）；
+ *  匹配不上的台账行直接追加。 */
+function mergeUserUsage(events: UsageEvent[], home: string, read: (path: string) => string | null): UsageEvent[] {
+  const path = userUsagePath(home)
+  if (!realFile(path)) return events
+  const byFp = new Map<string, UsageEvent>()
+  for (const evt of events) {
+    const fp = eventFingerprint(evt)
+    if (!byFp.has(fp)) byFp.set(fp, evt)
+  }
+  let changed = false
+  const extra: UsageEvent[] = []
+  for (const row of parseMeter(read(path) || '')) {
+    if (row.total <= 0) continue
+    const fp = eventFingerprint(row)
+    const existing = byFp.get(fp)
+    if (existing) {
+      if (row.userId && existing.userId !== row.userId) {
+        existing.userId = row.userId
+        changed = true
+      }
+      if (row.sessionId && !existing.sessionId) {
+        existing.sessionId = row.sessionId
+        changed = true
+      }
+    } else {
+      extra.push(row)
+    }
+  }
+  if (!changed && extra.length === 0) return events
+  return events.concat(extra)
+}
+
+/** 用户台账（user-usage.jsonl + side-usage.jsonl）是身份的权威来源。
+ *  mergeUserUsage 只修正了指纹匹配的事件，这里把同一 session 下其余事件的身份也统一成台账里的 user_id。
+ *  没有台账记录的事件保留引擎身份（非空则信任，空则不归任何人）。 */
+function applyLedgerIdentity(events: UsageEvent[], home: string, read: (path: string) => string | null): UsageEvent[] {
+  const ledgerRows: UsageEvent[] = []
+  for (const p of [userUsagePath(home), sideUsagePath(home)]) {
+    if (!realFile(p)) continue
+    for (const row of parseMeter(read(p) || '')) {
+      if (row.total > 0) ledgerRows.push(row)
+    }
+  }
+  if (ledgerRows.length === 0) return events
+  const ledgerFps = new Set(ledgerRows.map(eventFingerprint))
+  const sessionUser = new Map<string, string>()
+  for (const row of ledgerRows) {
+    if (!row.sessionId || !row.userId) continue
+    const key = row.sessionId.replace(/^session-/, '')
+    if (!sessionUser.has(key)) sessionUser.set(key, row.userId)
+  }
+  for (const evt of events) {
+    if (ledgerFps.has(eventFingerprint(evt))) continue
+    if (evt.sessionId && sessionUser.has(evt.sessionId)) {
+      evt.userId = sessionUser.get(evt.sessionId)!
+    }
+  }
+  return events
 }
 
 function namesOf(bundle: EngineBundle): Map<string, string> {
@@ -665,6 +933,37 @@ export function tailsByUser(assigned: Array<{ assigneeUserId?: string, tail?: st
     if (tails.length === 1) out.set(id, tails[0])
   }
   return out
+}
+
+/** 任务名：没有就用 lane 中文映射 + sessionId 缩写。 */
+const LANE_NAMES: Record<string, string> = {
+  dsh_chat: '对话',
+  dsh_title: '标题生成',
+  dsh_memory: '记忆写入',
+  dsh_search: '网页搜索',
+  dsh_cursor: '写码',
+  dev_pipeline_prd: '开发流水线',
+  dev_pipeline_prg: '开发流水线',
+  dev_pipeline_review: '开发流水线',
+  dev_pipeline_merge: '开发流水线',
+  dev_pipeline_commit: '开发流水线',
+  code_review: '代码审查',
+  code_commit: '代码提交',
+  code_refactor: '代码重构',
+  code_test: '代码测试',
+}
+function readableTask(row: { task?: string, lane?: string, sessionId?: string, source?: string }): string {
+  const t = (row.task || '').trim()
+  if (t) return t
+  const sid = (row.sessionId || '').replace(/^session-/, '')
+  const shortSid = sid ? sid.slice(0, 8) : ''
+  // 有 sessionId 但没标题 → 统一用 "会话（sid前8位）"
+  if (shortSid) return `会话 ${shortSid}`
+  // 没 sessionId 时用 lane 可读映射
+  const lane = (row.lane || '').trim()
+  const sname = LANE_NAMES[lane] || (lane ? lane.replace(/^dsh_/, '').replace(/_/g, ' ') : '')
+  if (sname) return sname
+  return row.source === 'cursor' ? '写码' : '对话'
 }
 
 export function keyTailForCall(provider: string, userId: string, tails: ReadonlyMap<string, string>): string {
@@ -712,8 +1011,12 @@ export function panelUsage(url: string, bundle = loadEngineBundle()): {
       ...row,
       userId: row.userId || '',
       userName: names.get(row.userId || '') || '',
+      task: readableTask(row),
     }))
-    : usage.detail.map(memberDetail)
+    : usage.detail.map((row) => ({
+      ...memberDetail(row),
+      task: readableTask(row),
+    }))
   const from = query.grain === 'month' ? usage.month_from : usage.on
   const to = query.grain === 'month' ? usage.month_to : usage.on
   const people = scope === 'enterprise' ? peopleUsage(bundle.events, bundle.users, from, to) : null

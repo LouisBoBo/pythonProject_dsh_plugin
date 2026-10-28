@@ -12,7 +12,7 @@ import { advertiseUrls, loadClientPanel, loadReportToken, registerQuotaWeb, star
 import { installAssignedKeyTransport, pullWithAssignedKey } from './transport.js'
 import { KeyVault } from './vault.js'
 import { readDeepseekApiKey } from './workbuddy-key.js'
-import { installWebSearchUsageCapture, recordTitleUsage, setSideUsageUser } from './side-usage.js'
+import { installWebSearchUsageCapture, recordTitleUsage, recordUserUsage, setSideUsageUser } from './side-usage.js'
 import { gateStream, quotaFinishChunk, type GateArgs } from './wrap.js'
 
 export { Config } from './config.js'
@@ -160,10 +160,8 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
       const title = classifyCall(options).source === 'dsh_title'
       // 还没有任何分配时不换 Key、不拒绝。有分配之后，未分到的账号才走 key_unassigned。
       if (!usesDeepseekApiKey(options) || !hasAssignee(ledger.entries())) {
-        if (title) {
-          try { sideUserId = platformSession().viewer?.id || '' } catch { sideUserId = '' }
-        }
-        return title ? recordTitleUsage(options, next()) : next()
+        try { sideUserId = platformSession().viewer?.id || '' } catch { sideUserId = '' }
+        return recordUserUsage(options, title ? recordTitleUsage(options, next()) : next())
       }
       return (async function* () {
         const viewerId = platformSession().viewer?.id || ''
@@ -196,7 +194,7 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
         }
         installAssignedKeyTransport(resolveCredentialsService(ctx))
         const stream = pullWithAssignedKey(bound.apiKey, gateStream(options, next, prepared))
-        yield* title ? recordTitleUsage(options, stream) : stream
+        yield* recordUserUsage(options, title ? recordTitleUsage(options, stream) : stream)
       })()
     }, { global: true })
   } catch (err) {

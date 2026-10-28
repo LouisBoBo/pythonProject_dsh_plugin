@@ -89,6 +89,7 @@ describe('engine usage files', () => {
       source: 'llm',
       model: 'deepseek-chat',
       user_id: 'u_admin',
+      session_id: 's1',
       prompt_tokens: 10,
       completion_tokens: 5,
       total_tokens: 15,
@@ -112,6 +113,7 @@ describe('engine usage files', () => {
         ts: '2026-10-23T09:00:10+08:00',
         source: 'dsh_other',
         model: 'deepseek-chat',
+        session_id: 's1',
         prompt_tokens: 447,
         completion_tokens: 250,
         cache_read_tokens: 128,
@@ -139,7 +141,7 @@ describe('engine usage files', () => {
     await mkdir(join(root, 'auth'), { recursive: true })
     await mkdir(sessionDir, { recursive: true })
     await writeFile(join(root, 'usage', 'events.jsonl'), JSON.stringify({
-      ts: '2026-10-22T09:00:12+08:00', source: 'llm', model: 'deepseek-chat', user_id: 'u_admin', total_tokens: 10,
+      ts: '2026-10-22T09:00:12+08:00', source: 'llm', model: 'deepseek-chat', user_id: 'u_admin', session_id: 'abc', total_tokens: 10,
     }) + '\n')
     await writeFile(join(root, 'auth', 'active.json'), JSON.stringify({
       id: 'u_admin', role: 'admin', display_name: '管理员',
@@ -306,6 +308,54 @@ describe('engine usage files', () => {
     }
   })
 
+  it('lets the user-usage ledger override a wrong user_id on an engine event', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kq-user-override-'))
+    const root = join(dir, 'zr-workbuddy-desktop', 'persist', 'engine-data')
+    await mkdir(join(root, 'usage'), { recursive: true })
+    await mkdir(join(root, 'auth'), { recursive: true })
+    await mkdir(join(dir, '.dsh', 'key-quota'), { recursive: true })
+    // 引擎账本把这次调用错记给了 admin
+    await writeFile(join(root, 'usage', 'events.jsonl'), JSON.stringify({
+      ts: '2026-10-27T10:00:00+08:00',
+      source: 'llm',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      user_id: 'u_admin',
+      prompt_tokens: 100,
+      completion_tokens: 50,
+      total_tokens: 150,
+      job_id: 'job_1',
+    }) + '\n')
+    await writeFile(join(root, 'auth', 'active.json'), JSON.stringify({
+      id: 'u_hebo', role: 'member', display_name: 'hebo',
+    }))
+    // 插件台账记录了真实身份：hebo
+    await writeFile(join(dir, '.dsh', 'key-quota', 'user-usage.jsonl'), JSON.stringify({
+      id: 'kqside_20261027100000_abc',
+      ts: '2026-10-27T10:00:00+08:00',
+      source: 'dsh_chat',
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      user_id: 'u_hebo',
+      prompt_tokens: 100,
+      completion_tokens: 50,
+      total_tokens: 150,
+    }) + '\n')
+    try {
+      const bundle = loadEngineBundle({
+        APPDATA: dir,
+        DSH_HOME: join(dir, 'empty-home'),
+        LOCALAPPDATA: join(dir, 'no-local'),
+      }, dir)
+      const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-27&grain=day&scope=personal', bundle)
+      // hebo 应该看到自己的用量（台账覆盖了引擎的错误身份）
+      assert.equal(view.usage.today.llm.calls, 1)
+      assert.equal(view.usage.today.llm.tokens, 150)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('shows call identity to an admin and leaves a member on the old detail', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kq-admin-detail-'))
     const root = join(dir, 'zr-workbuddy-desktop', 'persist', 'engine-data')
@@ -320,6 +370,7 @@ describe('engine usage files', () => {
       provider: 'deepseek-official',
       model: 'deepseek-flash',
       user_id: 'u_admin',
+      session_id: 'abc',
       prompt_tokens: 3,
       completion_tokens: 1,
       total_tokens: 4,
@@ -362,8 +413,11 @@ describe('engine usage files', () => {
       assert.equal(admin.viewerAdmin, true)
       assert.equal(admin.usage.today.llm.tokens, 120 + 48 + 4 + 12)
       const chat = admin.usage.detail.filter((row) => row.task === '项目功能介绍')
-      assert.equal(chat.length, 2)
-      assert.deepEqual(chat.map((row) => row.messageId).sort(), ['2', '8'])
+      // session 文件事件 2 行 + 引擎事件 1 行（回填了 task）= 3 行
+      assert.equal(chat.length, 3)
+      const sessionEvents = chat.filter((row) => row.messageId !== '')
+      assert.equal(sessionEvents.length, 2)
+      assert.deepEqual(sessionEvents.map((row) => row.messageId).sort(), ['2', '8'])
       for (const row of chat) {
         assert.equal(row.sessionId, 'abc')
         assert.equal(row.userName, '管理员')
@@ -384,7 +438,7 @@ describe('engine usage files', () => {
       assert.equal(titled.sessionId, 'title-session')
       assert.equal(titled.messageId, '')
       const fromJob = admin.usage.detail.find((row) => row.tokens === 4)
-      assert.equal(fromJob.sessionId, '')
+      assert.equal(fromJob.sessionId, 'abc')
       assert.equal(fromJob.messageId, '')
       const stamped = stampKeyTails(admin.usage.detail, [
         { assigneeUserId: 'u_admin', tail: 'ab12', sealed: 'sk-secret-value', keyId: 'a'.repeat(64) },

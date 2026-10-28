@@ -38,7 +38,8 @@ window.__ModuleLoader__.load({
         '.kq-root .wb-usage-view-body{padding:0 20px 28px}',
         '.kq-root .wb-usage-page{padding-top:0;font:13px/1.5 -apple-system,PingFang SC,Microsoft YaHei,sans-serif}',
         '.kq-root .kq-sticky{position:sticky;top:0;z-index:8;background:#fff;margin:0 -20px 12px;padding:12px 20px 10px;border-bottom:1px solid #e8edf2}',
-        '.kq-root .kq-sticky .kq-page-title{margin:0 0 12px}',
+        '.kq-root .kq-title-row{display:flex;align-items:center;gap:16px;margin-bottom:12px}',
+        '.kq-root .kq-title-row .kq-page-title{margin:0}',
         '.kq-root .kq-sticky .wb-usage-filter{margin:0}',
         '.kq-root .kq-keyline{margin:0 0 10px;color:#64748b;font-size:12px}',
         '.kq-root .kq-token{font-family:ui-monospace,monospace;word-break:break-all;background:#f8fafc;border-radius:8px;padding:8px 10px;margin:4px 0 10px}',
@@ -635,7 +636,8 @@ window.__ModuleLoader__.load({
       var order = []
       rows.forEach(function (row) {
         var task = row.task || ''
-        var bucket = map[task]
+        var key = admin ? (task + '|' + (row.sessionId || '')) : task
+        var bucket = map[key]
         if (!bucket) {
           bucket = { task: task, tokens: 0, calls: 0, providers: [], models: [], first: row.ts || '', last: row.ts || '' }
           if (admin) {
@@ -647,8 +649,8 @@ window.__ModuleLoader__.load({
             bucket.cacheWrite = 0
             bucket.output = 0
           }
-          map[task] = bucket
-          order.push(task)
+          map[key] = bucket
+          order.push(key)
         }
         bucket.tokens += Number(row.tokens) || 0
         bucket.calls += 1
@@ -1036,22 +1038,20 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'kq-root' },
         h('div', { className: 'wb-usage-view' },
-          isAdmin ? h('div', { className: 'wb-usage-view-head' },
-            h('table', { className: 'wb-usage-tabs', role: 'tablist' },
-              h('tbody', null, h('tr', null,
-                h('td', { className: view === 'personal' ? 'active' : '' },
-                  h('button', { type: 'button', onClick: function () { setScope('personal') } }, '个人用量')),
-                h('td', { className: view === 'enterprise' ? 'active' : '' },
-                  h('button', { type: 'button', onClick: function () { setScope('enterprise') } }, '企业用量')),
-                h('td', { className: view === 'keys' ? 'active' : '' },
-                  h('button', { type: 'button', onClick: function () { setScope('keys') } }, 'Key 管理')),
-              )),
-            ),
-          ) : null,
           h('div', { className: 'wb-usage-view-body' },
             h('div', { className: 'wb-usage-page' },
               h('div', { className: 'kq-sticky' },
-                h('h2', { className: 'kq-page-title' }, '用量统计'),
+                h('div', { className: 'kq-title-row' },
+                  h('h2', { className: 'kq-page-title' }, '用量统计'),
+                  isAdmin ? h('table', { className: 'wb-usage-tabs', role: 'tablist' },
+                    h('tbody', null, h('tr', null,
+                      h('td', { className: view === 'personal' ? 'active' : '' },
+                        h('button', { type: 'button', onClick: function () { setScope('personal') } }, '个人用量')),
+                      h('td', { className: view === 'enterprise' ? 'active' : '' },
+                        h('button', { type: 'button', onClick: function () { setScope('enterprise') } }, '企业用量')),
+                    )),
+                  ) : null,
+                ),
                 showKeys ? null : h('div', { className: 'wb-usage-filter' },
                   h('label', null, monthMode ? '月份' : '日期'),
                   h('input', {
