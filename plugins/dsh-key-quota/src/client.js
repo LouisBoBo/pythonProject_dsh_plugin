@@ -682,6 +682,14 @@ window.__ModuleLoader__.load({
       var rows = taskRows(raw, admin)
       var win = pageWindow(rows.length, page, pageSize)
       var slice = rows.slice(win.start, win.end)
+      // 对话列全空则隐藏（没有 turn/step 信息的会话不值得展示对话列）
+      var hasDialogue = false
+      if (admin) {
+        for (var hi = 0; hi < rows.length; hi++) {
+          var dr = rows[hi]
+          if (dr.dialogues && dr.dialogues.length > 0) { hasDialogue = true; break }
+        }
+      }
       var head = [
         h('th', null, '时间'),
         h('th', null, '任务名称'),
@@ -690,8 +698,8 @@ window.__ModuleLoader__.load({
         head.push(
           h('th', null, '用户'),
           h('th', null, '会话ID'),
-          h('th', null, '对话'),
         )
+        if (hasDialogue) head.push(h('th', null, '对话'))
       }
       head.push(
         h('th', null, '供应商'),
@@ -722,13 +730,15 @@ window.__ModuleLoader__.load({
           ]
           if (admin) {
             var sessions = (r.sessionIds || []).join('\n') || '—'
-            var dialogue = formatDialogues(r.dialogues || []) || '—'
             var users = (r.users || []).join('、') || '—'
             cells.push(
               h('td', { className: 'kq-id', title: users }, users),
               h('td', { className: 'kq-session', title: sessions }, sessions),
-              h('td', { className: 'kq-dialogue', title: dialogue }, dialogue),
             )
+            if (hasDialogue) {
+              var dialogue = formatDialogues(r.dialogues || []) || '—'
+              cells.push(h('td', { className: 'kq-dialogue', title: dialogue }, dialogue))
+            }
           }
           cells.push(
             h('td', null, r.providers.join('、') || '—'),

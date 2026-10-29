@@ -10,7 +10,7 @@ type UserRow = { id: string, username: string, displayName: string, role: string
 export type EngineBundle = {
   events: UsageEvent[]
   users: UserRow[]
-  active: { id: string, role: string, displayName: string } | null
+  active: { id: string, role: string, displayName: string, username?: string } | null
 }
 
 function roots(env: NodeJS.ProcessEnv, home: string): string[] {
@@ -227,6 +227,7 @@ function pickAuth(
         id: matched?.id || login.username,
         role: matched?.role || login.role,
         displayName: matched?.displayName || login.displayName || login.username,
+        username: login.username,
       },
     }
   }
@@ -248,9 +249,11 @@ function pickAuth(
   }
   if (bestPath && best) {
     const authUsers = parseUsers(read(join(bestPath, '..', 'users.json')) || '')
+    const allUsers = authUsers.length ? authUsers : users
+    const matchedUser = allUsers.find((u) => u.id === best.id)
     return {
-      users: authUsers.length ? authUsers : users,
-      active: { id: best.id, role: best.role, displayName: best.displayName },
+      users: allUsers,
+      active: { id: best.id, role: best.role, displayName: best.displayName, username: matchedUser?.username || '' },
     }
   }
   return { users, active: null }
@@ -307,11 +310,140 @@ export function loadEngineBundle(
   const ledgerTs = events.reduce((max, evt) => evt.ts > max ? evt.ts : max, '')
   const withSessions = mergeSessions(withMeter, env, home, ledgerTs, auth.users)
   const withUser = mergeUserUsage(withSessions, home, read)
+  const ledgerFixed = applyLedgerIdentity(withUser, home, read)
+  // 最后一层：网关路由别名 → 真实 provider/model 翻译
+  const sideSettings = readSideSettings(env, home, read)
   return {
-    events: applyLedgerIdentity(withUser, home, read),
+    events: normalizeProviderModel(ledgerFixed, sideSettings),
     users: auth.users,
     active: auth.active,
   }
+}
+
+/** 侧栏 settings.json 里能拿到的 LLM 配置。用于把网关路由别名翻译成真实模型。 */
+type SideSettings = {
+  provider: string  // 从 LLM_BASE_URL 推断出的真实 provider（如 deepseek-official / zhipu）
+  model: string     // 侧栏选的主模型（如 deepseek-v4-flash）
+  visionProvider: string
+  visionModel: string
+} | null
+
+/** 桌面端 settings.json 的可能位置（macOS + Windows）。 */
+function sideSettingsPaths(env: NodeJS.ProcessEnv, home: string): string[] {
+  const out: string[] = []
+  const push = (p: string) => { if (p && !out.includes(p)) out.push(p) }
+  const appData = (env.APPDATA || '').trim()
+  const local = (env.LOCALAPPDATA || '').trim()
+  if (appData) push(join(appData, 'zr-workbuddy-desktop', 'data', 'settings.json'))
+  if (local) push(join(local, 'ZR_DSH', 'dsh-home', 'settings.json'))
+  push(join(home, 'Library', 'Application Support', 'zr-workbuddy-desktop', 'data', 'settings.json'))
+  push(join(home, 'AppData', 'Local', 'ZR_DSH', 'dsh-home', 'settings.json'))
+  push(join(home, '.dsh', 'settings.json'))
+  return out
+}
+
+/** 从 LLM_BASE_URL 推断 provider 名。 */
+function providerFromBaseUrl(url: string): string {
+  if (!url) return ''
+  const lower = url.toLowerCase()
+  if (lower.includes('api.deepseek.com')) return 'deepseek-official'
+  if (lower.includes('open.bigmodel.cn')) return 'zhipu'
+  if (lower.includes('api.zhipuai.cn')) return 'zhipu'
+  if (lower.includes('dashscope.aliyuncs.com')) return 'qwen'
+  if (lower.includes('api.moonshot.cn')) return 'moonshot'
+  if (lower.includes('api.coze.cn') || lower.includes('api.coze.com')) return 'coze'
+  if (lower.includes('openrouter.ai')) return 'openrouter'
+  return ''
+}
+
+/** 读侧栏 settings.json，拿到 LLM_BASE_URL / MAIN_MODEL / VISION_MODEL。 */
+function readSideSettings(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  read: (path: string) => string | null,
+): SideSettings {
+  for (const p of sideSettingsPaths(env, home)) {
+    const text = read(p)
+    if (!text) continue
+    try {
+      const raw = JSON.parse(text) as Record<string, string>
+      const baseUrl = (raw.LLM_BASE_URL || raw.DEEPSEEK_BASE_URL || '').trim()
+      const model = (raw.MAIN_MODEL || raw.MODEL_NAME || raw.DSH_MODEL || '').trim()
+      const provider = (raw.DSH_PROVIDER || '').trim() || providerFromBaseUrl(baseUrl)
+      const visionBase = (raw.VISION_BASE_URL || '').trim()
+      const visionModel = (raw.VISION_MODEL || '').trim()
+      const visionProvider = providerFromBaseUrl(visionBase)
+      if (provider || model) {
+        return { provider, model, visionProvider, visionModel }
+      }
+    } catch {
+      // 坏文件跳过
+    }
+  }
+  return null
+}
+
+/** 判断一个 model 值是否"像网关路由别名"：短、通用词、含 gateway 字样。 */
+function isLikelyGatewayAlias(model: string, provider: string): boolean {
+  const m = (model || '').trim().toLowerCase()
+  if (!m) return false
+  // 含 gateway / standard / default / fast 等通用词，或长度 ≤ 8
+  const ALIAS_WORDS = new Set(['standard', 'default', 'fast', 'slow', 'lite', 'pro', 'cheap', 'premium'])
+  if (ALIAS_WORDS.has(m)) return true
+  if (m.includes('gateway')) return true
+  if (m.length <= 8 && !m.includes('-') && !m.includes('.')) return true
+  return false
+}
+
+/** 判断 provider 是否像网关路由名。 */
+function isLikelyGatewayProvider(provider: string): boolean {
+  const p = (provider || '').trim().toLowerCase()
+  if (!p) return false
+  if (p.includes('gateway')) return true
+  // 通用厂商名（不是真实 provider）
+  const GENERIC = new Set(['zr', 'zhongruan', 'internal', 'custom', 'default', 'other'])
+  if (GENERIC.has(p)) return true
+  return false
+}
+
+/** 真实 provider → 常用别名（用于检测数据源里的值是不是真实 provider）。 */
+const REAL_PROVIDERS = new Set([
+  'deepseek-official', 'deepseek', 'deepseek-cn',
+  'zhipu', 'bigmodel', 'glm',
+  'qwen', 'dashscope', 'aliyun',
+  'moonshot',
+  'openrouter',
+  'cursor',
+  'coze',
+])
+function isKnownProvider(p: string): boolean {
+  const lower = (p || '').trim().toLowerCase()
+  return REAL_PROVIDERS.has(lower)
+}
+
+/** 把网关路由别名翻译成侧栏真实配置。翻译规则：
+ * 1. 如果 provider 是网关名 / 通用别名 → 用侧栏推断的 provider 覆盖
+ * 2. 如果 model 像通用路由别名（standard/default/fast…） → 用侧栏的 MAIN_MODEL 覆盖
+ * 3. 视觉模型同理 */
+function normalizeProviderModel(events: UsageEvent[], side: SideSettings): UsageEvent[] {
+  if (!side) return events
+  for (const evt of events) {
+    const pv = evt.provider || ''
+    const md = evt.model || ''
+    // provider 翻译
+    if (!isKnownProvider(pv) && (isLikelyGatewayProvider(pv) || isLikelyGatewayAlias(md, pv))) {
+      // 如果这是视觉类模型调用（provider 有 vision/cogview 等字样），用 visionProvider
+      const pvLower = pv.toLowerCase()
+      if (side.visionProvider && (pvLower.includes('vision') || pvLower.includes('cogview') || pvLower.includes('vl') || pvLower.includes('glm-4v'))) {
+        evt.provider = side.visionProvider
+        if (side.visionModel && isLikelyGatewayAlias(md, pv)) evt.model = side.visionModel
+      } else if (side.provider) {
+        evt.provider = side.provider
+        if (side.model && isLikelyGatewayAlias(md, pv)) evt.model = side.model
+      }
+    }
+  }
+  return events
 }
 
 function meterFiles(env: NodeJS.ProcessEnv, home: string): string[] {
@@ -895,12 +1027,16 @@ function applyLedgerIdentity(events: UsageEvent[], home: string, read: (path: st
 
 function namesOf(bundle: EngineBundle): Map<string, string> {
   const names = new Map<string, string>()
+  // 优先用 username（如 admin、hebo），displayName（如"管理员"）只作兜底
   for (const user of bundle.users) {
-    const name = user.displayName || user.username || ''
+    const name = user.username || user.displayName || ''
     if (user.id && name) names.set(user.id, name)
   }
-  if (bundle.active?.id && bundle.active.displayName && !names.has(bundle.active.id)) {
-    names.set(bundle.active.id, bundle.active.displayName)
+  if (bundle.active?.id) {
+    const activeName = bundle.active.username || bundle.active.displayName || bundle.active.id
+    if (activeName && !names.has(bundle.active.id)) {
+      names.set(bundle.active.id, activeName)
+    }
   }
   return names
 }
@@ -935,13 +1071,15 @@ export function tailsByUser(assigned: Array<{ assigneeUserId?: string, tail?: st
   return out
 }
 
-/** 任务名：没有就用 lane 中文映射 + sessionId 缩写。 */
+/** 任务名：优先用 session/title，其次首条 user 消息，其次 sessionId 缩写，最后 lane 中文映射。
+ *  如果 task 值本身就是某个 lane 名（比如 meter 事件的 task 被错误设成 lane 名），也当作空处理。 */
 const LANE_NAMES: Record<string, string> = {
   dsh_chat: '对话',
   dsh_title: '标题生成',
   dsh_memory: '记忆写入',
   dsh_search: '网页搜索',
   dsh_cursor: '写码',
+  dsh_other: '其他',
   dev_pipeline_prd: '开发流水线',
   dev_pipeline_prg: '开发流水线',
   dev_pipeline_review: '开发流水线',
@@ -952,9 +1090,13 @@ const LANE_NAMES: Record<string, string> = {
   code_refactor: '代码重构',
   code_test: '代码测试',
 }
+/** 被当作"假 task"的值集合——lane 名本身不应该被显示成任务名。 */
+const FAKE_TASKS = new Set(Object.keys(LANE_NAMES))
+
 function readableTask(row: { task?: string, lane?: string, sessionId?: string, source?: string }): string {
   const t = (row.task || '').trim()
-  if (t) return t
+  // task 值有效且不是 lane 名（避免 meter 事件把 lane 设成 task 直接显示出来）
+  if (t && !FAKE_TASKS.has(t)) return t
   const sid = (row.sessionId || '').replace(/^session-/, '')
   const shortSid = sid ? sid.slice(0, 8) : ''
   // 有 sessionId 但没标题 → 统一用 "会话（sid前8位）"
