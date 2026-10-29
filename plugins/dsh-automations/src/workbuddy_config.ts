@@ -1,6 +1,6 @@
 /**
  * 只读复用 WorkBuddy 系统配置（引擎 config.yaml）。
- * 对照 dsh-cursor-coding 读 cursor_api_key 的方式；不写回、不打印密钥。
+ * 不写回、不打印密钥。
  * 智谱检索用 vision.*；MES 用 mes.base_url；企微/飞书 App 用 automations.*。
  * 语雀不改 WorkBuddy 仓库文件：凭证只放本机 ~/.zhongruan/automations/credentials/yuque.cookie；
  * 若运行时 yaml 里已有 yuque_* 则顺带读取，禁止手改项目 config.yaml。

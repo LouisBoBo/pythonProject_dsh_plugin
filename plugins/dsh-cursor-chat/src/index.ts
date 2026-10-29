@@ -1,5 +1,5 @@
 /**
- * @zhongruan/dsh-cursor-chat — 对话式多轮写码（与 dsh-cursor-coding 并存、互不影响）
+ * @zhongruan/dsh-cursor-chat — 对话式多轮写码
  * 工具名 zr_cchat_*；端口 18789；数据 ~/.zhongruan/cursor-chat。
  *
  * 主路径：用户原话 →（入口级变更先澄清）→ 确认卡 → Cursor → 同步 → 正文结论

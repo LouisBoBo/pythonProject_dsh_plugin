@@ -1,4 +1,4 @@
-# Build + mock self-test for @zhongruan/dsh-cursor-chat (does NOT touch dsh-cursor-coding)
+# Build + mock self-test for @zhongruan/dsh-cursor-chat
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot\..\plugins\dsh-cursor-chat
 
