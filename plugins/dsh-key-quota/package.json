@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-key-quota",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "按平台账号分配 DeepSeek Key，管理员查看用量并设上限",
   "dshMarket": {
     "zh": "Key 用量限额：每把 Key 只看自己的用量，管理员看全部并设上限，超额后停止调用",
