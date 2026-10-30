@@ -16,6 +16,7 @@ import {
   SERVICE_NAME,
 } from './config.js'
 import { checkCompat, readPluginVersion } from './compat.js'
+import { redactJobPublic, redactSseEvent } from './redact.js'
 import { consume, issue } from './hitl.js'
 import {
   createJob,
@@ -812,7 +813,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const terminalOk = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
       const writeEv = (payload: unknown) => {
         if (closed) return
-        res.write(`data: ${JSON.stringify(payload)}\n\n`)
+        // 对外 SSE 脱敏：event 标量字段（text/detail/message 等）+ 内嵌 job 快照
+        const safePayload = payload && typeof payload === 'object'
+          ? redactSseEvent(payload as Record<string, unknown>)
+          : payload
+        res.write(`data: ${JSON.stringify(safePayload)}\n\n`)
       }
       const stop = () => {
         closed = true

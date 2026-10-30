@@ -38,6 +38,22 @@ import {
   trimTranscript,
   type TranscriptItem,
 } from '../transcript.js'
+import {
+  auditDeleteTarget,
+  deliveryIndicatesAlreadyDone,
+} from '../deletePreflight.js'
+import {
+  buildEngineDeleteDelivery,
+  parseDeletePlanFromText,
+  reconcileDeleteArtifacts,
+  validateDeletePlan,
+} from '../deleteEnforce.js'
+import {
+  isDeleteIntent,
+} from '../deleteIntent.js'
+import {
+  verifyDeleteOnTarget,
+} from '../deleteVerify.js'
 
 function scopeOf(jobWriteScope: string[], cfgScope: string[]): string[] {
   const fromJob = normalizeWriteScope(jobWriteScope)
@@ -565,6 +581,33 @@ async function executeJob(jobId: string): Promise<void> {
       return
     }
 
+    // ========== 删除分支 ①：预检跳过 Cursor ==========
+    // 删除 intent → 本机工程读盘核验是否已达成。skip_cursor=True → 零成本成功返回。
+    const deletePreflight = isDeleteIntent(job.requirement)
+      ? auditDeleteTarget(job.workspace, job.requirement)
+      : null
+    if (deletePreflight?.skip_cursor) {
+      const delivery = buildEngineDeleteDelivery(
+        job.requirement,
+        { forced_deletes: [], patched: [], detail: '' },
+        { mode: 'already_done' },
+      )
+      setStatus(job, 'succeeded', delivery)
+      patchJob(jobId, {
+        assistant_text: delivery,
+        synced_files: [] as string[],
+        deleted_files: [] as string[],
+        review_deleted: [] as string[],
+        review_deferred: [] as string[],
+      })
+      appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: delivery })
+      emit({ type: 'status', message: `预检发现「${deletePreflight.feature}」已清除，跳过 Cursor` })
+      return
+    }
+    if (deletePreflight) {
+      emit({ type: 'status', message: `删除预检发现残留 ${deletePreflight.checks.length} 处，将调用 Cursor 定位清单` })
+    }
+
     const before = snapshotSandbox(meta.sandbox)
     const { copyImagesIntoSandbox, toSdkImages } = await import('../images.js')
     const imageRels = copyImagesIntoSandbox(job.images, meta.sandbox)
@@ -601,6 +644,58 @@ async function executeJob(jobId: string): Promise<void> {
     if (job.cancelled || (!cre.ok && cre.error === '已取消')) {
       setStatus(loadJob(jobId)!, 'cancelled', '用户取消')
       return
+    }
+
+    // ========== 删除分支 ②：Cursor 结束 → 解析清单 → 引擎强制执行 ==========
+    // 只有删除 intent 才走。普通写码任务不受影响。
+    if (deletePreflight && cre.ok) {
+      // Cursor 终稿表明"目标已达成/无需再改" → 验尸确认后 already_done 收工
+      if (deliveryIndicatesAlreadyDone(cre.text || '')) {
+        const verify = verifyDeleteOnTarget(job.workspace, job.requirement)
+        if (verify.ok) {
+          const delivery = buildEngineDeleteDelivery(
+            job.requirement,
+            { forced_deletes: [], patched: [], detail: '' },
+            { mode: 'already_done' },
+          )
+          await enterReviewFromDiff(jobId, meta, before, { ...cre, text: delivery })
+          return
+        }
+      }
+
+      // 解析 Cursor 删除清单 + 校验 + 引擎强制执行
+      const cursorPlan = parseDeletePlanFromText(cre.text || '')
+      const { approved, rejected } = validateDeletePlan(
+        cursorPlan, job.requirement, job.workspace,
+        { write_scope: job.write_scope },
+      )
+      if (rejected.length) emit({
+        type: 'status',
+        message: `删除清单：批准 ${approved.length} 个，拒绝 ${rejected.length} 个`,
+      })
+
+      const rec = reconcileDeleteArtifacts({
+        sandbox: meta.sandbox,
+        target: job.workspace,
+        requirement: job.requirement,
+        assistant_text: cre.text || '',
+        explicit_planned: approved.length ? approved : undefined,
+        onStatus: (msg: string) => emit({ type: 'status', message: msg }),
+      })
+
+      // 引擎已删 sandbox 文件 → diffSnapshots 会自动记为 deleted
+      if (rec.forced_deletes.length || rec.patched.length) {
+        emit({
+          type: 'status',
+          message: `引擎删除 ${rec.forced_deletes.length} 个文件 + 修补 ${rec.patched.length} 个接线文件`,
+        })
+      }
+      // 用引擎 delivery 替换 Cursor 假删文案
+      if (rec.forced_deletes.length || rec.patched.length || deletePreflight.checks.length === 0) {
+        const finalMode: 'engine_first' | 'cursor_plan' = cursorPlan.length > 0 ? 'cursor_plan' : 'engine_first'
+        const delivery = buildEngineDeleteDelivery(job.requirement, rec, { mode: finalMode })
+        cre.text = delivery
+      }
     }
 
     await enterReviewFromDiff(jobId, meta, before, cre)
