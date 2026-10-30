@@ -18,7 +18,27 @@ import {
   expandWriteScopeWithCompanions,
   isIdlePendingReview,
   selectCompanionPromotions,
+  buildImpactHintForChangedFiles,
 } from '../scopeCompanions.js'
+import {
+  detectProject,
+  describeProject,
+  type ProjectStack,
+} from '../detect.js'
+import {
+  verifyInSandbox,
+  buildVerifyHints,
+  shouldSkipVerify,
+  type VerifyResult,
+} from '../verify.js'
+import { runQualityGate, type QualityReport } from '../qualityGate.js'
+import {
+  loadPreferences,
+  rememberModel,
+  rememberProjectStack,
+  formatPrefsForPrompt,
+  recordFailures,
+} from '../preferences.js'
 import {
   applyDeletesToTarget,
   diffSnapshots,
@@ -534,6 +554,17 @@ async function executeJob(jobId: string): Promise<void> {
   const cfg = loadConfig()
   const emit = bindEmit(jobId)
 
+  // 跨 session 偏好：加载 + 记录 model 选择（如果用户改了）
+  const prefs = loadPreferences(cfg.dataRoot)
+  rememberModel(cfg.dataRoot, cfg.model)
+  // 简易 cache：workspace → ProjectStack，detectProject 只跑一次
+  let _psCache: ProjectStack | null = null
+  const psForJob = (_ws: string) => {
+    if (_psCache) return _psCache
+    _psCache = detectProject(_ws)
+    return _psCache
+  }
+
   try {
     if (job.cancelled) {
       setStatus(job, 'cancelled', '用户取消')
@@ -615,11 +646,17 @@ async function executeJob(jobId: string): Promise<void> {
     if (sdkImages.length) {
       emit({ type: 'status', message: `已附带 ${sdkImages.length} 张图给 Cursor（多模态）` })
     }
+    // 记录本次 workspace 的 stack + cmd 偏好（只追加不覆盖）
+    const ps = psForJob(job.workspace)
+    rememberProjectStack(cfg.dataRoot, job.workspace, ps)
+    const prefsHint = formatPrefsForPrompt(prefs, job.workspace)
+
     const prompt = buildPrompt({
       requirement: job.requirement,
       workspaceHint: job.workspace,
       parentSummary: parentSummary || undefined,
       imageSandboxRels: imageRels,
+      prefsHint,
     })
 
     setStatus(job, 'running', 'Cursor 正在改码…')
@@ -698,6 +735,177 @@ async function executeJob(jobId: string): Promise<void> {
       }
     }
 
+    // ========== 质量链（非删除任务才跑） ==========
+    if (!deletePreflight && cre.ok) {
+      // 先算一次 diff，拿到 changed 列表供质量链使用
+      const afterSandbox = snapshotSandbox(meta.sandbox)
+      let diff = diffSnapshots(before, afterSandbox)
+      let changed = diff.changed
+      const deleted = diff.deleted
+      const ps = psForJob(job.workspace)
+      const mockMode = process.env.CURSOR_CHAT_MOCK === '1'
+
+      // ① 质量门控（静态扫描，10ms 级）
+      if (!mockMode && !process.env.CURSOR_CHAT_SKIP_QUALITY) {
+        emit({ type: 'status', message: '质量门控：扫描 diff…' })
+        const qr = runQualityGate(meta.sandbox, changed, deleted)
+        patchJob(jobId, { quality_report: qr } as any)
+        job = loadJob(jobId)!
+        emit({
+          type: 'status',
+          message: `质量门控：${qr.status.toUpperCase()} 分=${qr.score} 问题=${qr.issues.length}`,
+        })
+      }
+
+      // ② 编译验证闭环 + 失败续修一轮
+      let verifyOk = false
+      if (!mockMode && !shouldSkipVerify(ps) && cre.agent_id) {
+        if (!process.env.CURSOR_CHAT_SKIP_VERIFY) {
+          emit({ type: 'status', message: `编译验证：${describeProject(ps)}` })
+          let vr = verifyInSandbox(meta.sandbox, ps)
+          verifyOk = vr.ok
+          // 记录失败到偏好，下次自动规避
+          if (!vr.ok) recordFailures(cfg.dataRoot, job.workspace, vr.parsedErrors, 'verify')
+          // 续修一轮：失败则把结构化错误喂回 Cursor 续修
+          if (!vr.ok && vr.firstFailureSummary && changed.length > 0) {
+            emit({ type: 'status', message: '编译失败，Cursor 续修一轮…' })
+            const impactHint = buildImpactHintForChangedFiles(changed)
+            const retryPrompt =
+              `编译验证失败，请修复后重新输出完整代码。\n\n` +
+              buildVerifyHints(vr) +
+              impactHint +
+              `\n【原始诉求】\n${job.requirement}`
+            const retryCre = await runCursorLocal({
+              sandbox: meta.sandbox,
+              apiKey: cfg.cursorApiKey,
+              prompt: retryPrompt,
+              resumeAgentId: cre.agent_id,
+              model: cfg.model,
+              userPreface: job.requirement,
+              onEvent: emit,
+              isCancel: () => Boolean(loadJob(jobId)?.cancelled),
+            })
+            if (retryCre.ok) {
+              vr = verifyInSandbox(meta.sandbox, ps)
+              verifyOk = vr.ok
+              if (!vr.ok) recordFailures(cfg.dataRoot, job.workspace, vr.parsedErrors, 'verify')
+              cre.text = retryCre.text || cre.text
+              emit({ type: 'status', message: vr.ok ? '续修后验证通过 ✅' : '续修后仍未通过，保持原状 ⚠️' })
+            }
+          } else if (vr.ok) {
+            emit({ type: 'status', message: '编译验证通过 ✅' })
+          }
+          // 更新 diff（续修后 sandbox 可能变了）
+          const afterRetry = snapshotSandbox(meta.sandbox)
+          diff = diffSnapshots(before, afterRetry)
+          changed = diff.changed
+        }
+      }
+
+      // ③ 自动格式化（prettier/ruff/gofmt）
+      if (!mockMode && !process.env.CURSOR_CHAT_SKIP_FMT) {
+        try {
+          const fmtCmd = (ps as any).fmtCmd as string | undefined
+          if (fmtCmd) {
+            emit({ type: 'status', message: `自动格式化：${fmtCmd}` })
+            const sc = require('node:child_process').spawnSync(fmtCmd, [], {
+              cwd: meta.sandbox, timeout: 60000,
+            })
+            if (sc.status === 0) emit({ type: 'status', message: '格式化完成 ✅' })
+          }
+        } catch { /* 格式化失败不致命 */ }
+      }
+
+      // ④ 自动写测试（仅验证通过 + ≤5 文件 + 有 test 命令）
+      if (!mockMode && !process.env.CURSOR_CHAT_SKIP_AUTO_TEST) {
+        if (verifyOk && ps.testCmds.length > 0 && changed.length > 0 && changed.length <= 5 && cre.agent_id) {
+          emit({ type: 'status', message: '自动写测试：让 Cursor 补 2-3 个用例…' })
+          const testPrompt =
+            `请为本次改动补 2-3 个单元测试用例（放在仓库已有 test 目录，沿用现有测试框架风格）。\n` +
+            `写完后请自己跑一次 ${ps.testCmds[0]} 确认通过。\n\n` +
+            `【本次改动文件】\n${changed.join('\n')}\n\n` +
+            `【原始诉求】\n${job.requirement}`
+          const testCre = await runCursorLocal({
+            sandbox: meta.sandbox,
+            apiKey: cfg.cursorApiKey,
+            prompt: testPrompt,
+            resumeAgentId: cre.agent_id,
+            model: cfg.model,
+            userPreface: job.requirement,
+            onEvent: emit,
+            isCancel: () => Boolean(loadJob(jobId)?.cancelled),
+          })
+          if (testCre.ok) {
+            emit({ type: 'status', message: '自动写测试完成 ✅' })
+          }
+        }
+      }
+
+      // ⑤ 自我评估（最多 2 轮，验证通过后让 Cursor 自检）
+      if (!mockMode && !process.env.CURSOR_CHAT_SKIP_SELF_EVAL) {
+        if (verifyOk && ps.testCmds.length > 0 && changed.length > 0 && changed.length <= 10 && cre.agent_id) {
+          emit({ type: 'status', message: '自我评估：Cursor 自检边界/异常/测试…' })
+          const impactHint = buildImpactHintForChangedFiles(changed)
+          const evalPrompt =
+            `请自检本次改动：\n` +
+            `1. 有没有遗漏边界条件？（空值/错误分支/异常处理）\n` +
+            `2. 有没有可以补的测试用例？\n` +
+            `3. 有没有明显的代码坏味道？\n` +
+            `如发现问题，直接修复；如无问题，输出"自检通过"。\n\n` +
+            impactHint +
+            `\n【本次改动文件】\n${changed.join('\n')}\n\n` +
+            `【原始诉求】\n${job.requirement}`
+          for (let round = 0; round < 2; round++) {
+            const evalCre = await runCursorLocal({
+              sandbox: meta.sandbox,
+              apiKey: cfg.cursorApiKey,
+              prompt: evalPrompt,
+              resumeAgentId: cre.agent_id,
+              model: cfg.model,
+              userPreface: job.requirement,
+              onEvent: emit,
+              isCancel: () => Boolean(loadJob(jobId)?.cancelled),
+            })
+            if (!evalCre.ok) break
+            // 跑一次验证确认没引入问题
+            const vr = verifyInSandbox(meta.sandbox, ps)
+            if (!vr.ok) {
+              emit({ type: 'status', message: `自评后验证失败，放弃本轮（${round + 1}/2）` })
+              break
+            }
+            emit({ type: 'status', message: `自评第 ${round + 1} 轮通过 ✅` })
+          }
+        }
+      }
+
+      // ⑥ 质量报告追加到 assistant_text
+      const finalJob = loadJob(jobId)!
+      const finalQr = (finalJob as any).quality_report as QualityReport | undefined
+      if (finalQr) {
+        const oldText = cre.text || ''
+        const issueCount = finalQr.issues.length
+        const qBlock =
+          `\n\n---\n\n**质量门控**：${finalQr.status.toUpperCase()}（${finalQr.score}/100）\n` +
+          `改动 ${finalQr.changedFileCount} 文件 / ${finalQr.totalLineCount} 行\n` +
+          (issueCount > 0
+            ? `\n**问题清单（${issueCount} 项）**：\n${finalQr.issues.slice(0, 10).map(
+                (i: any) => `- ${i.severity === 'red' ? '🔴' : '🟡'} ${i.file}:${i.line} ${i.kind} — ${i.detail}`,
+              ).join('\n')}\n`
+            : '\n**无问题** ✅\n')
+        cre.text = oldText + qBlock
+      }
+    }
+
+    // ========== 质量 red 阻塞自动同步 ==========
+    const preSync = loadJob(jobId)!
+    const qr = (preSync as any).quality_report as QualityReport | undefined
+    if (qr?.status === 'red') {
+      emit({
+        type: 'status',
+        message: `🚨 质量红色预警，已阻止自动同步，请人工审完再决定是否 apply`,
+      })
+    }
+
     await enterReviewFromDiff(jobId, meta, before, cre)
   } catch (err) {
     const msg = String(err)
@@ -718,10 +926,12 @@ async function executeSteer(jobId: string, message: string): Promise<void> {
   try {
     setStatus(job, 'running', '追问续跑 Cursor…')
     const before = snapshotSandbox(job.sandbox_path)
+    const steerPrefs = loadPreferences(cfg.dataRoot)
     const prompt = buildPrompt({
       requirement: message,
       workspaceHint: job.workspace,
       parentSummary: (job.last_synced_files || job.review_in_scope || []).slice(0, 40).join('\n'),
+      prefsHint: formatPrefsForPrompt(steerPrefs, job.workspace),
     })
     const cre = await runCursorLocal({
       sandbox: job.sandbox_path,

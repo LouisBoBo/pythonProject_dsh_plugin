@@ -100,6 +100,21 @@ const FOLLOWUP_AGENT_HINT =
 /** 硬规则：凡写码终态必须产出正文结论（begin/continue 收口或 finish 兜底） */
 const FINISH_DONE = new Set(['succeeded', 'failed', 'cancelled', 'blocked_no_runner'])
 
+/** 紧急熔断：CURSOR_CHAT_DISABLE_ALL=1 时所有 begin/continue 立即返回，用于线上紧急停用 */
+function isCircuitBreakerActive(): boolean {
+  const v = String(process.env.CURSOR_CHAT_DISABLE_ALL || '').trim().toLowerCase()
+  return v === '1' || v === 'true' || v === 'on' || v === 'enabled'
+}
+
+function circuitBreakerError() {
+  return asJson({
+    ok: false,
+    show_error: true,
+    detail: '插件已被管理员临时熔断（CURSOR_CHAT_DISABLE_ALL=1），请稍后重试或联系管理员。',
+    chat_body: '⚠️ **Cursor 对话写码已临时停用**\n\n目前服务异常，管理员已紧急熔断。请稍后重试或联系管理员确认服务状态。',
+  })
+}
+
 function buildConclusionToolResult(opts: {
   jobId: string
   kind: 'live' | 'continue'
@@ -548,6 +563,8 @@ export function apply(ctx: Context) {
       finalizeContent: finalizeChatBody,
       async execute(args, exec) {
         await startServer()
+        // 紧急熔断优先于一切——Key 检查之前就拦
+        if (isCircuitBreakerActive()) return circuitBreakerError()
         const cfg = loadConfig()
         if (!cursorKeyReady(cfg)) {
           return asJson({
@@ -663,6 +680,8 @@ export function apply(ctx: Context) {
       finalizeContent: finalizeChatBody,
       async execute(args, exec) {
         await startServer()
+        // 紧急熔断优先于一切——Key 检查之前就拦
+        if (isCircuitBreakerActive()) return circuitBreakerError()
         const cfg = loadConfig()
         if (!cursorKeyReady(cfg)) {
           return asJson({

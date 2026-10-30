@@ -140,7 +140,59 @@ export function setStatus(job: CursorCodingJob, status: JobStatus, detail?: stri
   job.status = status
   if (detail !== undefined) job.detail = detail
   appendEvent(job, { type: 'status', status, message: detail || status })
-  return loadJob(job.id)!
+  const saved = saveJob(job)
+
+  // 审计日志：终态变化时追加一行 JSON（机器可读，用于运营回溯）
+  if (JOB_ENDED.includes(status)) {
+    tryWriteAudit(saved, status)
+  }
+
+  return saved
+}
+
+/** 审计日志：job 终态时写一行 JSONL */
+function tryWriteAudit(job: CursorCodingJob, status: JobStatus): void {
+  try {
+    const cfg = loadConfig()
+    const auditPath = join(cfg.dataRoot, 'audit.jsonl')
+    const created = new Date(job.created_at).getTime()
+    const updated = new Date(job.updated_at).getTime()
+    const durationMs = updated > created ? updated - created : 0
+    const qualityReport = (job as any).quality_report
+    const syncedCount = Array.isArray(job.last_synced_files)
+      ? job.last_synced_files.length
+      : Array.isArray(job.synced_files)
+        ? job.synced_files.length
+        : 0
+    const entry = {
+      ts: new Date().toISOString(),
+      job_id: job.id,
+      status,
+      workspace: job.workspace,
+      requirement_len: (job.requirement || '').length,
+      parent_job_id: job.parent_job_id || null,
+      agent_id: job.agent_id || null,
+      duration_ms: durationMs,
+      quality_score: qualityReport?.score ?? null,
+      quality_status: qualityReport?.status ?? null,
+      synced_files: syncedCount,
+      changed_files: job.changed_files?.length ?? 0,
+      deleted_files: job.deleted_files?.length ?? 0,
+      continue_count: job.continue_count ?? 0,
+      reason: detailForAudit(status, job.detail),
+    }
+    const line = JSON.stringify(entry) + '\n'
+    const fs = require('node:fs') as typeof import('node:fs')
+    fs.appendFileSync(auditPath, line, 'utf8')
+  } catch {
+    /* 审计日志失败不得影响主流程 */
+  }
+}
+
+function detailForAudit(status: JobStatus, detail?: string): string {
+  if (!detail) return status
+  const trimmed = detail.replace(/\s+/g, ' ').trim()
+  return trimmed.length > 200 ? trimmed.slice(0, 200) + '…' : trimmed
 }
 
 export function createJob(input: {

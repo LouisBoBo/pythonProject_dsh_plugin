@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-cursor-chat",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "对话式多轮写码：任意本地工程；用户原话+截图进 Cursor 多模态，确认后改盘，续改优先 Agent.resume",
   "dshMarket": {
     "zh": "对话写码：任意本地工程像跟 Cursor 聊（可贴图），确认后改代码，同会话可多轮续改",

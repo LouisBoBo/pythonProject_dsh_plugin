@@ -5,6 +5,7 @@
 import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
+import { sandboxSafeEnv } from './sandboxEnv.js'
 
 const VITE_NAMES = ['vite.config.js', 'vite.config.ts', 'vite.config.mjs', 'vite.config.cjs']
 const FRONT_MARKERS = [
@@ -111,7 +112,7 @@ async function runNpmBuild(frontend: string): Promise<string> {
     const child = spawn('npm', ['run', 'build'], {
       cwd: frontend,
       stdio: 'ignore',
-      env: { ...process.env },
+      env: sandboxSafeEnv(),
     })
     const t = setTimeout(() => {
       try {

@@ -29,6 +29,49 @@ function pushUnique(out: string[], seen: Set<string>, item: string) {
 }
 
 /**
+ * 根据已改文件列表推出影响面提示——告诉 Cursor "你改了 routers/x.py，注意 schemas.py/models.py 也可能需要同步"。
+ * 返回可直接拼接进 buildPrompt 的文字（可能为空串）。
+ */
+export function buildImpactHintForChangedFiles(changed: string[]): string {
+  if (!changed.length) return ''
+  const hints: string[] = []
+
+  // routers/ → schemas/models
+  const routerRoots = routerRootsFromPaths(changed)
+  for (const root of routerRoots) {
+    const prefix = root ? root + '/' : ''
+    const companions = [
+      ...ROUTER_COMPANION_FILES.map((f) => prefix + f),
+      prefix + 'schemas/',
+    ]
+    hints.push(
+      `  · 检测到改动了 routers（root=${root || '<app_root>'}），注意以下契约文件是否也需同步：${companions.join(', ')}`,
+    )
+  }
+
+  // views/ → src/api/ / router/ / config/
+  const viewHints = new Set<string>()
+  for (const p of changed) {
+    const asPath = p.endsWith('/') ? p.slice(0, -1) : p
+    if (/\/views(\/|$)/.test(asPath) || asPath.endsWith('/views') || asPath === 'views') {
+      const m = asPath.match(/^(.*?)(?:\/views.*)?$/)
+      const feSrc = (m && m[1]) || ''
+      let srcRoot = ''
+      if (/\/src$/.test(feSrc)) srcRoot = feSrc
+      else if (feSrc.includes('/src/')) srcRoot = feSrc.slice(0, feSrc.indexOf('/src/') + 4)
+      else if (asPath.includes('/src/')) srcRoot = asPath.slice(0, asPath.indexOf('/src/') + 4)
+      if (srcRoot) {
+        viewHints.add(`  · 改动了前端 views，注意相关 api/、router/、config/ 目录是否也需同步（src=${srcRoot}）`)
+      }
+    }
+  }
+  for (const h of viewHints) hints.push(h)
+
+  if (!hints.length) return ''
+  return `\n【影响面提示（自动推断）】\n${hints.join('\n')}\n`
+}
+
+/**
  * 配置层连带：scope 含 routers/ 时自动纳入同包 schemas/models 等。
  * 空 scope = 全开，不追加。
  */
