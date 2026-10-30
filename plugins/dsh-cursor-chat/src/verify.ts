@@ -2,9 +2,11 @@
  * 编译验证闭环：Cursor 改完后在沙箱里自动跑 build / typecheck / test，
  * 失败则把错误日志喂回 Cursor 续修一轮（最多两轮，避免死循环）。
  *
- * 仅在沙箱 cwd 执行，不碰真实工程。超时保护 120s/命令。
+ * 仅在沙箱 cwd 执行，不碰真实工程。超时保护 120s/命令，用 spawn + SIGKILL 兜底
+ * （spawnSync 即使带 timeout 也是同步阻塞整个 Node 进程，会卡住其他 job）。
  */
-import { execSync, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import type { ProjectStack } from './detect.js'
 import { sandboxSafeEnv } from './sandboxEnv.js'
 
@@ -50,34 +52,64 @@ export function isSafeCmd(cmd: string): boolean {
   return true
 }
 
-/** 在指定 cwd 跑一条 shell 命令，捕获 stdout+stderr+exit code */
-function runOne(cmd: string, cwd: string): { ok: boolean; exit: number; output: string; durationMs: number } {
-  const start = Date.now()
-  try {
-    const result = spawnSync(cmd, [], {
-      cwd,
-      shell: true,
-      timeout: CMD_TIMEOUT_MS,
-      encoding: 'utf8',
-      env: sandboxSafeEnv({ CI: '1', NODE_ENV: 'test', npm_config_yes: 'true' }),
-      maxBuffer: 1024 * 1024 * 16,
+/** 在指定 cwd 跑一条 shell 命令，异步非阻塞，超时后 SIGKILL 兜底 */
+function runOne(cmd: string, cwd: string): Promise<{ ok: boolean; exit: number; output: string; durationMs: number }> {
+  return new Promise((resolve) => {
+    const start = Date.now()
+    let child: ChildProcess | null = null
+
+    // 超时兜底：SIGKILL 确保子进程不变成孤儿
+    const timer = setTimeout(() => {
+      if (child && !child.killed) {
+        try { child.kill('SIGKILL') } catch { /* 已退出或无法 kill，忽略 */ }
+      }
+      const durationMs = Date.now() - start
+      resolve({ ok: false, exit: 124, output: `[timeout ${CMD_TIMEOUT_MS}ms — 已 SIGKILL]`, durationMs })
+    }, CMD_TIMEOUT_MS)
+
+    try {
+      child = spawn(cmd, [], {
+        cwd,
+        shell: true,
+        env: sandboxSafeEnv({ CI: '1', NODE_ENV: 'test', npm_config_yes: 'true' }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (err: unknown) {
+      clearTimeout(timer)
+      const durationMs = Date.now() - start
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+      resolve({ ok: false, exit: 1, output: msg, durationMs })
+      return
+    }
+
+    let stdout = ''
+    let stderr = ''
+    const maxBufferBytes = 1024 * 1024 * 16 // 16MB
+
+    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); if (stdout.length > maxBufferBytes) stdout = stdout.slice(-maxBufferBytes) })
+    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); if (stderr.length > maxBufferBytes) stderr = stderr.slice(-maxBufferBytes) })
+
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      const durationMs = Date.now() - start
+      resolve({ ok: false, exit: 1, output: `spawn error: ${err.message}`, durationMs })
     })
-    const durationMs = Date.now() - start
-    const exit = result.status ?? 1
-    const combined = [result.stdout || '', result.stderr || ''].join('\n')
-    const output = combined.length > MAX_OUTPUT_LEN
-      ? combined.slice(0, MAX_OUTPUT_LEN) + `\n…[truncated ${combined.length - MAX_OUTPUT_LEN} chars]`
-      : combined
-    return { ok: exit === 0, exit, output, durationMs }
-  } catch (err: unknown) {
-    const durationMs = Date.now() - start
-    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
-    return { ok: false, exit: 1, output: msg, durationMs }
-  }
+
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const durationMs = Date.now() - start
+      const exit = code ?? 1
+      const combined = [stdout, stderr].join('\n')
+      const output = combined.length > MAX_OUTPUT_LEN
+        ? combined.slice(0, MAX_OUTPUT_LEN) + `\n…[truncated ${combined.length - MAX_OUTPUT_LEN} chars]`
+        : combined
+      resolve({ ok: exit === 0, exit, output, durationMs })
+    })
+  })
 }
 
-/** 主入口：按 build → typecheck → test 顺序跑，第一条失败即停 */
-export function verifyInSandbox(cwd: string, ps: ProjectStack): VerifyResult {
+/** 主入口：按 build → typecheck → test 顺序跑，第一条失败即停（async 非阻塞） */
+export async function verifyInSandbox(cwd: string, ps: ProjectStack): Promise<VerifyResult> {
   const start = Date.now()
   const commands: VerifyResult['commands'] = []
 
@@ -101,7 +133,7 @@ export function verifyInSandbox(cwd: string, ps: ProjectStack): VerifyResult {
         }
         return buildResult(false, commands, Date.now() - start, firstFailure, failureKind)
       }
-      const r = runOne(cmd, cwd)
+      const r = await runOne(cmd, cwd)
       commands.push({ cmd, ...r })
       if (!r.ok) {
         if (!firstFailure) {

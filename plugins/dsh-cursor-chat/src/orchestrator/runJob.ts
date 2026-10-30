@@ -749,7 +749,7 @@ async function executeJob(jobId: string): Promise<void> {
       if (!mockMode && !process.env.CURSOR_CHAT_SKIP_QUALITY) {
         emit({ type: 'status', message: '质量门控：扫描 diff…' })
         const qr = runQualityGate(meta.sandbox, changed, deleted)
-        patchJob(jobId, { quality_report: qr } as any)
+        patchJob(jobId, { quality_report: qr })
         job = loadJob(jobId)!
         emit({
           type: 'status',
@@ -762,7 +762,7 @@ async function executeJob(jobId: string): Promise<void> {
       if (!mockMode && !shouldSkipVerify(ps) && cre.agent_id) {
         if (!process.env.CURSOR_CHAT_SKIP_VERIFY) {
           emit({ type: 'status', message: `编译验证：${describeProject(ps)}` })
-          let vr = verifyInSandbox(meta.sandbox, ps)
+          let vr = await verifyInSandbox(meta.sandbox, ps)
           verifyOk = vr.ok
           // 记录失败到偏好，下次自动规避
           if (!vr.ok) recordFailures(cfg.dataRoot, job.workspace, vr.parsedErrors, 'verify')
@@ -786,7 +786,7 @@ async function executeJob(jobId: string): Promise<void> {
               isCancel: () => Boolean(loadJob(jobId)?.cancelled),
             })
             if (retryCre.ok) {
-              vr = verifyInSandbox(meta.sandbox, ps)
+              vr = await verifyInSandbox(meta.sandbox, ps)
               verifyOk = vr.ok
               if (!vr.ok) recordFailures(cfg.dataRoot, job.workspace, vr.parsedErrors, 'verify')
               cre.text = retryCre.text || cre.text
@@ -805,7 +805,7 @@ async function executeJob(jobId: string): Promise<void> {
       // ③ 自动格式化（prettier/ruff/gofmt）
       if (!mockMode && !process.env.CURSOR_CHAT_SKIP_FMT) {
         try {
-          const fmtCmd = (ps as any).fmtCmd as string | undefined
+          const fmtCmd = ps.fmtCmds[0]
           if (fmtCmd) {
             emit({ type: 'status', message: `自动格式化：${fmtCmd}` })
             const sc = require('node:child_process').spawnSync(fmtCmd, [], {
@@ -868,7 +868,7 @@ async function executeJob(jobId: string): Promise<void> {
             })
             if (!evalCre.ok) break
             // 跑一次验证确认没引入问题
-            const vr = verifyInSandbox(meta.sandbox, ps)
+            const vr = await verifyInSandbox(meta.sandbox, ps)
             if (!vr.ok) {
               emit({ type: 'status', message: `自评后验证失败，放弃本轮（${round + 1}/2）` })
               break
@@ -880,7 +880,7 @@ async function executeJob(jobId: string): Promise<void> {
 
       // ⑥ 质量报告追加到 assistant_text
       const finalJob = loadJob(jobId)!
-      const finalQr = (finalJob as any).quality_report as QualityReport | undefined
+      const finalQr = finalJob.quality_report
       if (finalQr) {
         const oldText = cre.text || ''
         const issueCount = finalQr.issues.length
@@ -889,7 +889,7 @@ async function executeJob(jobId: string): Promise<void> {
           `改动 ${finalQr.changedFileCount} 文件 / ${finalQr.totalLineCount} 行\n` +
           (issueCount > 0
             ? `\n**问题清单（${issueCount} 项）**：\n${finalQr.issues.slice(0, 10).map(
-                (i: any) => `- ${i.severity === 'red' ? '🔴' : '🟡'} ${i.file}:${i.line} ${i.kind} — ${i.detail}`,
+                (i) => `- ${i.severity === 'red' ? '🔴' : '🟡'} ${i.file}:${i.line} ${i.kind} — ${i.detail}`,
               ).join('\n')}\n`
             : '\n**无问题** ✅\n')
         cre.text = oldText + qBlock
@@ -898,7 +898,7 @@ async function executeJob(jobId: string): Promise<void> {
 
     // ========== 质量 red 阻塞自动同步 ==========
     const preSync = loadJob(jobId)!
-    const qr = (preSync as any).quality_report as QualityReport | undefined
+    const qr = preSync.quality_report
     if (qr?.status === 'red') {
       emit({
         type: 'status',

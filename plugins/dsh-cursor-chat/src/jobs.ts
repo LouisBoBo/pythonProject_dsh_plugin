@@ -158,7 +158,7 @@ function tryWriteAudit(job: CursorCodingJob, status: JobStatus): void {
     const created = new Date(job.created_at).getTime()
     const updated = new Date(job.updated_at).getTime()
     const durationMs = updated > created ? updated - created : 0
-    const qualityReport = (job as any).quality_report
+    const qualityReport = job.quality_report
     const syncedCount = Array.isArray(job.last_synced_files)
       ? job.last_synced_files.length
       : Array.isArray(job.synced_files)

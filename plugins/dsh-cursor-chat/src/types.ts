@@ -2,6 +2,7 @@
 
 import type { TranscriptItem } from './transcript.js'
 import type { ChatImageRef } from './images.js'
+import type { QualityReport } from './qualityGate.js'
 
 export type CursorCodingConfig = {
   listen: string
@@ -63,6 +64,8 @@ export type CursorCodingJob = {
   thinking_text: string
   transcript: TranscriptItem[]
   cancelled: boolean
+  /** 质量门控报告（质量链 ① 步产出，绿色=通过，黄色=有问题，红色=阻塞同步） */
+  quality_report?: QualityReport
 }
 
 export type StreamEvent = {
