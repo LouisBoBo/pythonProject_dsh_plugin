@@ -68,8 +68,13 @@ function requestOrigin(req: IncomingMessage): string {
   return String(req.headers.origin || '').trim()
 }
 
-function isLoopbackBrowserOrigin(origin: string): boolean {
+// The desktop shell loads the page from dsh-app://app, so its fetch carries that origin;
+// treat it as local alongside loopback http(s) pages.
+const DESKTOP_ORIGIN = 'dsh-app://app'
+
+function isTrustedBrowserOrigin(origin: string): boolean {
   if (!origin) return false
+  if (origin === DESKTOP_ORIGIN) return true
   try {
     const u = new URL(origin)
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
@@ -81,7 +86,7 @@ function isLoopbackBrowserOrigin(origin: string): boolean {
 
 function corsHeaders(req?: IncomingMessage): Record<string, string> {
   const origin = req ? requestOrigin(req) : ''
-  if (origin && isLoopbackBrowserOrigin(origin)) {
+  if (origin && isTrustedBrowserOrigin(origin)) {
     return {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Headers': 'Content-Type',
@@ -151,7 +156,7 @@ function rejectNonLoopback(req: IncomingMessage, res: ServerResponse): boolean {
     return true
   }
   const origin = requestOrigin(req)
-  if (origin && !isLoopbackBrowserOrigin(origin)) {
+  if (origin && !isTrustedBrowserOrigin(origin)) {
     send(res, 403, { ok: false, detail: '拒绝非本机 Origin' }, req)
     return true
   }

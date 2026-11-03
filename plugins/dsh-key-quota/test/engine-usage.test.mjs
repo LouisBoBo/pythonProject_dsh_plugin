@@ -420,7 +420,7 @@ describe('engine usage files', () => {
       assert.deepEqual(sessionEvents.map((row) => row.messageId).sort(), ['2', '8'])
       for (const row of chat) {
         assert.equal(row.sessionId, 'abc')
-        assert.equal(row.userName, '管理员')
+        assert.equal(row.userName, 'admin')  // namesOf 优先 username 而非 displayName
         assert.equal(row.userId, 'u_admin')
         assert.equal(row.input + row.cacheRead + row.cacheWrite + row.output, row.tokens)
       }
@@ -519,7 +519,7 @@ describe('engine usage files', () => {
       const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26&grain=day&scope=personal', bundle)
       assert.equal(view.viewerAdmin, true)
       assert.equal(view.usage.today.llm.tokens, 120)
-      assert.equal(view.usage.detail[0].userName, '管理员')
+      assert.equal(view.usage.detail[0].userName, 'admin')  // namesOf 优先 username
       assert.equal(view.usage.detail[0].userId, 'u_admin')
 
       await writeFile(join(login, 'session.json'), JSON.stringify({

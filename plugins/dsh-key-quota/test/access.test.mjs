@@ -177,13 +177,14 @@ describe('access', () => {
           { id: 'u_hebo', displayName: 'Hebo' },
         ],
       }
+      const fixedNow = () => new Date('2026-10-22T02:00:00.000Z')
       const memberPanel = await dispatch({
         method: 'GET',
         path: '/v1/local/panel',
         headers: {},
         body: null,
         remoteAddress: '127.0.0.1',
-      }, { ledger, reportToken: token, role: 'server', session: () => people })
+      }, { ledger, reportToken: token, role: 'server', now: fixedNow, session: () => people })
       assert.equal(memberPanel.body.keys, null)
       assert.equal(memberPanel.body.self.tail, 'mmmm')
       assert.equal(memberPanel.body.self.used, 10)
@@ -200,6 +201,7 @@ describe('access', () => {
         ledger,
         reportToken: token,
         role: 'server',
+        now: fixedNow,
         session: () => ({ ...people, viewer: { id: 'u_admin', displayName: '管理员', role: 'admin' } }),
       })
       assert.equal(adminPanel.body.viewer.admin, true)

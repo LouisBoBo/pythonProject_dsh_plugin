@@ -31,7 +31,7 @@
       "requires": {
         "cursor_sdk": ">=1.0.31 <2.0.0",
         "dsh_runtime.cordis": ">=4.0.2 <5.0.0",
-        "dsh_runtime.dsh_tools": ">=0.1.1-rc.2 <0.2.0",
+        "dsh_runtime.dsh_tools": ">=0.1.1-rc.2 <0.3.0",
         "workbuddy": ">=0.0.0"
       },
       "notes": "插件侧声明；宿主未知版本时 workbuddy 为 soft 通过"
