@@ -1,0 +1,5 @@
+# 安装后注入 DSH 组合树。id 在全机唯一；name 必须等于 package.json 的 name。
+# 写码依赖 @zhongruan/dsh-cursor-chat（:18791），需另行安装并启用。
+- insert:
+    - id: dev-pipeline
+      name: '@zhongruan/dsh-dev-pipeline'

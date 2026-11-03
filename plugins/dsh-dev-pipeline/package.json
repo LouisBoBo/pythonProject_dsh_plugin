@@ -1,0 +1,59 @@
+{
+  "name": "@zhongruan/dsh-dev-pipeline",
+  "version": "0.1.1",
+  "description": "需求到上线一体化：十步编排（需求→PRD→读库→计划→写码→验证→复核→提交→PR→部署），写码复用 @zhongruan/dsh-cursor-chat",
+  "dshMarket": {
+    "zh": "需求到上线一体化：一句话开跑十步流水线；写码交给对话写码插件，自己负责 PRD、计划、验证、复核、提交、PR 与部署",
+    "en": "Requirement-to-release pipeline: ten steps from intake to deploy; coding is delegated to dsh-cursor-chat"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "cordis.patch.yml",
+    "compat-matrix.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "self-test": "node lib/self-test.js"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "http://175.178.238.31/dsh-plugins/npm/"
+  },
+  "zhongruanCompat": {
+    "component": "plugin_dev_pipeline",
+    "matrix": "./compat-matrix.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*",
+    "@zhongruan/dsh-cursor-chat": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@zhongruan/dsh-cursor-chat": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
