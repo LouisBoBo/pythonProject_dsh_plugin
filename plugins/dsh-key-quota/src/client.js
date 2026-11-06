@@ -219,14 +219,11 @@ window.__ModuleLoader__.load({
     }
 
     function statusText(data) {
-      if (!data || !data.usage) return ''
-      var month = data.usage.grain === 'month'
-      var ent = data.scope === 'enterprise'
+      if (!data) return ''
+      // 成功时不展示说明文案；仅保留失败/未加载提示
+      if (data.gatewayError) return String(data.gatewayError)
       if (!data.loaded) return '还没有读到用量。'
-      if (month && ent) return '已加载企业整月用量'
-      if (month) return '已加载个人整月用量'
-      if (ent) return '已加载企业总用量'
-      return '已从引擎加载'
+      return ''
     }
 
     function UsageCurveChart(props) {
@@ -812,112 +809,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    var LIMIT_OPTIONS = [
-      { value: '', label: '不限' },
-      { value: '10000', label: '1万' },
-      { value: '50000', label: '5万' },
-      { value: '100000', label: '10万' },
-      { value: '200000', label: '20万' },
-      { value: '500000', label: '50万' },
-      { value: '1000000', label: '100万' },
-      { value: '2000000', label: '200万' },
-      { value: '5000000', label: '500万' },
-      { value: '10000000', label: '1000万' },
-      { value: '20000000', label: '2000万' },
-      { value: '50000000', label: '5000万' },
-    ]
-
-    function limitChoices(current) {
-      var value = current == null || current === '' ? '' : String(current)
-      var options = LIMIT_OPTIONS.slice()
-      if (value && !options.some(function (item) { return item.value === value })) {
-        options.push({ value: value, label: value })
-      }
-      return options
-    }
-
-    function LimitSelect(props) {
-      var value = props.value == null || props.value === '' ? '' : String(props.value)
-      return h('select', {
-        className: 'kq-limit',
-        value: value,
-        onChange: function (e) { props.onChange(e.target.value) },
-      }, limitChoices(value).map(function (item) {
-        return h('option', { key: item.value || 'none', value: item.value }, item.label)
-      }))
-    }
-
-    function KeyLimit(props) {
-      var row = props.row
-      var limitState = useState(row.limitTokens == null ? '' : String(row.limitTokens))
-      return h('tr', null,
-        h('td', null, row.assigneeName || '未分配'),
-        h('td', null, row.ready === false ? row.tail + ' · 待重新保存' : row.tail),
-        h('td', null, fmtTokens(row.used)),
-        h('td', null, h(LimitSelect, { value: limitState[0], onChange: limitState[1] })),
-        h('td', null, h('div', { className: 'kq-actions' },
-          h('button', {
-            type: 'button',
-            className: 'kq-btn',
-            onClick: function () { props.onSave(row, limitState[0]) },
-          }, '保存'),
-          h('button', {
-            type: 'button',
-            className: 'kq-btn',
-            onClick: function () { props.onDelete(row) },
-          }, '删除'),
-        )),
-      )
-    }
-
-    function KeyAdmin(props) {
-      var colleagues = props.colleagues || []
-      var keyState = useState('')
-      var whoState = useState('')
-      var limitState = useState('')
-      var who = whoState[0] || (colleagues[0] && colleagues[0].id) || ''
-      return h('div', null,
-        h('p', null, '把 DeepSeek Key 分给平台上的同事。登录哪个账号，对话就用哪一把。系统配置里的 Key 可以留空。'),
-        colleagues.length ? h('div', { className: 'kq-add' },
-          h('input', {
-            className: 'kq-key',
-            type: 'password',
-            autoComplete: 'off',
-            placeholder: 'DeepSeek Key',
-            value: keyState[0],
-            onChange: function (e) { keyState[1](e.target.value) },
-          }),
-          h('select', { value: who, onChange: function (e) { whoState[1](e.target.value) } },
-            colleagues.map(function (person) {
-              return h('option', { key: person.id, value: person.id }, person.displayName || person.id)
-            }),
-          ),
-          h(LimitSelect, { value: limitState[0], onChange: limitState[1] }),
-          h('button', {
-            type: 'button',
-            className: 'kq-btn',
-            onClick: function () {
-              var secret = keyState[0]
-              keyState[1]('')
-              props.onAdd(secret, who, limitState[0])
-            },
-          }, '添加'),
-        ) : h('p', null, '还没有读到平台上的同事。'),
-        Array.isArray(props.keys) ? h('table', { className: 'kq-table' },
-          h('thead', null, h('tr', null,
-            h('th', null, '同事'),
-            h('th', null, '尾号'),
-            h('th', null, '本月已用'),
-            h('th', null, '上限'),
-            h('th', null, ''),
-          )),
-          h('tbody', null, props.keys.map(function (row) {
-            return h(KeyLimit, { key: row.keyId, row: row, onSave: props.onSave, onDelete: props.onDelete })
-          })),
-        ) : null,
-      )
-    }
-
     function Panel() {
       var dataState = useState(null)
       var data = dataState[0]
@@ -934,9 +825,6 @@ window.__ModuleLoader__.load({
       var grainState = useState('day')
       var grain = grainState[0]
       var setGrain = grainState[1]
-      var scopeState = useState('personal')
-      var scope = scopeState[0]
-      var setScope = scopeState[1]
       var detailPageState = useState(1)
       var detailPage = detailPageState[0]
       var setDetailPage = detailPageState[1]
@@ -950,46 +838,12 @@ window.__ModuleLoader__.load({
       var modelPageSize = modelSizeState[0]
       var setModelPageSize = modelSizeState[1]
 
-      function reload() {
-        return load(onDate, grain, scope)
-      }
-
-      function limitBody(limitText) {
-        var text = String(limitText || '').trim()
-        if (!text || text === '不限') return null
-        return Number(text)
-      }
-
-      function saveLimit(row, limitText) {
-        return api('/v1/local/keys/' + encodeURIComponent(row.keyId), {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ limitTokens: limitBody(limitText) }),
-        }).then(reload)
-      }
-
-      function removeKey(row) {
-        return api('/v1/local/keys/' + encodeURIComponent(row.keyId), { method: 'DELETE' }).then(reload)
-      }
-
-      function addKey(secret, assigneeUserId, limitText) {
-        return api('/v1/local/keys', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: secret,
-            assigneeUserId: assigneeUserId,
-            limitTokens: limitBody(limitText),
-          }),
-        }).then(reload)
-      }
-
-      function load(day, nextGrain, nextScope) {
+      function load(day, nextGrain) {
         var d = day || onDate
         var g = nextGrain || grain
-        var sc = nextScope || scope
         setBusy(true)
-        return api('/v1/local/panel?on=' + encodeURIComponent(d) + '&grain=' + encodeURIComponent(g) + '&scope=' + encodeURIComponent(sc))
+        // 固定个人用量；服务端也会忽略 enterprise
+        return api('/v1/local/panel?on=' + encodeURIComponent(d) + '&grain=' + encodeURIComponent(g) + '&scope=personal')
           .then(function (body) {
             setData(body)
             setErr('')
@@ -1007,7 +861,7 @@ window.__ModuleLoader__.load({
         var stopped = false
         var tries = 0
         function tick() {
-          load(onDate, grain, scope).then(function (ok) {
+          load(onDate, grain).then(function (ok) {
             if (stopped || ok) return
             tries += 1
             if (tries >= 8) return
@@ -1016,16 +870,13 @@ window.__ModuleLoader__.load({
         }
         tick()
         return function () { stopped = true; clearTimeout(timer) }
-      }, [onDate, grain, scope])
+      }, [onDate, grain])
 
-      useEffect(function () { setDetailPage(1); setModelPage(1) }, [onDate, grain, scope])
+      useEffect(function () { setDetailPage(1); setModelPage(1) }, [onDate, grain])
 
       var usage = (data && data.usage) || null
       var monthMode = grain === 'month'
       var isAdmin = Boolean(data && ((data.viewer && data.viewer.admin) || data.viewerAdmin))
-      var view = isAdmin ? scope : 'personal'
-      var showKeys = view === 'keys'
-      var isEnt = view === 'enterprise'
       var series = monthMode ? ((usage && usage.monthly) || []) : ((usage && usage.hourly) || [])
       var axis = monthMode ? 'day' : 'hour'
       var rows = dualRows(series, monthMode)
@@ -1036,14 +887,12 @@ window.__ModuleLoader__.load({
       var when = (usage && usage.on) || onDate
       var monthLab = monthLabel((usage && usage.month) || onDate)
       var dayLab = monthMode
-        ? ((isEnt ? '全员 · ' : '') + (monthLab || String(onDate).slice(0, 7)))
+        ? (monthLab || String(onDate).slice(0, 7))
         : ((when === usageTodayYmd() ? '今日 ' + mdLabel(when) : mdLabel(when)))
-      if (isEnt && !monthMode) dayLab = '全员 · ' + dayLab
       var llmModel = (usage && usage.llm && usage.llm.models && usage.llm.models[0] && usage.llm.models[0].model) || '暂无调用'
       var codeModel = (usage && usage.cursor && usage.cursor.models && usage.cursor.models[0] && usage.cursor.models[0].model) || '暂无调用'
       var stamp = monthMode ? (monthLab || '') : when
       var today = (usage && usage.today) || {}
-      var people = (data && data.people) || []
       var msg = err || statusText(data)
 
       return h('div', { className: 'kq-root' },
@@ -1053,16 +902,8 @@ window.__ModuleLoader__.load({
               h('div', { className: 'kq-sticky' },
                 h('div', { className: 'kq-title-row' },
                   h('h2', { className: 'kq-page-title' }, '用量统计'),
-                  isAdmin ? h('table', { className: 'wb-usage-tabs', role: 'tablist' },
-                    h('tbody', null, h('tr', null,
-                      h('td', { className: view === 'personal' ? 'active' : '' },
-                        h('button', { type: 'button', onClick: function () { setScope('personal') } }, '个人用量')),
-                      h('td', { className: view === 'enterprise' ? 'active' : '' },
-                        h('button', { type: 'button', onClick: function () { setScope('enterprise') } }, '企业用量')),
-                    )),
-                  ) : null,
                 ),
-                showKeys ? null : h('div', { className: 'wb-usage-filter' },
+                h('div', { className: 'wb-usage-filter' },
                   h('label', null, monthMode ? '月份' : '日期'),
                   h('input', {
                     type: monthMode ? 'month' : 'date',
@@ -1086,20 +927,13 @@ window.__ModuleLoader__.load({
                       type: 'button',
                       className: 'wb-set-btn',
                       disabled: busy,
-                      onClick: function () { load(onDate, grain, scope) },
+                      onClick: function () { load(onDate, grain) },
                     }, busy ? '刷新中…' : '刷新'),
                     msg ? h('span', { className: 'wb-set-msg' + (err ? ' err' : ' ok') }, msg) : null,
                   ),
                 ),
               ),
-              showKeys ? h('div', { className: 'wb-set-card kq-setup' },
-                h('div', { className: 'body' },
-                  data && data.viewer
-                    ? h(KeyAdmin, { colleagues: data.colleagues || [], keys: data.keys || [], onAdd: addKey, onSave: saveLimit, onDelete: removeKey })
-                    : h('p', null, '请先用平台账号登录。'),
-                ),
-              ) : null,
-              showKeys ? null : h('div', null,
+              h('div', null,
               h('div', { className: 'wb-usage-kpis' },
                 h('div', { className: 'wb-usage-kpi' },
                   h('div', { className: 'k' }, dayLab + ' · LLM'),
@@ -1113,7 +947,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
               h('div', { className: 'wb-set-card' },
-                h('h3', null, monthMode ? (isEnt ? '各日用量（全员）' : '各日用量') : (isEnt ? '各时段用量（全员）' : '各时段用量')),
+                h('h3', null, monthMode ? '各日用量' : '各时段用量'),
                 h('div', { className: 'body' },
                   h('div', { className: 'wb-usage-hour-sub' },
                     (monthMode ? (monthLab + ' 逐日') : (when + ' 00:00–24:00')) +
@@ -1127,14 +961,8 @@ window.__ModuleLoader__.load({
                   h(UsageDualChart, { rows: rows, axis: axis }),
                 ),
               ),
-              meterNode(isEnt ? 'LLM（全员）' : 'LLM', llmModel + (stamp ? ' · ' + stamp : ''), series, 'llm_', LLM_PAL, axis),
-              meterNode(isEnt ? '写码（全员）' : '写码', codeModel + (stamp ? ' · ' + stamp : ''), series, 'cursor_', CODE_PAL, axis),
-              isEnt ? peopleNode(
-                '员工用量（LLM + 写码）',
-                (monthMode ? '按月' : '按日') + ' · ' + (monthMode ? ((usage && usage.month) || String(onDate).slice(0, 7)) : when) +
-                  ' · 按合计 Token 从高到低 · 含全部账号（含管理员）· 共 ' + String(people.length) + ' 人',
-                people,
-              ) : null,
+              meterNode('LLM', llmModel + (stamp ? ' · ' + stamp : ''), series, 'llm_', LLM_PAL, axis),
+              meterNode('写码', codeModel + (stamp ? ' · ' + stamp : ''), series, 'cursor_', CODE_PAL, axis),
               modelTable(usage, isAdmin, data && data.providerKeys, modelPage, setModelPage, modelPageSize, setModelPageSize),
               detailTable(usage, detailPage, setDetailPage, detailPageSize, setDetailPageSize, isAdmin),
               ),

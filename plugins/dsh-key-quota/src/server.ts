@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { syncCursorUsage } from './cursor-ledger.js'
-import { panelUsage, stampKeyTails } from './engine-usage.js'
+import { loadEngineBundle, panelQuery, panelUsage, platformSession, stampKeyTails } from './engine-usage.js'
+import { fetchGatewayPanel } from './gateway-usage.js'
 import { dispatch, isLoopback, type DispatchDeps, type DispatchResult } from './http.js'
 import { keyIdOf, tailOf } from './key-id.js'
 import { readProviderKeyMasks, type ProviderKeyMasks } from './workbuddy-key.js'
@@ -150,6 +151,8 @@ export type QuotaHttpOpts = {
   apiKey: () => string
   clientPanel?: () => Promise<Record<string, unknown>>
   logger?: QuotaLogger
+  /** 解析网关 JWT（ZR_GATEWAY_TOKEN）；有则用量页优先读服务器 */
+  resolveGatewayToken?: (ref: string) => Promise<{ value: string } | undefined>
 }
 
 function headerValue(value: string | string[] | undefined): string {
@@ -161,15 +164,58 @@ async function withUsage(
   result: DispatchResult,
   url: string,
   remoteAddress: string,
-  ledger?: DispatchDeps['ledger'],
+  opts: Pick<QuotaHttpOpts, 'resolveGatewayToken' | 'logger'> & { ledger?: DispatchDeps['ledger'] },
 ): Promise<DispatchResult> {
   const path = url.split('?')[0]
   if (result.status !== 200 || path !== '/v1/local/panel' || !isLoopback(remoteAddress)) return result
   try {
+    const query = panelQuery(url)
+    const session = platformSession()
+    const viewerAdmin = session.viewer?.role === 'admin'
+    // 用量页只展示本人；不再提供企业全员视图
+    const scope = 'personal' as const
+
+    if (opts.resolveGatewayToken) {
+      const gateway = await fetchGatewayPanel({
+        on: query.on,
+        grain: query.grain,
+        scope,
+        viewerAdmin,
+        viewer: session.viewer
+          ? {
+            id: session.viewer.id,
+            username: session.viewer.displayName,
+            displayName: session.viewer.displayName,
+          }
+          : null,
+        resolveToken: opts.resolveGatewayToken,
+      })
+      if (gateway) {
+        const detail = gateway.viewerAdmin && opts.ledger
+          ? stampKeyTails(gateway.usage.detail, opts.ledger.entries())
+          : gateway.usage.detail
+        const providerKeys: ProviderKeyMasks | undefined = gateway.viewerAdmin ? readProviderKeyMasks() : undefined
+        return {
+          status: 200,
+          body: {
+            ...result.body,
+            usage: { ...gateway.usage, detail },
+            people: gateway.people,
+            viewerAdmin: gateway.viewerAdmin,
+            scope: gateway.scope,
+            loaded: gateway.loaded,
+            gatewayError: gateway.gatewayError || '',
+            ...(providerKeys ? { providerKeys } : {}),
+          },
+        }
+      }
+    }
+
+    // 未配置网关时回落本机账本，避免用量页空白
     await syncCursorUsage()
-    const panel = panelUsage(url)
-    const detail = panel.viewerAdmin && ledger
-      ? stampKeyTails(panel.usage.detail, ledger.entries())
+    const panel = panelUsage(url, loadEngineBundle())
+    const detail = panel.viewerAdmin && opts.ledger
+      ? stampKeyTails(panel.usage.detail, opts.ledger.entries())
       : panel.usage.detail
     const providerKeys: ProviderKeyMasks | undefined = panel.viewerAdmin ? readProviderKeyMasks() : undefined
     return {
@@ -181,7 +227,10 @@ async function withUsage(
         usage: { ...panel.usage, detail },
       },
     }
-  } catch {
+  } catch (err) {
+    opts.logger?.warn?.(
+      `key-quota: 用量面板组装失败（${err instanceof Error ? err.message : String(err)}）`,
+    )
     return result
   }
 }
@@ -194,10 +243,15 @@ export async function serveQuota(opts: QuotaHttpOpts, input: {
   body: unknown
 }): Promise<DispatchResult> {
   const path = input.url.split('?')[0]
+  const usageOpts = {
+    resolveGatewayToken: opts.resolveGatewayToken,
+    logger: opts.logger,
+    ledger: opts.deps.ledger,
+  }
   if (opts.deps.role !== 'server') {
     if (input.method === 'GET' && path === '/v1/local/panel' && isLoopback(input.remoteAddress)) {
       const body = opts.clientPanel ? await opts.clientPanel() : { ok: true, self: null, keys: null, canAppoint: false }
-      return await withUsage({ status: 200, body }, input.url, input.remoteAddress, opts.deps.ledger)
+      return await withUsage({ status: 200, body }, input.url, input.remoteAddress, usageOpts)
     }
     return { status: 404, body: { ok: false, error: { code: 'not_found', message: '这台电脑不提供额度账本。' } } }
   }
@@ -212,7 +266,7 @@ export async function serveQuota(opts: QuotaHttpOpts, input: {
   }, {
     ...opts.deps,
     localKeyId: loopback ? (key ? keyIdOf(key) : '') : undefined,
-  }), input.url, input.remoteAddress, opts.deps.ledger)
+  }), input.url, input.remoteAddress, usageOpts)
 }
 
 export const QUOTA_WEB_PREFIX = '/key-quota'

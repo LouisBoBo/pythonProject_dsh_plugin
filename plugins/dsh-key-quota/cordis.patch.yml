@@ -1,5 +1,9 @@
 # 只做 Key 用量限额。默认 client，不监听局域网。
 # 你的电脑改 role: server、listen: 0.0.0.0，并把 quotaBaseUrl 留给同事填写。
+#
+# 不要在这里再写 `- id: llm-pi-ai` 的 retryPolicy：loader 对同 id 的 config
+# 是整段替换，单独补丁会冲掉 zr-gateway 的 models，导致 INVALID_CONFIG。
+# 重试策略由桌面 gateway 再生块 / ensure-llm-retry 写进同一 provider 对象。
 - insert:
     - id: key-quota
       name: '@zhongruan/dsh-key-quota'

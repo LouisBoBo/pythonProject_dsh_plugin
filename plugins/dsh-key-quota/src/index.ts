@@ -14,6 +14,7 @@ import { KeyVault } from './vault.js'
 import { readDeepseekApiKey } from './workbuddy-key.js'
 import { installWebSearchUsageCapture, recordTitleUsage, recordUserUsage, setSideUsageUser } from './side-usage.js'
 import { gateStream, quotaFinishChunk, type GateArgs } from './wrap.js'
+import { ensureGatewayLlmRetry } from './ensure-llm-retry.js'
 
 export { Config } from './config.js'
 export const name = 'key-quota'
@@ -97,6 +98,18 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
   if (!cfg.enabled) return
 
   const logger = ctx.logger
+  try {
+    const patched = ensureGatewayLlmRetry()
+    if (patched.length) {
+      logger?.info?.(
+        `key-quota: 已写入模型自动重试策略（INVALID_REQUEST 等可重试）→ ${patched.join(', ')}`,
+      )
+    }
+  } catch (err) {
+    logger?.warn?.(
+      `key-quota: 写入模型自动重试策略失败（${err instanceof Error ? err.message : String(err)}）`,
+    )
+  }
   const pending = new PendingStore(cfg.dataDir)
   const ledger = new Ledger(cfg.dataDir)
   const vault = new KeyVault(cfg.dataDir)
@@ -109,6 +122,15 @@ export function apply(ctx: Host, config?: QuotaConfig): void {
   const httpOpts: QuotaHttpOpts = {
     logger,
     apiKey: () => readDeepseekApiKey(),
+    resolveGatewayToken: async (ref) => {
+      const cred = resolveCredentialsService(ctx)
+      if (!cred) return undefined
+      try {
+        return await cred.resolve(ref)
+      } catch {
+        return undefined
+      }
+    },
     deps: {
       ledger,
       reportToken,
