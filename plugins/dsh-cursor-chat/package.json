@@ -1,9 +1,9 @@
 {
   "name": "@zhongruan/dsh-cursor-chat",
-  "version": "0.2.2",
-  "description": "对话式多轮写码：任意本地工程；用户原话+截图进 Cursor 多模态，确认后改盘，续改优先 Agent.resume",
+  "version": "0.3.42",
+  "description": "对话式多轮写码：任意本地工程；用户原话+截图进 Cursor 多模态，立刻开工流式改盘，续改优先 Agent.resume",
   "dshMarket": {
-    "zh": "对话写码：任意本地工程像跟 Cursor 聊（可贴图），确认后改代码，同会话可多轮续改",
+    "zh": "对话写码：任意本地工程像跟 Cursor 聊（可贴图），立刻开工流式改代码，同会话可多轮续改",
     "en": "Chat coding for any local workspace: talk like Cursor with images, confirm then edit, multi-turn resume"
   },
   "type": "module",
@@ -47,10 +47,14 @@
     "@deepseek-ai/cordis": "^4.0.2"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-llm": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
       "optional": true
     }
   },

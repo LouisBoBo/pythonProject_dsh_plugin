@@ -18,14 +18,26 @@ async function main(): Promise<void> {
     /* 不要 unref：就是要挂住进程 */
   }
 
+  // 宿主被强杀时不会走 dispose：父进程消失后自杀，避免残留占端口
+  const parentPid = Number(process.env.CURSOR_CHAT_PARENT_PID) || 0
+  let parentWatch: NodeJS.Timeout | undefined
   const shutdown = async () => {
     clearInterval(keepAlive)
+    clearInterval(parentWatch)
     try {
       await stopServerInProcess()
     } catch {
       /* ignore */
     }
     process.exit(0)
+  }
+  if (parentPid > 0) {
+    parentWatch = setInterval(() => {
+      if (process.ppid !== parentPid) {
+        console.warn('[cursor-chat:child] 父进程已退出，停止服务')
+        void shutdown()
+      }
+    }, 2_000)
   }
   process.on('SIGTERM', () => {
     void shutdown()

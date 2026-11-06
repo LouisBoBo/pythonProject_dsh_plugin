@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { CursorCodingConfig } from './types.js'
 
 export const SERVICE_NAME = 'dsh-cursor-chat'
-export const DEFAULT_PORT = 18789
+export const DEFAULT_PORT = 18791
 
 export function defaultDataRoot(): string {
   return join(homedir(), '.zhongruan', 'cursor-chat')

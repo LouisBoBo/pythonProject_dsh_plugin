@@ -74,8 +74,13 @@ export function cardVisiblePhase(opts: {
   resultJobId?: string
   liveJobId?: string
   cancelled?: boolean
+  /** 工具块权威取消/中断（error.code 等），与 React cancelOnce 等价 */
+  toolCancelled?: boolean
+  /** 工具已结算且本卡无 job：重开已停止会话时禁止 form 转圈 */
+  idleSettled?: boolean
 }): string {
-  if (opts.cancelled) return 'done'
+  if (opts.cancelled || opts.toolCancelled) return 'done'
+  if (opts.idleSettled && (opts.phase === 'form' || !String(opts.liveJobId || '').trim())) return 'done'
   const live = String(opts.liveJobId || '').trim()
   const resultJob = String(opts.resultJobId || '').trim()
   const resultMatches = !live || !resultJob || resultJob === live
@@ -86,6 +91,133 @@ export function cardVisiblePhase(opts: {
   )
   if (TERMINAL_JOB_STATUS[auth]) return 'done'
   return opts.phase
+}
+
+/** 与 client.js toolBlockCancelled 对齐：只认权威错误字段 */
+export function toolBlockCancelled(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false
+  const b = block as Record<string, unknown>
+  const err = b.error && typeof b.error === 'object' ? (b.error as Record<string, unknown>) : {}
+  const code = String(err.code || b.code || b.errorCode || '')
+    .trim()
+    .toLowerCase()
+  if (code === 'interrupted' || code === 'cancelled' || code === 'aborted') return true
+  if (b.isError === true) {
+    const name = String(err.name || err.type || '')
+      .trim()
+      .toLowerCase()
+    if (
+      name === 'aborterror' ||
+      name === 'aborted' ||
+      name === 'cancelled' ||
+      name === 'interrupted' ||
+      /^abort/.test(name)
+    ) {
+      return true
+    }
+    const msg = String(err.message || '')
+      .trim()
+      .toLowerCase()
+    if (msg === 'aborted' || msg === 'cancelled' || msg === 'interrupted' || msg === 'tool call aborted') {
+      return true
+    }
+  }
+  return false
+}
+
+/** 宿主 toolview 相位 */
+export function toolViewPhase(props: { phase?: string; block?: unknown } | null | undefined): string {
+  const p = props && props.phase
+  if (p === 'preparing' || p === 'start' || p === 'result') return p
+  const block = props && props.block
+  if (!block || typeof block !== 'object') return ''
+  const b = block as Record<string, unknown>
+  if (b.kind === 'tool-result' || b.kind === 'tool.result') return 'result'
+  if (b.phase === 'preparing' || b.phase === 'start') return String(b.phase)
+  return ''
+}
+
+export type CardBootDecision = {
+  phase: 'form' | 'running' | 'review' | 'done'
+  statusLabel: string
+  sealedStatus: string
+  cancelled: boolean
+}
+
+/**
+ * 进度卡启动相位（纯函数，可单测）。
+ *
+ * 优先级：
+ * 1) aborted → 已停止
+ * 2) 无 job 且已结算 → 已结束
+ * 3) 有未终态 job → 必须 running（展示写码过程），禁止因 RunningStatus 未挂而误封
+ * 4) 无 job 且宿主 turn 已停 → 已停止（历史重开）
+ * 5) 其余按 viewPhase / form
+ */
+export function resolveCardBoot(opts: {
+  viewPhase: string
+  jobId: string
+  jobStatus: string
+  aborted: boolean
+  settled: boolean
+  hostTurnLive: boolean
+}): CardBootDecision {
+  const viewPhase = String(opts.viewPhase || '')
+  const jobId = String(opts.jobId || '').trim()
+  const jobStatus = String(opts.jobStatus || '').trim()
+  const aborted = !!opts.aborted
+  const settled = !!opts.settled
+  const hostLive = !!opts.hostTurnLive
+
+  if (aborted) {
+    return { phase: 'done', statusLabel: '已停止', sealedStatus: 'cancelled', cancelled: true }
+  }
+  if (!jobId && settled) {
+    return { phase: 'done', statusLabel: '已结束', sealedStatus: 'cancelled', cancelled: true }
+  }
+  // 有 job：跟账本状态走。未终态必须 running，否则用户空等只见结论。
+  if (jobId) {
+    if (TERMINAL_JOB_STATUS[jobStatus]) {
+      return {
+        phase: 'done',
+        statusLabel: jobStatus === 'succeeded' ? '已完成' : jobStatus === 'failed' ? '失败' : '已停止',
+        sealedStatus: jobStatus,
+        cancelled: jobStatus === 'cancelled',
+      }
+    }
+    if (jobStatus === 'pending_review') {
+      return { phase: 'review', statusLabel: '待审同步', sealedStatus: '', cancelled: false }
+    }
+    return { phase: 'running', statusLabel: '写码中', sealedStatus: '', cancelled: false }
+  }
+  // 无 job：宿主已停 → 封口；否则 start 显示连接中
+  if (!hostLive) {
+    return { phase: 'done', statusLabel: '已停止', sealedStatus: 'cancelled', cancelled: true }
+  }
+  if (viewPhase === 'start' || viewPhase === 'preparing') {
+    return { phase: 'running', statusLabel: '写码中', sealedStatus: '', cancelled: false }
+  }
+  return { phase: 'form', statusLabel: '', sealedStatus: '', cancelled: false }
+}
+
+/** 是否允许转圈 / 过程区 live chrome */
+export function shouldShowLiveChrome(opts: {
+  visiblePhase: string
+  cancelled: boolean
+  toolCancelled: boolean
+  idleSettled: boolean
+  hostTurnLive: boolean
+  /** 未终态 job 时即使 RunningStatus 未挂也要展示过程 */
+  hasActiveJob?: boolean
+}): boolean {
+  if (opts.cancelled || opts.toolCancelled) return false
+  if (opts.idleSettled) return false
+  if (opts.visiblePhase === 'done') return false
+  if (opts.hasActiveJob && (opts.visiblePhase === 'running' || opts.visiblePhase === 'review' || opts.visiblePhase === 'form')) {
+    return true
+  }
+  if (!opts.hostTurnLive) return false
+  return true
 }
 
 /** 只认工具 JSON 的 job_id / status / done，禁止扫正文。 */
@@ -171,11 +303,8 @@ export function detachStaleJobUi(opts: {
   const uiReq = String(uiRaw.requirement || uiRaw.original_goal || '').trim()
   const live = args || user
 
-  let stale = false
-  if (live && uiReq && requirementsConflict(live, uiReq)) stale = true
-  else if (live && !uiReq) stale = true
-  // 工具仍在跑、结果却带着「已完成」旧 job：只要 live 与 uiReq 冲突已覆盖；
-  // 另：无 live 时无法判断，交给 callId 身份切换硬重置。
+  // 只认「双方都有原文且冲突」才拆。刷新时常丢 ui.requirement，禁止因此拆掉已完成 job。
+  const stale = !!(live && uiReq && requirementsConflict(live, uiReq))
 
   if (!stale) return { ui: uiRaw, stale: false }
 

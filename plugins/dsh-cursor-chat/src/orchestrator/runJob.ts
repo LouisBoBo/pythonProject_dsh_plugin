@@ -522,13 +522,6 @@ async function enterReviewFromDiff(
     compileNote = `编译刷新跳过：${String(e).slice(0, 120)}`
   }
 
-  const j = loadJob(jobId)!
-  const asst = (j.assistant_text || '').trim()
-  const conclusion = asst
-    ? asst.length > 1200
-      ? asst.slice(0, 1200) + '…'
-      : asst
-    : ''
   const critLeft = criticalDeferredFiles(deferredAll)
   const detail =
     `${applied.detail || '已自动同步'}；${compileNote}` +
@@ -540,10 +533,11 @@ async function enterReviewFromDiff(
     '。请自行打开页面确认效果；如需调整请在对话框继续说明。'
   patchJob(jobId, { review_gate: null })
   setStatus(loadJob(jobId)!, 'succeeded', detail)
+  // 禁止把原始 assistant 当【本轮结论】推 SSE：正文只经 formatChatConclusion → chat_conclusion / hoist
   appendEvent(loadJob(jobId)!, {
     type: 'status',
     status: 'succeeded',
-    message: conclusion ? `【本轮结论】\n${conclusion}` : detail,
+    message: detail,
   })
   appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
 }
@@ -584,7 +578,7 @@ async function executeJob(jobId: string): Promise<void> {
       patchJob(jobId, { continue_count: (parent.continue_count || 0) + 1 })
     }
 
-    const meta = prepareSandboxForJob({
+    const meta = await prepareSandboxForJob({
       dataRoot: cfg.dataRoot,
       jobId,
       targetWorkspace: job.workspace,
@@ -595,7 +589,10 @@ async function executeJob(jobId: string): Promise<void> {
         if (j) setStatus(j, 'running', msg)
       },
     })
-    patchJob(jobId, { sandbox_path: meta.sandbox })
+    patchJob(jobId, {
+      sandbox_path: meta.sandbox,
+      sandbox_skipped_files: meta.skipped_files || [],
+    })
     {
       let extra = ''
       if (meta.mode === 'reuse') {
@@ -1145,10 +1142,12 @@ export async function recoverOrphanRunningJobs(): Promise<number> {
     try {
       running.add(job.id)
       setStatus(loadJob(job.id)!, 'running', '写码中断后按已改文件收口…')
+      // 崩溃收口不推断删除：拷贝阶段可能跳过文件，误判会删掉真实工程文件
       const { before } = inferSparseBeforeAfter(
         job.workspace,
         job.sandbox_path,
         job.write_scope || [],
+        false,
       )
       await enterReviewFromDiff(
         job.id,

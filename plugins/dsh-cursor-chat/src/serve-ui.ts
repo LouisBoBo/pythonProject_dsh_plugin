@@ -29,7 +29,7 @@ function loadKey(): string {
 }
 
 async function main() {
-  const port = Number(process.env.CURSOR_CHAT_PORT || 18789)
+  const port = Number(process.env.CURSOR_CHAT_PORT || 18791)
   process.env.CURSOR_CHAT_PORT = String(port)
   // 正式查看台写入默认 ~/.zhongruan/cursor-chat，方便你找 jobs
   delete process.env.CURSOR_CHAT_HOME

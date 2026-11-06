@@ -241,21 +241,40 @@ export function snippetFromTextDiff(before: string, after: string): string | und
     be -= 1
   }
 
+  // Cursor 式 unified：@@ 头 + 上下文夹着 +/-，行号才可读，不致整块裸删/裸增
+  const CTX = 1
+  const ctxLo = Math.max(0, i - CTX)
+  const ctxHiB = Math.min(b.length - 1, be + CTX)
+  const dels = ae >= i ? a.slice(i, ae + 1) : []
+  const adds = be >= i ? b.slice(i, be + 1) : []
+  const beforeCtx = a.slice(ctxLo, i)
+  const afterCtx = b.slice(be + 1, ctxHiB + 1)
+  const oldStart = ctxLo + 1
+  const newStart = ctxLo + 1
+  const oldCount = beforeCtx.length + dels.length + afterCtx.length
+  const newCount = beforeCtx.length + adds.length + afterCtx.length
+
   const out: string[] = []
-  for (let k = i; k <= ae && out.length < SNIPPET_MAX_LINES; k += 1) {
-    out.push('- ' + a[k])
-  }
-  for (let k = i; k <= be && out.length < SNIPPET_MAX_LINES; k += 1) {
-    out.push('+ ' + b[k])
-  }
-  if (!out.length) {
+  out.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`)
+  for (const line of beforeCtx) out.push(' ' + line)
+  for (const line of dels) out.push('-' + (line ? ' ' + line : ''))
+  for (const line of adds) out.push('+' + (line ? ' ' + line : ''))
+  for (const line of afterCtx) out.push(' ' + line)
+
+  if (!dels.length && !adds.length) {
+    out.length = 0
     for (let k = Math.max(0, b.length - SNIPPET_MAX_LINES); k < b.length; k += 1) {
-      out.push('+ ' + b[k])
+      out.push('+' + (b[k] ? ' ' + b[k] : ''))
     }
   }
   if (!out.length) return undefined
   let text = out.join('\n')
-  if (ae - i + 1 + (be - i + 1) > SNIPPET_MAX_LINES) text += '\n…'
+  const bodyLines = out.length - (out[0]?.startsWith('@@') ? 1 : 0)
+  if (bodyLines > SNIPPET_MAX_LINES) {
+    const head = out[0]?.startsWith('@@') ? [out[0]] : []
+    const body = out.slice(head.length, head.length + SNIPPET_MAX_LINES)
+    text = [...head, ...body, '…'].join('\n')
+  }
   if (text.length > SNIPPET_MAX_CHARS) text = text.slice(0, SNIPPET_MAX_CHARS - 1) + '…'
   return text
 }

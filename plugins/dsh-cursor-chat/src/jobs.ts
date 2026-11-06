@@ -66,10 +66,12 @@ function migrateJob(raw: CursorCodingJob): CursorCodingJob {
     last_synced_files: raw.last_synced_files || raw.synced_files || [],
     write_scope: raw.write_scope || [],
     sandbox_path: raw.sandbox_path ?? null,
+    sandbox_skipped_files: raw.sandbox_skipped_files || [],
     agent_id: raw.agent_id ?? null,
     run_id: raw.run_id ?? null,
     continue_count: raw.continue_count ?? 0,
     conclusion_delivered: Boolean(raw.conclusion_delivered),
+    conclusion_at: raw.conclusion_at ?? null,
     assistant_text: raw.assistant_text || '',
     thinking_text: raw.thinking_text || '',
     transcript: Array.isArray(raw.transcript) ? raw.transcript : [],
@@ -93,7 +95,13 @@ export function loadJob(id: string): CursorCodingJob | null {
 
 export function saveJob(job: CursorCodingJob): CursorCodingJob {
   job.updated_at = new Date().toISOString()
-  writeFileSync(jobPath(job.id), JSON.stringify(job, null, 2) + '\n', 'utf8')
+  // 运行中用紧凑 JSON：thinking/tool 高频落盘时 pretty 会拖慢 SSE 体感
+  const pretty = job.status !== 'running' && job.status !== 'queued'
+  writeFileSync(
+    jobPath(job.id),
+    (pretty ? JSON.stringify(job, null, 2) : JSON.stringify(job)) + '\n',
+    'utf8',
+  )
   emitJobChange(job)
   return job
 }
@@ -226,10 +234,12 @@ export function createJob(input: {
     last_synced_files: [],
     write_scope: input.write_scope || [],
     sandbox_path: null,
+    sandbox_skipped_files: [],
     agent_id: null,
     run_id: null,
     continue_count: input.continue_count ?? 0,
     conclusion_delivered: false,
+    conclusion_at: null,
     assistant_text: '',
     thinking_text: '',
     transcript: [],
@@ -293,6 +303,27 @@ export function findLatestJobForSession(opts: {
 /** @deprecated 排查用；续改请用带 session_id 的 findLatestJobForSession */
 export function findLatestSucceeded(workspace: string): CursorCodingJob | null {
   return findLatestJobForSession({ workspace, allowWorkspaceFallback: true })
+}
+
+/** begin 阻塞未返回时，进度卡用 DSH callId 对账本机 Job */
+export function findLatestJobByCallId(callId: string): CursorCodingJob | null {
+  const id = String(callId || '').trim()
+  if (!id) return null
+  return listJobs(40).find((j) => String(j.dsh_call_id || '').trim() === id) || null
+}
+
+/** 按 DSH 会话取最近已交付结论的写码任务（重开会话按轮次挂载；新→旧） */
+export function listConcludedJobsBySessionId(sessionId: string, limit = 20): CursorCodingJob[] {
+  const sid = String(sessionId || '').trim()
+  if (!sid) return []
+  return listJobs(80)
+    .filter(
+      (j) =>
+        String(j.dsh_session_id || '').trim() === sid &&
+        j.conclusion_delivered === true &&
+        (j.status === 'succeeded' || j.status === 'failed' || j.status === 'cancelled'),
+    )
+    .slice(0, Math.max(1, limit))
 }
 
 export function patchJob(id: string, patch: Partial<CursorCodingJob>): CursorCodingJob | null {

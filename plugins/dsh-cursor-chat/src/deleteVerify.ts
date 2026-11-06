@@ -88,7 +88,7 @@ const MENU_PROBE_FILES = [
 ] as const
 
 const RUNTIME_HINT =
-  '【界面刷新】本机源码已写入；若本机 Vite 在跑，已自动软重启前端热更新服务。' +
+  '【界面刷新】本机源码已写入；若本机 Vite 在跑，已触碰文件触发 HMR（不再默认杀进程/npm run dev）。' +
   '请硬刷新浏览器（Cmd+Shift+R）即可看到菜单/路由变化。'
 const BACKEND_HINT =
   '【后端重启】本次改了接口或路由挂载文件。请重启本机后端后再打开页面，' +

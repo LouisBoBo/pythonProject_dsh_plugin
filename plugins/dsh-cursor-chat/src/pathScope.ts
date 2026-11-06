@@ -26,6 +26,8 @@ export const COPY_SKIP_DIR_NAMES = new Set([
   '.cursor',
   'sandboxes',
   'local_dev',
+  // 沙箱内刷新用的临时目录，不能进快照/同步
+  '.cc-tmp',
 ])
 
 const SENSITIVE_BASENAMES = new Set([

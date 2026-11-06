@@ -80,7 +80,8 @@ export function buildPrompt(opts: {
     `- 本机同步目录：${opts.workspaceHint}\n` +
     '- 先摸清再改，沿用仓库现有模式；最小必要改动。\n' +
     '- 禁止 npm run dev/build、npx vite、长驻进程；改完即收工。\n' +
-    '- 像 Cursor IDE 短句推进；终稿第一行恰好是：## 说明方案\n'
+    '- 像 Cursor IDE 短句推进；终稿第一行恰好是：## 说明方案\n' +
+    '- 说明方案须含：**结论**（任务结果一句话）、**做了什么**（改了啥/效果；若排障写清根因与处理）、**验收**（用户怎么验证，3～5 步）、**改动文件**（路径列表）。写给人看，清楚友好。\n'
   )
 }
 
@@ -526,6 +527,44 @@ export async function runCursorLocal(opts: {
   opts.onEvent({ type: 'status', message: '正在启动 Cursor Local，请稍候…' })
   bus.addStatus('正在启动 Cursor Local，请稍候…')
 
+  /** Agent.create/resume 无内置超时；API 挂起时会让 job 永久 running、宿主「深度搜索中」 */
+  const AGENT_BOOT_TIMEOUT_MS = 45_000
+  const withBootTimeout = async <T>(label: string, work: Promise<T>): Promise<T> => {
+    let tick = 0
+    const hb = setInterval(() => {
+      tick += 1
+      opts.onEvent({
+        type: 'status',
+        message: `${label}（已等待 ${tick * 10}s，超时 ${AGENT_BOOT_TIMEOUT_MS / 1000}s）…`,
+      })
+    }, 10_000)
+    let timedOut = false
+    try {
+      return await Promise.race([
+        work,
+        new Promise<T>((_, reject) =>
+          setTimeout(() => {
+            timedOut = true
+            reject(
+              new Error(
+                `${label}超时（>${AGENT_BOOT_TIMEOUT_MS / 1000}s）。请检查网络/代理与 Cursor API Key 后重试。`,
+              ),
+            )
+          }, AGENT_BOOT_TIMEOUT_MS),
+        ),
+      ])
+    } finally {
+      clearInterval(hb)
+      if (timedOut) {
+        // 超时后底层请求可能才成功：晚到的 Agent 必须立即释放，避免孤儿进程
+        void work.then(
+          (late) => disposeAgent(late as Parameters<typeof disposeAgent>[0]),
+          () => {},
+        )
+      }
+    }
+  }
+
   let agent: Awaited<ReturnType<typeof Agent.create>>
   try {
     if (opts.resumeAgentId) {
@@ -533,11 +572,14 @@ export async function runCursorLocal(opts: {
       opts.onEvent({ type: 'status', message: tip })
       bus.addStatus(tip)
       try {
-        agent = await Agent.resume(opts.resumeAgentId, {
-          apiKey: opts.apiKey,
-          model: { id: model },
-          local: { cwd: opts.sandbox },
-        })
+        agent = await withBootTimeout(
+          '续跑 Agent',
+          Agent.resume(opts.resumeAgentId, {
+            apiKey: opts.apiKey,
+            model: { id: model },
+            local: { cwd: opts.sandbox },
+          }),
+        )
       } catch (resumeErr) {
         const rmsg =
           resumeErr instanceof CursorAgentError
@@ -550,18 +592,24 @@ export async function runCursorLocal(opts: {
         const fallbackTip = `父 Agent 不可用，改用新 Agent（沙箱已复用）：${rmsg.slice(0, 120)}`
         opts.onEvent({ type: 'status', message: fallbackTip })
         bus.addStatus(fallbackTip)
-        agent = await Agent.create({
+        agent = await withBootTimeout(
+          '启动 Cursor Local',
+          Agent.create({
+            apiKey: opts.apiKey,
+            model: { id: model },
+            local: { cwd: opts.sandbox },
+          }),
+        )
+      }
+    } else {
+      agent = await withBootTimeout(
+        '启动 Cursor Local',
+        Agent.create({
           apiKey: opts.apiKey,
           model: { id: model },
           local: { cwd: opts.sandbox },
-        })
-      }
-    } else {
-      agent = await Agent.create({
-        apiKey: opts.apiKey,
-        model: { id: model },
-        local: { cwd: opts.sandbox },
-      })
+        }),
+      )
     }
   } catch (err) {
     const msg =

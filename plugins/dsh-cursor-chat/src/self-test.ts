@@ -3,6 +3,7 @@
  * 用法：CURSOR_CHAT_MOCK=1 pnpm build && pnpm self-test
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _resetHitlStoreForTests, consume, issue } from './hitl.js'
@@ -24,6 +25,10 @@ import {
   requirementsConflict,
   shouldApplyJobSnapshot,
   sseMayForceRunning,
+  toolBlockCancelled,
+  resolveCardBoot,
+  shouldShowLiveChrome,
+  toolViewPhase,
 } from './cardBootstrap.js'
 import { buildLiveEditSnippet, previewFileSnippet } from './editSnippet.js'
 import {
@@ -40,7 +45,17 @@ import {
   snippetFromTextDiff,
   normalizeStatusDisplay,
 } from './transcript.js'
-import { appendEvent, createJob, findLatestJobForSession, jobCardView, loadJob, onJobChange, patchJob, setStatus } from './jobs.js'
+import {
+  appendEvent,
+  createJob,
+  findLatestJobByCallId,
+  findLatestJobForSession,
+  jobCardView,
+  loadJob,
+  onJobChange,
+  patchJob,
+  setStatus,
+} from './jobs.js'
 import {
   hasClarifyEvidence,
   looksLikeAddOrDeletePageMenu,
@@ -53,6 +68,7 @@ import {
   selectCompanionPromotions,
 } from './scopeCompanions.js'
 import { formatChatConclusion } from './conclusion.js'
+import { cardFileNames, pickConclusionForCard } from './conclusionAnchor.js'
 import { compactParentHandoff } from './sessionMemory.js'
 import { startServer, stopServer, getListenAddr } from './server.js'
 import { checkCompat, satisfiesRange } from './compat.js'
@@ -334,6 +350,73 @@ async function main() {
     console.log('ok: page/menu clarify gate + conclusion_delivered')
   }
 
+  // 结论只挂到对得上的那张「已编辑」卡，不能因单个公共文件贴到别的任务上
+  {
+    const cardText = [
+      '已编辑 5 个文件',
+      'backend/app/routers/reports.py',
+      'backend/app/schemas.py',
+      'frontend/src/api/reports/equipmentDowntime.js',
+      'frontend/src/config/reportFeatures.js',
+    ].join('\n')
+    const names = cardFileNames(cardText)
+    assert(names.includes('reports.py') && names.includes('equipmentdowntime.js'), '改动卡应抽出文件名')
+    const newer = {
+      id: 'cch-delete',
+      updated_at: '2026-11-06T08:45:19.880Z',
+      chat_conclusion: '## 本轮结论\n\n结果：✅ 已完成。已删除停机报表\n',
+      synced_files: [
+        'frontend/src/config/reportFeatures.js',
+        'backend/app/schemas.py',
+        'backend/app/routers/reports.py',
+      ],
+      deleted_files: [
+        'frontend/src/views/reports/EquipmentDowntimeReportView.vue',
+        'frontend/src/api/reports/equipmentDowntime.js',
+      ],
+    }
+    const sharedOne = {
+      id: 'cch-other',
+      updated_at: '2026-11-06T07:37:00.000Z',
+      chat_conclusion: '## 本轮结论\n\n结果：✅ 已完成。另一份\n',
+      synced_files: ['frontend/src/config/reportFeatures.js'],
+      deleted_files: [] as string[],
+    }
+    const picked = pickConclusionForCard([sharedOne, newer], names)
+    assert(picked?.id === 'cch-delete', '多文件卡不得按单个公共文件挂旧结论')
+    assert(pickConclusionForCard([sharedOne], names) === null, '只重合 1 个文件时不挂')
+    const clientSrc = readFileSync(
+      fileURLToPath(new URL('../src/client.js', import.meta.url)),
+      'utf8',
+    )
+    const start = clientSrc.indexOf('function fileBasename(')
+    const end = clientSrc.indexOf('function findEditedCardIn(')
+    assert(start > 0 && end > start, 'client 应内联同一套对卡函数')
+    const clientFns = new Function(
+      `${clientSrc.slice(start, end)}\nreturn { cardFileNames, pickConclusionForCard }`,
+    )() as {
+      cardFileNames: (t: string) => string[]
+      pickConclusionForCard: typeof pickConclusionForCard
+    }
+    const fromClient = clientFns.pickConclusionForCard([sharedOne, newer], clientFns.cardFileNames(cardText))
+    assert(fromClient?.id === 'cch-delete', 'client 对卡结果须与 conclusionAnchor 一致')
+    assert(
+      clientSrc.includes('工具卡收在「已调用工具」里'),
+      '工具卡路径不得再插正文',
+    )
+    assert(
+      /function installGlobalConclusionPublisher\(\) \{[\s\S]{0,500}?return/.test(clientSrc),
+      '不得再改宿主对话 DOM，否则其它会话正文会被掏空',
+    )
+    assert(clientSrc.includes("conversation.chat.turnTail"), '结论须挂 turnTail')
+    assert(
+      /name: 'conversation\.chat\.turnTail'[\s\S]{0,200}?select:/.test(clientSrc),
+      'turnTail 注册须带 select，兼容 chain 版宿主（list 版忽略）',
+    )
+    assert(clientSrc.includes('session-conclusion?session_id='), 'turnTail 须按 session 取结论')
+    console.log('ok: conclusion anchors to changed-files card')
+  }
+
   // 进度卡代码片断：从写码工具 args 抽取、限行、敏感路径跳过
   {
     const sn = toolSnippetFromArgs(
@@ -415,10 +498,17 @@ async function main() {
       setStatus(loadJob(ended.id)!, 'succeeded', '已同步 1 个文件')
       const body = formatChatConclusion(loadJob(ended.id)!)
       assert(body.indexOf('## 本轮结论') === 0, '正文须以本轮结论开头')
-      assert(body.indexOf('## 说明方案') >= 0 && body.indexOf('已改菜单') >= 0, '须带上说明方案')
+      assert(body.indexOf('结果：') >= 0, '须含结果段')
+      assert(body.indexOf('改动：') >= 0, '须含改动段')
+      assert(body.indexOf('验收：') >= 0, '须含验收段')
+      assert(body.indexOf('改动文件：') < 0, '路径清单交给底座「已编辑 N 个文件」卡片，正文不再重复')
+      assert(body.indexOf('### 2. 做了什么') < 0, '旧标题不得再出现')
+      assert((body.match(/##\s*本轮结论/g) || []).length === 1, '正文只能有一份本轮结论')
+      assert(body.indexOf('已改菜单') >= 0, '须带上说明方案要点')
     }
     const live = snippetFromTextDiff('const a = 1\n', 'const a = 2\nconst b = 3\n')
     assert(live && live.includes('- const a = 1') && live.includes('+ const a = 2'), '沙箱 diff 片断应含 +/-')
+    assert(live && live.includes('@@'), 'diff 片断应含 @@ 头以便行号')
     console.log('ok: progress tool snippets')
   }
 
@@ -485,6 +575,12 @@ async function main() {
       argsMessage: '报表中心菜单新增设备点检报表 澄清结论',
     })
     assert(same.stale === false, '同诉求刷新不应误拆')
+    const missingReq = detachStaleJobUi({
+      ui: { job_id: oldUi.job_id, status: 'succeeded', kind: 'live' },
+      argsMessage: '报表中心菜单新增设备点检报表\n澄清结论…',
+    })
+    assert(missingReq.stale === false, '刷新丢 ui.requirement 不得拆已完成 job')
+    assert(String(missingReq.ui.job_id || '') === oldUi.job_id, '应保留 job_id 以便恢复 Diff/结论')
     assert(requirementsConflict('设备点检报表', '设备维修报表'), '点检/维修须冲突')
     assert(
       cardIdentity({ callId: 'call-new' }) !== cardIdentity({ callId: 'call-old' }),
@@ -548,6 +644,140 @@ async function main() {
           liveJobId: 'cch-live',
         }) === 'done',
         '本卡工具终态须停转圈',
+      )
+      assert(
+        cardVisiblePhase({ phase: 'form', toolCancelled: true }) === 'done',
+        '已停止/aborted 不得停留 form 转圈',
+      )
+      assert(
+        cardVisiblePhase({ phase: 'form', idleSettled: true }) === 'done',
+        '无 job 的已结算 begin 不得开工转圈',
+      )
+      assert(toolBlockCancelled({ error: { code: 'aborted' } }) === true, '须认 error.code=aborted')
+      assert(
+        toolBlockCancelled({ isError: true, error: { message: 'tool call aborted' } }) === true,
+        '须认宿主停止产生的 aborted 消息',
+      )
+      assert(toolBlockCancelled({ isError: true, error: {} }) === false, '仅 isError 无 aborted 字段不得当取消')
+      assert(
+        toolBlockCancelled({ result: { detail: '用户说取消' } }) === false,
+        '禁止扫结果正文当取消',
+      )
+      // —— 截图复现：已停止重开仍「正在开工/连接」——
+      {
+        const stoppedBoot = resolveCardBoot({
+          viewPhase: 'start',
+          jobId: '',
+          jobStatus: '',
+          aborted: false,
+          settled: false,
+          hostTurnLive: false,
+        })
+        assert(stoppedBoot.phase === 'done' && stoppedBoot.statusLabel === '已停止', '已停止+start 须封口')
+        assert(
+          shouldShowLiveChrome({
+            visiblePhase: stoppedBoot.phase,
+            cancelled: stoppedBoot.cancelled,
+            toolCancelled: false,
+            idleSettled: false,
+            hostTurnLive: false,
+          }) === false,
+          '已停止禁止转圈',
+        )
+      }
+      {
+        const formStopped = resolveCardBoot({
+          viewPhase: '',
+          jobId: '',
+          jobStatus: '',
+          aborted: false,
+          settled: false,
+          hostTurnLive: false,
+        })
+        assert(formStopped.phase === 'done', '已停止+空相位也须封口（禁止 form 开工）')
+        assert(
+          shouldShowLiveChrome({
+            visiblePhase: 'form',
+            cancelled: false,
+            toolCancelled: false,
+            idleSettled: false,
+            hostTurnLive: false,
+          }) === false,
+          'host 未 live 时 form 也不得转圈',
+        )
+      }
+      {
+        const withJobLive = resolveCardBoot({
+          viewPhase: 'result',
+          jobId: 'cch-x',
+          jobStatus: 'running',
+          aborted: false,
+          settled: true,
+          hostTurnLive: false,
+        })
+        assert(
+          withJobLive.phase === 'running' && withJobLive.statusLabel === '写码中',
+          '未终态 job 即使 host 未 live 也必须 running（禁止空等只出结论）',
+        )
+        assert(
+          shouldShowLiveChrome({
+            visiblePhase: 'running',
+            cancelled: false,
+            toolCancelled: false,
+            idleSettled: false,
+            hostTurnLive: false,
+            hasActiveJob: true,
+          }) === true,
+          '未终态 job 必须展示过程 chrome',
+        )
+      }
+      {
+        const jobDoneStopped = resolveCardBoot({
+          viewPhase: 'result',
+          jobId: 'cch-x',
+          jobStatus: 'succeeded',
+          aborted: false,
+          settled: true,
+          hostTurnLive: false,
+        })
+        assert(jobDoneStopped.phase === 'done' && jobDoneStopped.statusLabel === '已完成', '终态 job 显示已完成')
+      }
+      {
+        const liveStart = resolveCardBoot({
+          viewPhase: 'start',
+          jobId: '',
+          jobStatus: '',
+          aborted: false,
+          settled: false,
+          hostTurnLive: true,
+        })
+        assert(liveStart.phase === 'running', 'live start 允许 running')
+        assert(
+          shouldShowLiveChrome({
+            visiblePhase: 'running',
+            cancelled: false,
+            toolCancelled: false,
+            idleSettled: false,
+            hostTurnLive: true,
+          }) === true,
+          'live running 允许转圈',
+        )
+      }
+      {
+        const abortedBoot = resolveCardBoot({
+          viewPhase: 'result',
+          jobId: '',
+          jobStatus: '',
+          aborted: true,
+          settled: true,
+          hostTurnLive: true,
+        })
+        assert(abortedBoot.phase === 'done' && abortedBoot.cancelled, 'aborted 须封口')
+      }
+      assert(toolViewPhase({ phase: 'start', block: {} }) === 'start', '须读 props.phase')
+      assert(
+        toolViewPhase({ block: { phase: 'preparing' } }) === 'preparing',
+        '须读 block.phase',
       )
       {
         let seen = ''
@@ -775,6 +1005,42 @@ async function main() {
       assert(handoff.includes('parent=' + jb.id), 'handoff 须带 parent id')
       assert(handoff.includes('会话B'), 'handoff 须带上次诉求')
       console.log('ok: session-scoped job memory')
+    }
+
+    // begin 阻塞：call_id → jobs-by-call 对账
+    {
+      const wsCall = workspace + '-by-call'
+      mkdirSync(wsCall, { recursive: true })
+      const jc = createJob({
+        workspace: wsCall,
+        requirement: '停机报表',
+        dsh_call_id: 'call-block-1',
+      })
+      setStatus(jc, 'running', '写码中')
+      const hit = findLatestJobByCallId('call-block-1')
+      assert(hit && hit.id === jc.id, 'findLatestJobByCallId 应对上 running job')
+      assert(!findLatestJobByCallId('call-missing'), '未知 call_id 应空')
+      const resCall = await fetch(
+        base + '/api/cursor-chat/jobs-by-call?call_id=' + encodeURIComponent('call-block-1'),
+      )
+      const bodyCall = (await resCall.json()) as {
+        ok?: boolean
+        found?: boolean
+        job_id?: string
+        status?: string
+        stream?: string
+      }
+      assert(resCall.status === 200 && bodyCall.ok && bodyCall.found, 'jobs-by-call 应 200 found')
+      assert(bodyCall.job_id === jc.id, 'jobs-by-call 应对上 job_id')
+      assert(bodyCall.status === 'running', 'jobs-by-call 应带回 running')
+      assert(
+        String(bodyCall.stream || '').includes('/stream'),
+        'jobs-by-call 应带回 stream 路径',
+      )
+      const resMiss = await fetch(base + '/api/cursor-chat/jobs-by-call?call_id=nope')
+      const bodyMiss = (await resMiss.json()) as { found?: boolean }
+      assert(resMiss.status === 200 && bodyMiss.found === false, '未知 call 应 found:false')
+      console.log('ok: jobs-by-call for blocking begin')
     }
 
     // 非本机 Origin：403
@@ -1091,7 +1357,7 @@ async function main() {
         writeFileSync(join(sparseWs, 'README.md'), '# t\n', 'utf8')
         writeFileSync(join(sparseWs, 'src', 'a.ts'), 'export const a = 1\n', 'utf8')
         writeFileSync(join(sparseWs, 'src', 'b.ts'), 'export const b = 2\n', 'utf8')
-        const meta = prepareSandboxSparse(home, 'cch-sparse-thicken', sparseWs, ['src/a.ts'])
+        const meta = await prepareSandboxSparse(home, 'cch-sparse-thicken', sparseWs, ['src/a.ts'])
         assert(meta.mode === 'sparse', '应为 sparse')
         assert(existsSync(join(meta.sandbox, 'src/a.ts')), '写范围文件应存在')
         assert(existsSync(join(meta.sandbox, 'package.json')), '应拷入根锚点 package.json')
@@ -1119,10 +1385,10 @@ async function main() {
         mkdirSync(join(reuseWs, 'src'), { recursive: true })
         writeFileSync(join(reuseWs, 'package.json'), '{"name":"reuse"}\n', 'utf8')
         writeFileSync(join(reuseWs, 'src', 'a.ts'), 'export const a = 1\n', 'utf8')
-        const parentMeta = prepareSandboxSparse(parentHome, 'cch-parent-sb', reuseWs, ['src/a.ts'])
+        const parentMeta = await prepareSandboxSparse(parentHome, 'cch-parent-sb', reuseWs, ['src/a.ts'])
         writeFileSync(join(parentMeta.sandbox, 'src', 'only-in-parent.ts'), 'parent-only\n', 'utf8')
         writeFileSync(join(reuseWs, 'src', 'a.ts'), 'export const a = 2\n', 'utf8') // 真工程已更新
-        const child = prepareSandboxReuse(
+        const child = await prepareSandboxReuse(
           parentHome,
           'cch-child-reuse',
           reuseWs,
@@ -1138,7 +1404,7 @@ async function main() {
           readFileSync(join(child.sandbox, 'src/a.ts'), 'utf8').includes('a = 2'),
           '写范围文件应从真工程刷新',
         )
-        const disabled = prepareSandboxForJob({
+        const disabled = await prepareSandboxForJob({
           dataRoot: parentHome,
           jobId: 'cch-child-noreuse',
           targetWorkspace: reuseWs,
@@ -1148,7 +1414,7 @@ async function main() {
         })
         // 默认开启时仍是 reuse；临时关开关测回退
         process.env.CURSOR_CHAT_REUSE_PARENT = '0'
-        const fallback = prepareSandboxForJob({
+        const fallback = await prepareSandboxForJob({
           dataRoot: parentHome,
           jobId: 'cch-child-fallback',
           targetWorkspace: reuseWs,

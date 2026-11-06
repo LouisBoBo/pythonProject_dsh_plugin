@@ -75,6 +75,18 @@ export function auditDeleteTarget(
     return { skip_cursor: false, delivery: '', checks: [], feature: '', reason: 'feature_unresolved' }
   }
 
+  // 未知功能没有专属探针文件：默认探针全是质量模块文件，读它们“没命中”不能证明目标已删除
+  const unknown = features.filter((f) => (FEATURE_ORPHAN_FILES[f] || []).length === 0)
+  if (unknown.length) {
+    return {
+      skip_cursor: false,
+      delivery: '',
+      checks: [],
+      feature,
+      reason: `feature_unknown:${unknown.join('、')}`,
+    }
+  }
+
   const checks: { kind: string; path: string; detail: string }[] = []
   let probesRead = 0
 

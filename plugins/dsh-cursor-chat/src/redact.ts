@@ -19,7 +19,7 @@ const STRIP_KEYS = new Set<string>(['stream_token', 'cursor_api_key', 'bearer_to
 
 const EVENT_TEXT_KEYS = [
   'text', 'detail', 'message', 'title', 'reply', 'error',
-  'assistant_text', 'thinking_text', 'delivery_text',
+  'assistant_text', 'thinking_text', 'delivery_text', 'chat_conclusion',
   'current_action', 'runtime_hint', 'requirement', 'progress',
 ] as const
 

@@ -1,10 +1,18 @@
 /**
  * 沙箱：受限拷贝、快照 diff、同步回真工程（改编自 WorkBuddy sandbox/fs_snapshot）。
+ *
+ * 拷贝必须异步：Desktop/iCloud 等慢盘上 copyFileSync 会堵死事件循环，
+ * HTTP/SSE 与宿主工具全部假死（表现为聊天「深度搜索中」数分钟无输出）。
  */
 import {
+  closeSync,
+  constants as fsConstants,
   copyFileSync,
+  createReadStream,
+  createWriteStream,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -20,6 +28,8 @@ export const MAX_FILE_BYTES = 2 * 1024 * 1024
 export const COPY_MAX_FILES = 4000
 export const COPY_MAX_TOTAL_BYTES = 80 * 1024 * 1024
 export const MAX_TOTAL_WRITE_BYTES = 40 * 1024 * 1024
+/** 单文件拷贝超时（毫秒）；超时跳过该文件，避免整 job 卡死 */
+export const COPY_FILE_TIMEOUT_MS = 8_000
 
 /** 稀疏沙箱：只读上下文锚点（不扩大 write_scope / 同步权限） */
 export const SPARSE_CONTEXT_ANCHORS = [
@@ -68,6 +78,8 @@ export type PrepareResult = {
   refreshed_files?: number
   /** reuse：父沙箱路径（审计） */
   reused_from?: string
+  /** 拷贝超时/失败而未进入沙箱的文件（相对路径） */
+  skipped_files?: string[]
 }
 
 function safeJobDirName(jobId: string): string {
@@ -110,7 +122,65 @@ function walkFiles(root: string): string[] {
   return out
 }
 
-function copyOneFile(src: string, dest: string, totalBytes: number): { ok: boolean; total: number } {
+function yieldEventLoop(): Promise<void> {
+  return new Promise((r) => setImmediate(r))
+}
+
+/**
+ * 流式拷贝 + 超时销毁流：不阻塞主线程；慢盘/云盘文件超时后跳过。
+ * 导出供自测：可用 FIFO 验证超时不会堵死事件循环。
+ */
+export function copyFileStreaming(src: string, dest: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const rs = createReadStream(src)
+    const ws = createWriteStream(dest)
+    let settled = false
+    const fail = (err: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        rs.destroy()
+      } catch {
+        /* ignore */
+      }
+      try {
+        ws.destroy()
+      } catch {
+        /* ignore */
+      }
+      // FIFO：destroy 后读端仍可能挂住 UV handle，非阻塞打开写端唤醒
+      try {
+        const fd = openSync(src, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK)
+        closeSync(fd)
+      } catch {
+        /* ignore — 普通文件无此必要 */
+      }
+      try {
+        if (existsSync(dest)) unlinkSync(dest)
+      } catch {
+        /* ignore */
+      }
+      reject(err)
+    }
+    const timer = setTimeout(() => fail(new Error(`copy timeout ${timeoutMs}ms`)), timeoutMs)
+    rs.on('error', (e) => fail(e instanceof Error ? e : new Error(String(e))))
+    ws.on('error', (e) => fail(e instanceof Error ? e : new Error(String(e))))
+    ws.on('finish', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolvePromise()
+    })
+    rs.pipe(ws)
+  })
+}
+
+async function copyOneFileAsync(
+  src: string,
+  dest: string,
+  totalBytes: number,
+): Promise<{ ok: boolean; total: number; skipped?: string }> {
   let st
   try {
     st = statSync(src)
@@ -123,10 +193,16 @@ function copyOneFile(src: string, dest: string, totalBytes: number): { ok: boole
   }
   mkdirSync(dirname(dest), { recursive: true })
   try {
-    copyFileSync(src, dest)
-  } catch {
-    return { ok: false, total: totalBytes }
+    await copyFileStreaming(src, dest, COPY_FILE_TIMEOUT_MS)
+  } catch (err) {
+    try {
+      if (existsSync(dest)) unlinkSync(dest)
+    } catch {
+      /* ignore */
+    }
+    return { ok: false, total: totalBytes, skipped: String(err).slice(0, 120) }
   }
+  await yieldEventLoop()
   return { ok: true, total: totalBytes + st.size }
 }
 
@@ -140,12 +216,12 @@ function clearDir(root: string): void {
   }
 }
 
-export function prepareSandboxCopy(
+export async function prepareSandboxCopy(
   dataRoot: string,
   jobId: string,
   targetWorkspace: string,
   onProgress?: (msg: string) => void,
-): PrepareResult {
+): Promise<PrepareResult> {
   const target = resolve(targetWorkspace)
   if (!existsSync(target) || !statSync(target).isDirectory()) {
     throw new Error('目标工程目录无效')
@@ -154,19 +230,39 @@ export function prepareSandboxCopy(
   clearDir(root)
   onProgress?.('正在将目标工程受限拷贝到沙箱…')
   let copied = 0
+  let skipped = 0
+  const skippedFiles: string[] = []
   let totalBytes = 0
-  for (const rel of walkFiles(target)) {
+  const rels = walkFiles(target)
+  for (let i = 0; i < rels.length; i++) {
+    const rel = rels[i]!
     if (copied >= COPY_MAX_FILES) {
       throw new Error(`工程文件过多（>${COPY_MAX_FILES}），请缩小目录或配置 write_scope 稀疏拷贝`)
     }
-    const r = copyOneFile(join(target, rel), join(root, rel), totalBytes)
+    const r = await copyOneFileAsync(join(target, rel), join(root, rel), totalBytes)
     if (r.ok) {
       copied += 1
       totalBytes = r.total
+    } else if (r.skipped) {
+      skipped += 1
+      skippedFiles.push(rel)
+    }
+    if (i > 0 && i % 20 === 0) {
+      onProgress?.(`沙箱拷贝中… ${copied}/${rels.length} 文件` + (skipped ? `（跳过 ${skipped}）` : ''))
     }
   }
-  onProgress?.(`沙箱拷贝完成：${copied} 个文件`)
-  return { sandbox: root, copied_files: copied, mode: 'copy', total_bytes: totalBytes }
+  onProgress?.(
+    skipped
+      ? `沙箱拷贝完成：${copied} 个文件（跳过超时/失败 ${skipped}）`
+      : `沙箱拷贝完成：${copied} 个文件`,
+  )
+  return {
+    sandbox: root,
+    copied_files: copied,
+    mode: 'copy',
+    total_bytes: totalBytes,
+    skipped_files: skippedFiles,
+  }
 }
 
 /**
@@ -234,13 +330,13 @@ export function collectSparseContextRels(targetWorkspace: string, scopePlanned: 
   return extra
 }
 
-export function prepareSandboxSparse(
+export async function prepareSandboxSparse(
   dataRoot: string,
   jobId: string,
   targetWorkspace: string,
   includeRels: string[],
   onProgress?: (msg: string) => void,
-): PrepareResult {
+): Promise<PrepareResult> {
   const target = resolve(targetWorkspace)
   const root = sandboxRoot(dataRoot, jobId)
   clearDir(root)
@@ -261,22 +357,34 @@ export function prepareSandboxSparse(
     }
   }
   const context = collectSparseContextRels(target, planned)
-  const toCopy = new Set<string>([...planned, ...context])
+  const toCopy = [...new Set<string>([...planned, ...context])]
   let copied = 0
+  let skipped = 0
+  const skippedFiles: string[] = []
   let totalBytes = 0
-  for (const rel of toCopy) {
-    const r = copyOneFile(join(target, rel), join(root, rel), totalBytes)
+  for (let i = 0; i < toCopy.length; i++) {
+    const rel = toCopy[i]!
+    const r = await copyOneFileAsync(join(target, rel), join(root, rel), totalBytes)
     if (r.ok) {
       copied += 1
       totalBytes = r.total
+    } else if (r.skipped) {
+      skipped += 1
+      skippedFiles.push(rel)
+    }
+    if (i > 0 && i % 10 === 0) {
+      onProgress?.(
+        `稀疏拷贝中… ${i + 1}/${toCopy.length}` + (skipped ? `（跳过超时 ${skipped}）` : ''),
+      )
     }
   }
   const scopeFiles = [...planned].filter((rel) => existsSync(join(root, rel))).length
   const contextFiles = Math.max(0, copied - scopeFiles)
+  const skipNote = skipped ? `；跳过超时/失败 ${skipped}` : ''
   onProgress?.(
     contextFiles > 0
-      ? `稀疏沙箱就绪：${copied} 个文件（写范围 ${scopeFiles} + 只读上下文 ${contextFiles}）`
-      : `稀疏沙箱就绪：${copied} 个文件`,
+      ? `稀疏沙箱就绪：${copied} 个文件（写范围 ${scopeFiles} + 只读上下文 ${contextFiles}${skipNote}）`
+      : `稀疏沙箱就绪：${copied} 个文件${skipNote}`,
   )
   return {
     sandbox: root,
@@ -285,16 +393,17 @@ export function prepareSandboxSparse(
     total_bytes: totalBytes,
     scope_files: scopeFiles,
     context_files: contextFiles,
+    skipped_files: skippedFiles,
   }
 }
 
-export function prepareSandbox(
+export async function prepareSandbox(
   dataRoot: string,
   jobId: string,
   targetWorkspace: string,
   writeScope: string[],
   onProgress?: (msg: string) => void,
-): PrepareResult {
+): Promise<PrepareResult> {
   if (writeScope.length) {
     return prepareSandboxSparse(dataRoot, jobId, targetWorkspace, writeScope, onProgress)
   }
@@ -344,14 +453,14 @@ function planScopeRels(target: string, includeRels: string[]): Set<string> {
  * 复用父 Job 沙箱：克隆父目录 → 用真工程写范围(+只读上下文)增量覆盖。
  * 同步权限仍只认 write_scope；失败应由调用方回退 prepareSandbox。
  */
-export function prepareSandboxReuse(
+export async function prepareSandboxReuse(
   dataRoot: string,
   jobId: string,
   targetWorkspace: string,
   writeScope: string[],
   parentSandbox: string,
   onProgress?: (msg: string) => void,
-): PrepareResult {
+): Promise<PrepareResult> {
   const parent = resolve(parentSandbox)
   if (!canReuseParentSandbox(parent)) {
     throw new Error('父沙箱不可用')
@@ -373,7 +482,7 @@ export function prepareSandboxReuse(
     if (parentFiles >= COPY_MAX_FILES) {
       throw new Error(`父沙箱文件过多（>${COPY_MAX_FILES}），放弃复用`)
     }
-    const r = copyOneFile(join(parent, rel), join(root, rel), totalBytes)
+    const r = await copyOneFileAsync(join(parent, rel), join(root, rel), totalBytes)
     if (r.ok) {
       parentFiles += 1
       totalBytes = r.total
@@ -386,16 +495,24 @@ export function prepareSandboxReuse(
     : new Set<string>() // 空 scope：仅克隆父沙箱，不强制全量刷新
   const context = writeScope.length ? collectSparseContextRels(target, planned) : new Set<string>()
   let refreshed = 0
+  let refreshBytes = 0
   for (const rel of new Set<string>([...planned, ...context])) {
     const src = join(target, rel)
     if (!existsSync(src) || !statSync(src).isFile()) continue
-    // 覆盖拷贝：忽略当前 total 上限检查中「已有体积」——用 copyOneFile 需重置策略
     try {
       const st = statSync(src)
       if (st.size > MAX_FILE_BYTES) continue
-      mkdirSync(dirname(join(root, rel)), { recursive: true })
-      copyFileSync(src, join(root, rel))
-      refreshed += 1
+      const dest = join(root, rel)
+      // 先写临时文件再改名：刷新超时不能把父沙箱已克隆的同名文件删掉
+      const tmp = join(root, '.cc-tmp', rel + '.refresh')
+      mkdirSync(dirname(dest), { recursive: true })
+      mkdirSync(dirname(tmp), { recursive: true })
+      const r = await copyOneFileAsync(src, tmp, refreshBytes)
+      if (r.ok) {
+        renameSync(tmp, dest)
+        refreshBytes = r.total
+        refreshed += 1
+      }
     } catch {
       /* skip one */
     }
@@ -425,18 +542,18 @@ export function prepareSandboxReuse(
 /**
  * 续改优先复用父沙箱；开关关闭 / 父不可用 / 复用抛错 → 回退新建。
  */
-export function prepareSandboxForJob(opts: {
+export async function prepareSandboxForJob(opts: {
   dataRoot: string
   jobId: string
   targetWorkspace: string
   writeScope: string[]
   parentSandbox?: string | null
   onProgress?: (msg: string) => void
-}): PrepareResult {
+}): Promise<PrepareResult> {
   const { dataRoot, jobId, targetWorkspace, writeScope, parentSandbox, onProgress } = opts
   if (isReuseParentSandboxEnabled() && canReuseParentSandbox(parentSandbox)) {
     try {
-      return prepareSandboxReuse(
+      return await prepareSandboxReuse(
         dataRoot,
         jobId,
         targetWorkspace,
@@ -505,13 +622,18 @@ export function snapshotScope(root: string, scope: string[]): Map<string, string
 }
 
 /**
- * 进程崩溃后无法拿到开工前快照时：用稀疏沙箱现存文件 + 同目录真工程文件推断 before。
- * 只把「沙箱里已经有过该目录」的缺失文件当删除，避免把未拷进沙箱的写范围整目录删掉。
+ * 进程崩溃后无法拿到开工前快照时：用沙箱现存文件推断 before。
+ * 只认「沙箱里现在有的文件」：被删掉的文件没有可信证据。
+ *
+ * 不能按「同目录真工程有、沙箱里没有」推断删除：拷贝阶段会跳过超时或超大文件，
+ * 这些文件从未进过沙箱，崩溃收口时会被误判为删除并自动 unlink 真实工程文件。
+ * allowInferredDeletes 仅保留给单测/显式调用，正常收口一律传 false。
  */
 export function inferSparseBeforeAfter(
   workspace: string,
   sandbox: string,
   writeScope: string[],
+  allowInferredDeletes = true,
 ): { before: Map<string, string>; after: Map<string, string> } {
   const after = snapshotSandbox(sandbox)
   const before = new Map<string, string>()
@@ -525,6 +647,7 @@ export function inferSparseBeforeAfter(
       before.set(rel, '__absent__')
     }
   }
+  if (!allowInferredDeletes) return { before, after }
   const sandboxParents = new Set<string>()
   for (const rel of after.keys()) {
     const d = dirname(rel).replace(/\\/g, '/')

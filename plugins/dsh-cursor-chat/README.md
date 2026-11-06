@@ -8,7 +8,7 @@
 |--|--------|------------|
 | 包名 | `@zhongruan/dsh-cursor-chat` | `@zhongruan/dsh-cursor-coding` |
 | 工具 | `zr_cchat_*` | `zr_cursor_*` |
-| 端口 | `18789` | `18788` |
+| 端口 | `18791` | `18788` |
 | 数据 | `~/.zhongruan/cursor-chat` | `~/.zhongruan/cursor-coding` |
 | Cordis id | `cursor-chat` | `cursor-coding` |
 

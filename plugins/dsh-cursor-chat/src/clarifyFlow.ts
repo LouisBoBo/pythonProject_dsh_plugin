@@ -1,18 +1,18 @@
 /**
- * Cursor 对话写码：澄清 → 确认卡 的唯一规则（禁止在 WorkBuddy / 提示词里再抄一套）。
+ * Cursor 对话写码：澄清门禁唯一规则（禁止在 WorkBuddy / 提示词里再抄一套）。
  *
  * 状态机（入口级新增/删除页面·菜单·报表入口）：
- *   1. 未澄清 → 拦 begin，模型看见「先 ask_user_question」，聊天不渲染确认卡
+ *   1. 未澄清 → 拦 begin，模型看见「先 ask_user_question」
  *   2. 用户答完选择题（DSH tool/call+tool/result 配对为权威）→ 放行
  *   3. 读不到会话事件时的兜底：clarified=true 且 message 带「澄清结论」痕迹才放行
- *   4. 放行后 begin 必须阻塞在确认卡（waitConfirmThenStart），禁止空返回冒充已出卡
+ *   4. 放行后 begin 立刻开工并秒回进度卡（已废除需求确认卡）
  *
  * 硬禁：
  *   - 只信 Agent 参数 clarified=true（没有会话答完、也没有结论痕迹）
  *   - 把用户原话里的「彻底删除 / 删除菜单」当成已经澄清
- *   - 确认卡显隐靠前端猜文案（前端只认 need_clarify / await_ask_user）
+ *   - 进度卡显隐靠前端猜文案（前端只认 need_clarify / await_ask_user）
  *
- * 小改（增列/修样式/修 bug）不进本门禁，直接出确认卡。
+ * 小改（增列/修样式/修 bug）不进本门禁，直接开工。
  */
 import { hasClarifyEvidence, looksLikeAddOrDeletePageMenu, truthy } from './requirementGate.js'
 
@@ -43,23 +43,47 @@ function asEventList(raw: unknown): SessionEventLike[] {
   return []
 }
 
-/** 从 DSH execute(exec) 取出会话事件（session.events 是 getter）。 */
+type SessionEventSource = {
+  events?: unknown
+  snapshotEvents?: (from?: unknown, to?: unknown) => unknown
+  ownEvents?: () => unknown
+}
+
+/**
+ * 当前 DSH 的 Session 没有 events 属性，事件只能通过 snapshotEvents() / ownEvents() 同步取。
+ * 旧写法只读 session.events，运行期恒为空，导致「答完选择题仍被拦」「无法自动开工」。
+ */
+function eventsFromSession(s: SessionEventSource | undefined): SessionEventLike[] {
+  if (!s || typeof s !== 'object') return []
+  const direct = asEventList(s.events)
+  if (direct.length) return direct
+  for (const fn of ['snapshotEvents', 'ownEvents'] as const) {
+    const f = s[fn]
+    if (typeof f !== 'function') continue
+    try {
+      const list = asEventList(f.call(s))
+      if (list.length) return list
+    } catch {
+      // 该版本无此读取方式，继续回退
+    }
+  }
+  return []
+}
+
+/** 从 DSH execute(exec) 取出会话事件（agent.session 为 Session 实例）。 */
 export function extractSessionEvents(exec: unknown): SessionEventLike[] {
   if (!exec || typeof exec !== 'object') return []
   const e = exec as {
-    agent?: { session?: { events?: unknown }; events?: unknown }
-    session?: { events?: unknown }
+    agent?: SessionEventSource & { session?: SessionEventSource }
+    session?: SessionEventSource
     events?: unknown
-    context?: { session?: { events?: unknown } }
+    context?: { session?: SessionEventSource }
   }
-  const candidates = [
-    e.agent?.session?.events,
-    e.session?.events,
-    e.events,
-    e.agent?.events,
-    e.context?.session?.events,
-  ]
-  for (const raw of candidates) {
+  for (const s of [e.agent?.session, e.session, e.context?.session]) {
+    const list = eventsFromSession(s)
+    if (list.length) return list
+  }
+  for (const raw of [e.events, e.agent?.events]) {
     const list = asEventList(raw)
     if (list.length) return list
   }
@@ -266,6 +290,15 @@ export function decideCodingGate(opts: {
   const msg = String(opts.message || '').trim()
   if (!msg) return { action: 'block', reason: 'empty' }
   if (!looksLikeAddOrDeletePageMenu(msg)) {
+    // 非入口级诉求也可能刚答完选择题：同样要自动开工，否则会白等确认卡
+    const ask = readAskUserAfterLastUser(opts.events || [])
+    if (ask.answered) {
+      return {
+        action: 'pass',
+        requirement: mergeRequirementWithAskUser(msg, ask.summary),
+        via: 'ask_user_answered',
+      }
+    }
     return { action: 'pass', requirement: msg, via: 'not_entry' }
   }
 

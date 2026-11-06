@@ -47,11 +47,15 @@ export type CursorCodingJob = {
   last_synced_files: string[]
   write_scope: string[]
   sandbox_path: string | null
+  /** 拷贝超时/失败而未进入沙箱的文件（相对路径） */
+  sandbox_skipped_files?: string[]
   agent_id: string | null
   run_id: string | null
   continue_count: number
   /** 本任务「本轮结论」是否已交付（begin/continue 收口或 finish 兜底）；再写码须改走 continue */
   conclusion_delivered?: boolean
+  /** 结论首次交付时间：upd 之后的任务补丁会刷新 updated_at，挂载轮次须认这个时间 */
+  conclusion_at?: string | null
   review_in_scope?: string[]
   review_deleted?: string[]
   review_deferred?: string[]

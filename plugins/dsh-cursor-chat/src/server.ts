@@ -3,10 +3,11 @@
  * 仅绑定 127.0.0.1；阶段 A：confirm 后后台沙箱 → Cursor → 受限同步。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import {
   applyConfigFromUi,
   cursorKeyReady,
@@ -20,10 +21,12 @@ import { redactJobPublic, redactSseEvent } from './redact.js'
 import { consume, issue } from './hitl.js'
 import {
   createJob,
+  findLatestJobByCallId,
   findLatestJobForSession,
   forceCancelJob,
   jobCardView,
   jobSummary,
+  listConcludedJobsBySessionId,
   listJobs,
   loadJob,
   onJobChange,
@@ -35,6 +38,7 @@ import { expandWriteScopeWithCompanions } from './scopeCompanions.js'
 import { needsRequirementClarify } from './requirementGate.js'
 import {
   browserOriginAllowed,
+  isDesktopShellOrigin,
   isLoopbackBrowserOrigin,
   requestOrigin,
 } from './localAccess.js'
@@ -47,6 +51,7 @@ import {
   loadPendingConfirm,
   releasePendingClaim,
 } from './pendingConfirm.js'
+import { formatChatConclusion } from './conclusion.js'
 import { formatDialogMarkdown } from './transcript.js'
 import type { HitlAction } from './types.js'
 
@@ -78,14 +83,60 @@ let listenAddr = ''
 let serverMode: 'inplace' | 'child' = 'inplace'
 let childProc: ChildProcess | null = null
 
-/** 仅对本机 Origin 回显 ACAO；禁止 *，避免恶意页读 loopback 响应 */
+/**
+ * 本机服务构建指纹（服务端代码哈希）。
+ * 端口上已有旧进程时健康检查会返回不同指纹：必须换掉旧进程，
+ * 否则新路由/新字段永远不生效（曾导致结论正文接口一直 404）。
+ */
+function computeBuildId(): string {
+  try {
+    const root = dirname(fileURLToPath(import.meta.url))
+    const files: string[] = []
+    const walk = (dir: string, prefix = ''): void => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        const rel = prefix ? `${prefix}/${ent.name}` : ent.name
+        if (ent.isDirectory()) {
+          walk(join(dir, ent.name), rel)
+          continue
+        }
+        // 界面/自测脚本不参与服务端指纹，避免纯前端或测试改动触发服务重启
+        if (
+          !ent.name.endsWith('.js') ||
+          ent.name === 'client.js' ||
+          ent.name === 'self-test.js' ||
+          ent.name.startsWith('verify-')
+        ) {
+          continue
+        }
+        files.push(rel)
+      }
+    }
+    walk(root)
+    files.sort()
+    const hash = createHash('sha1')
+    for (const rel of files) {
+      hash.update(rel)
+      hash.update(readFileSync(join(root, rel)))
+    }
+    return hash.digest('hex').slice(0, 12)
+  } catch {
+    return ''
+  }
+}
+
+const BUILD_ID = computeBuildId()
+
+/** 仅对受信 Origin 回显 ACAO；禁止 *，避免恶意页读 loopback 响应 */
 function corsHeaders(req?: IncomingMessage): Record<string, string> {
   const origin = req ? requestOrigin(req) : ''
-  if (origin && isLoopbackBrowserOrigin(origin)) {
+  // dsh-app://app 是 Electron 壳页面的自定义安全协议源；带 Origin 的请求里它标识“自家设置页”。
+  if (origin && (isLoopbackBrowserOrigin(origin) || isDesktopShellOrigin(origin))) {
     return {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS',
+      // Chromium 私有网络访问（PNA）预检要求：安全源（壳页面）访问 127.0.0.1 时必须带此头。
+      'Access-Control-Allow-Private-Network': 'true',
       Vary: 'Origin',
     }
   }
@@ -190,6 +241,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       {
         ok: true,
         service: SERVICE_NAME,
+        // 构建指纹 + pid：宿主启动时据此识别并替换旧版残留服务进程
+        buildId: BUILD_ID,
+        pid: process.pid,
         pluginVersion,
         listen: listenAddr || `http://${cfg.listen}:${cfg.port}`,
         view: publicConfigView(cfg),
@@ -210,7 +264,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         },
         detail: cursorKeyReady(cfg)
           ? '服务就绪；写码前已配置 Cursor API Key'
-          : '请到「设置 → Cursor 对话写码」填写 Cursor API Key（硬性要求）',
+          : '请到「设置 → AI写码」填写 Cursor API Key（硬性要求）',
       },
       req,
     )
@@ -417,7 +471,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         {
           ok: false,
           code: 'cursor_key_required',
-          detail: '使用写码前必须配置 Cursor API Key（设置 → Cursor 对话写码）',
+          detail: '使用写码前必须配置 Cursor API Key（设置 → AI写码）',
         },
         req,
       )
@@ -749,6 +803,102 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return
   }
 
+  // 客户端兜底：最近已交付的三段式结论（切会话后靠此 + localStorage 再挂回）
+  if (method === 'GET' && path === '/api/cursor-chat/recent-conclusions') {
+    if (rejectBadOrigin(req, res)) return
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const limit = Math.min(40, Math.max(1, Number(u.searchParams.get('limit') || 20) || 20))
+    const jobs = listJobs(80)
+      .filter((j) => j.conclusion_delivered && (j.status === 'succeeded' || j.status === 'failed'))
+      .slice(0, limit)
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        items: jobs.map((j) => ({
+          id: j.id,
+          status: j.status,
+          updated_at: j.updated_at,
+          dsh_session_id: j.dsh_session_id || null,
+          requirement: String(j.requirement || '').slice(0, 240),
+          chat_conclusion: formatChatConclusion(j),
+          // 供客户端在底座未出「已编辑 N 个文件」时补同款改动卡，并按路径对齐会话轮次
+          synced_files: j.synced_files || j.last_synced_files || j.review_in_scope || [],
+          deleted_files: j.deleted_files || j.review_deleted || [],
+        })),
+      },
+      req,
+    )
+    return
+  }
+
+  // 重开已完成会话：按 session_id 取各轮结论（每个 turnTail 按轮次时间窗自选）
+  if (method === 'GET' && path === '/api/cursor-chat/session-conclusion') {
+    if (rejectBadOrigin(req, res)) return
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const sessionId = String(u.searchParams.get('session_id') || '').trim()
+    if (!sessionId) {
+      send(res, 400, { ok: false, detail: '缺少 session_id' }, req)
+      return
+    }
+    const jobs = listConcludedJobsBySessionId(sessionId)
+    if (!jobs.length) {
+      send(res, 200, { ok: true, found: false, items: [] }, req)
+      return
+    }
+    const items = jobs.map((job) => {
+      const synced = job.synced_files || job.last_synced_files || job.review_in_scope || []
+      const deleted = job.deleted_files || job.review_deleted || []
+      return {
+        id: job.id,
+        status: job.status,
+        updated_at: job.updated_at,
+        // 结论首次交付时间：后续应用/续改会刷新 updated_at，客户端按它对轮次
+        concluded_at: job.conclusion_at || job.updated_at,
+        dsh_session_id: job.dsh_session_id || null,
+        chat_conclusion: formatChatConclusion(job),
+        synced_files: synced,
+        deleted_files: deleted,
+        files: [...synced, ...deleted],
+      }
+    })
+    // 顶层保留最新一条，兼容仍在运行的旧版客户端
+    const latest = items[0]!
+    send(res, 200, { ok: true, found: true, items, ...latest }, req)
+    return
+  }
+
+  // begin 阻塞未返回时：进度卡用 call_id 对账挂 SSE
+  if (method === 'GET' && path === '/api/cursor-chat/jobs-by-call') {
+    if (rejectBadOrigin(req, res)) return
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const callId = String(u.searchParams.get('call_id') || '').trim()
+    if (!callId) {
+      send(res, 400, { ok: false, detail: '缺少 call_id' }, req)
+      return
+    }
+    const job = findLatestJobByCallId(callId)
+    if (!job) {
+      send(res, 200, { ok: true, found: false, job_id: '', status: '' }, req)
+      return
+    }
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        found: true,
+        job_id: job.id,
+        status: job.status,
+        detail: job.detail || '',
+        stream: `/api/cursor-chat/jobs/${encodeURIComponent(job.id)}/stream`,
+      },
+      req,
+    )
+    return
+  }
+
   if (method === 'GET' && path.startsWith('/api/cursor-chat/jobs/')) {
     if (rejectBadOrigin(req, res)) return
     const rest = path.slice('/api/cursor-chat/jobs/'.length)
@@ -809,6 +959,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       let closed = false
       let ticking = false
       let timer: ReturnType<typeof setInterval> | undefined
+      let pushTimer: ReturnType<typeof setTimeout> | undefined
       let unsub: () => void = () => {}
       const terminalOk = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
       const writeEv = (payload: unknown) => {
@@ -822,10 +973,63 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const stop = () => {
         closed = true
         if (timer) clearInterval(timer)
+        if (pushTimer) clearTimeout(pushTimer)
         unsub()
         unsub = () => {}
       }
       writeEv({ type: 'hello', job_id: id, service: SERVICE_NAME })
+      let lastSnapSig = ''
+      const snapSig = (job: ReturnType<typeof loadJob>) => {
+        if (!job) return ''
+        const tr = job.transcript || []
+        let trHash = String(tr.length)
+        for (let i = Math.max(0, tr.length - 6); i < tr.length; i += 1) {
+          const it = tr[i]
+          trHash +=
+            '|' +
+            String(it?.id || '') +
+            ':' +
+            String(it?.kind || '') +
+            ':' +
+            String(it?.text || '').length +
+            ':' +
+            String((it as { tool_status?: string })?.tool_status || '') +
+            ':' +
+            (it?.streaming ? '1' : '0')
+        }
+        return [
+          job.status,
+          job.detail || '',
+          job.review_gate || '',
+          (job.thinking_text || '').length,
+          (job.assistant_text || '').length,
+          (job.review_in_scope || []).length,
+          trHash,
+          job.updated_at || '',
+        ].join('#')
+      }
+      const writeSnapshot = (job: NonNullable<ReturnType<typeof loadJob>>) => {
+        const terminalNow = terminalOk.includes(job.status)
+        writeEv({
+          type: 'snapshot',
+          job_id: job.id,
+          status: job.status,
+          detail: job.detail,
+          workspace: job.workspace,
+          review_in_scope: job.review_in_scope || [],
+          review_deleted: job.review_deleted || [],
+          review_deferred: job.review_deferred || [],
+          review_gate: job.review_gate ?? null,
+          synced_files: job.synced_files || [],
+          assistant_text: job.assistant_text || '',
+          assistant_chars: (job.assistant_text || '').length,
+          thinking_text: job.thinking_text || '',
+          thinking_chars: (job.thinking_text || '').length,
+          // 终态快照带上结论：进度卡可立刻展示，不等 begin 返回后的宿主再思考
+          chat_conclusion: terminalNow ? formatChatConclusion(job) : '',
+          transcript: job.transcript || [],
+        })
+      }
       const tick = () => {
         if (closed || ticking) return
         ticking = true
@@ -839,6 +1043,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             return
           }
           const terminal = terminalOk.includes(job.status)
+          let pushedLean = false
           while (cursor < job.events.length) {
             const ev = job.events[cursor]
             cursor += 1
@@ -847,57 +1052,42 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             // 终态帧禁止回放 review/auto_apply，避免进度卡被打回「写码中」。
             if (terminal && ev && ev.type === 'review') continue
             writeEv(ev)
+            pushedLean = true
           }
           if (terminal) {
             // 终态立刻封口：瘦事件回放（跳过 review）+ 带 transcript 的 snapshot + 带 job_id 的 done。
             // 顺序必须是 snapshot 在前、done 在后，过程区才不会被提前关流抽空。
+            writeSnapshot(job)
             writeEv({
-              type: 'snapshot',
-              job_id: job.id,
+              type: 'done',
               status: job.status,
-              detail: job.detail,
-              workspace: job.workspace,
-              review_in_scope: job.review_in_scope || [],
-              review_deleted: job.review_deleted || [],
-              review_deferred: job.review_deferred || [],
-              review_gate: job.review_gate ?? null,
-              synced_files: job.synced_files || [],
-              assistant_text: job.assistant_text || '',
-              assistant_chars: (job.assistant_text || '').length,
-              thinking_text: job.thinking_text || '',
-              thinking_chars: (job.thinking_text || '').length,
-              transcript: job.transcript || [],
+              job_id: job.id,
+              chat_conclusion: formatChatConclusion(job),
             })
-            writeEv({ type: 'done', status: job.status, job_id: job.id })
             stop()
             res.end()
             return
           }
-          writeEv({
-            type: 'snapshot',
-            job_id: job.id,
-            status: job.status,
-            detail: job.detail,
-            workspace: job.workspace,
-            review_in_scope: job.review_in_scope || [],
-            review_deleted: job.review_deleted || [],
-            review_deferred: job.review_deferred || [],
-            review_gate: job.review_gate ?? null,
-            synced_files: job.synced_files || [],
-            assistant_text: job.assistant_text || '',
-            assistant_chars: (job.assistant_text || '').length,
-            thinking_text: job.thinking_text || '',
-            thinking_chars: (job.thinking_text || '').length,
-            transcript: job.transcript || [],
-          })
+          // 无变更不推 snapshot：避免 150ms 整包重渲把进度卡闪成「demo」
+          const sig = snapSig(job)
+          if (pushedLean || sig !== lastSnapSig) {
+            lastSnapSig = sig
+            writeSnapshot(job)
+          }
         } finally {
           ticking = false
         }
       }
-      const timerHandle = setInterval(tick, 400)
+      // 300ms 兜底 + 账本变更即时推；有 lean 事件时仍带 snapshot 对账
+      const timerHandle = setInterval(tick, 300)
       timer = timerHandle
-      unsub = onJobChange((changedId, status) => {
-        if (changedId === id && terminalOk.includes(status)) tick()
+      unsub = onJobChange((changedId) => {
+        if (changedId !== id) return
+        if (pushTimer) clearTimeout(pushTimer)
+        pushTimer = setTimeout(() => {
+          pushTimer = undefined
+          tick()
+        }, 40)
       })
       tick()
       req.on('close', () => {
@@ -1000,14 +1190,86 @@ function preferredServerMode(): 'auto' | 'child' | 'inplace' {
   return 'auto'
 }
 
-async function probeOurHealth(addr: string): Promise<boolean> {
+type OurHealth = { service?: string; buildId?: string; pid?: number }
+
+/** 端口上是本插件服务时返回健康体（含构建指纹），否则 null */
+async function probeOurHealth(addr: string): Promise<OurHealth | null> {
   try {
     const res = await fetch(addr + '/health', { signal: AbortSignal.timeout(2000) })
-    const body = (await res.json()) as { service?: string }
-    return Boolean(body && body.service === SERVICE_NAME)
+    const body = (await res.json()) as OurHealth
+    return body && body.service === SERVICE_NAME ? body : null
   } catch {
-    return false
+    return null
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/** 端口上的服务是否就是本次构建；没有指纹的历史服务一律视为过期 */
+function isCurrentBuild(health: OurHealth): boolean {
+  return !BUILD_ID || health.buildId === BUILD_ID
+}
+
+/** 监听指定端口的进程号：POSIX 用 lsof，Windows 用 netstat */
+function listenerPids(port: number): number[] {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('netstat', ['-ano'], { encoding: 'utf8' })
+      const pids = new Set<number>()
+      for (const line of out.split(/\r?\n/)) {
+        // 必须精确匹配本地端口：子串匹配会把 :8080 当成 :80，误杀无关进程
+        const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i)
+        if (!m) continue
+        if (Number(m[1]) !== port) continue
+        const pid = Number(m[2])
+        if (Number.isInteger(pid) && pid > 0) pids.add(pid)
+      }
+      return [...pids]
+    }
+    const out = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+      encoding: 'utf8',
+    })
+    return out
+      .split(/\s+/)
+      .map(Number)
+      .filter((n) => Number.isInteger(n) && n > 0)
+  } catch {
+    return []
+  }
+}
+
+/** 停掉旧版本插件服务并等到端口释放（自动替换残留子进程，避免旧代码一直占端口） */
+async function stopStaleServer(addr: string, port: number, pid?: number): Promise<boolean> {
+  const pids = new Set<number>()
+  // 优先用内核里真实监听该端口的 pid；health.pid 只是服务自报，不能单独作为 kill 目标
+  for (const p of listenerPids(port)) if (p !== process.pid) pids.add(p)
+  if (pids.size === 0 && pid && pid !== process.pid) pids.add(pid)
+  if (pids.size === 0) return false
+  for (const p of pids) {
+    try {
+      process.kill(p, 'SIGTERM')
+    } catch {
+      /* 已退出 */
+    }
+  }
+  for (let i = 0; i < 30; i += 1) {
+    if (!(await probeOurHealth(addr))) return true
+    await delay(100)
+  }
+  for (const p of pids) {
+    try {
+      process.kill(p, 'SIGKILL')
+    } catch {
+      /* ignore */
+    }
+  }
+  for (let i = 0; i < 20; i += 1) {
+    if (!(await probeOurHealth(addr))) return true
+    await delay(100)
+  }
+  return false
 }
 
 export async function startServerInProcess(): Promise<{
@@ -1031,10 +1293,9 @@ export async function startServerInProcess(): Promise<{
       if (err.code === 'EADDRINUSE') {
         const addr = `http://${cfg.listen}:${cfg.port}`
         void (async () => {
-          try {
-            const res = await fetch(addr + '/health', { signal: AbortSignal.timeout(2000) })
-            const body = (await res.json()) as { service?: string }
-            if (body && body.service === SERVICE_NAME) {
+          const health = await probeOurHealth(addr)
+          if (health) {
+            if (isCurrentBuild(health)) {
               listenAddr = addr
               resolvePromise({
                 ok: true,
@@ -1044,8 +1305,17 @@ export async function startServerInProcess(): Promise<{
               })
               return
             }
-          } catch {
-            /* not our service */
+            const gone = await stopStaleServer(addr, cfg.port, Number(health.pid) || undefined)
+            if (gone) {
+              resolvePromise(await startServerInProcess())
+              return
+            }
+            resolvePromise({
+              ok: false,
+              addr: '',
+              detail: `端口 ${cfg.port} 上的旧版插件服务无法自动停止，请结束该进程后重试。`,
+            })
+            return
           }
           resolvePromise({
             ok: false,
@@ -1090,14 +1360,27 @@ async function startServerChild(): Promise<{
 }> {
   const cfg = loadConfig()
   const addr = `http://${cfg.listen}:${cfg.port}`
-  if (await probeOurHealth(addr)) {
-    listenAddr = addr
-    serverMode = 'child'
-    return { ok: true, addr, already: true, detail: `端口已有本插件服务：${addr}` }
+  const health = await probeOurHealth(addr)
+  if (health) {
+    if (isCurrentBuild(health)) {
+      listenAddr = addr
+      serverMode = 'child'
+      return { ok: true, addr, already: true, detail: `端口已有本插件服务：${addr}` }
+    }
+    const gone = await stopStaleServer(addr, cfg.port, Number(health.pid) || undefined)
+    if (!gone) {
+      return {
+        ok: false,
+        addr: '',
+        detail: `端口 ${cfg.port} 上的旧版插件服务无法自动停止，请结束该进程后重试。`,
+      }
+    }
+    console.warn(`[cursor-chat] 已停止端口 ${cfg.port} 上的旧版服务进程，启动新构建`)
   }
   if (childProc && childProc.exitCode == null) {
     for (let i = 0; i < 40; i += 1) {
-      if (await probeOurHealth(addr)) {
+      const h = await probeOurHealth(addr)
+      if (h && isCurrentBuild(h)) {
         listenAddr = addr
         serverMode = 'child'
         return { ok: true, addr, detail: `子进程服务就绪：${addr}` }
@@ -1116,6 +1399,7 @@ async function startServerChild(): Promise<{
       ...process.env,
       CURSOR_CHAT_SERVER_ROLE: 'child',
       CURSOR_CHAT_SERVER_MODE: 'inplace',
+      CURSOR_CHAT_PARENT_PID: String(process.pid),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
@@ -1142,7 +1426,8 @@ async function startServerChild(): Promise<{
         detail: `子进程启动失败（exit ${child.exitCode}）`,
       }
     }
-    if (await probeOurHealth(addr)) {
+    const h = await probeOurHealth(addr)
+    if (h && isCurrentBuild(h)) {
       listenAddr = addr
       serverMode = 'child'
       return { ok: true, addr, detail: `服务(子进程隔离): ${addr}` }
@@ -1179,14 +1464,26 @@ export async function startServer(): Promise<{
   const cfg = loadConfig()
   const addr = `http://${cfg.listen}:${cfg.port}`
 
-  if (await probeOurHealth(addr)) {
-    listenAddr = addr
-    return {
-      ok: true,
-      addr,
-      already: true,
-      detail: `Cursor 对话写码服务已在运行：${addr}`,
+  const health = await probeOurHealth(addr)
+  if (health) {
+    if (isCurrentBuild(health)) {
+      listenAddr = addr
+      return {
+        ok: true,
+        addr,
+        already: true,
+        detail: `Cursor 对话写码服务已在运行：${addr}`,
+      }
     }
+    const gone = await stopStaleServer(addr, cfg.port, Number(health.pid) || undefined)
+    if (!gone) {
+      return {
+        ok: false,
+        addr: '',
+        detail: `端口 ${cfg.port} 上的旧版插件服务无法自动停止，请结束该进程后重试。`,
+      }
+    }
+    console.warn(`[cursor-chat] 已停止端口 ${cfg.port} 上的旧版服务进程，启动新构建`)
   }
 
   if (prefer === 'inplace') {
