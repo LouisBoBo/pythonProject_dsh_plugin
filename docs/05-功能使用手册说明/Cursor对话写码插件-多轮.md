@@ -17,7 +17,7 @@
 |----|------|------|
 | npm | `@zhongruan/dsh-cursor-chat` | `@zhongruan/dsh-cursor-coding` |
 | 工具 | `zr_cchat_*` | `zr_cursor_*` |
-| HTTP | `:18789` / `/api/cursor-chat/*` | `:18788` / `/api/cursor-coding/*` |
+| HTTP | `:18791` / `/api/cursor-chat/*` | `:18788` / `/api/cursor-coding/*` |
 | 数据 | `~/.zhongruan/cursor-chat` | `~/.zhongruan/cursor-coding` |
 | Cordis | `cursor-chat` | `cursor-coding` |
 | 设置页 | 「Cursor 对话写码」 | 「Cursor 写码」 |
