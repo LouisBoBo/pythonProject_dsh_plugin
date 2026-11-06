@@ -4403,8 +4403,16 @@ function apply2(ctx) {
     name: "conversation.chat.turnTail",
     id: "knowledge-writeback",
     order: 30,
-    select: (owner) => ({ turn: owner.turn.turn })
-  }, (props) => /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(KnowledgeWritebackStatus, { sessionId: String(props.sessionId), turn: props.matched.turn, workspace })));
+    select: (owner) => {
+      const turn = owner && owner.turn;
+      return turn && turn.turn !== void 0 && turn.turn !== null ? { turn: turn.turn } : null;
+    }
+  }, (props) => {
+    const turn = props && props.turn ? props.turn.turn : void 0;
+    const sessionId = props && props.sessionId ? String(props.sessionId) : "";
+    if (turn === void 0 || turn === null || turn === "" || !sessionId) return null;
+    return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(KnowledgeWritebackStatus, { sessionId, turn, workspace });
+  }));
 }
 function KnowledgeWritebackStatus({
   sessionId,
