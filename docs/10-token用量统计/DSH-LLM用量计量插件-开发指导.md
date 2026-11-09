@@ -1,8 +1,9 @@
 # DSH LLM 用量计量插件 · 开发指导
 
 > **给谁**：独立 DSH 插件仓（建议包名 `@zhongruan/dsh-llm-meter`），**不是** DSH-ZR-WorkBuddy 本仓。  
+> **定位（别用错）**：本机旁路计量与**已冻结口径**；**不是**现行用量统计产品。侧栏「用量统计」/ Key 限额 → `@zhongruan/dsh-key-quota`（见 `按Key限额-可行性实施方案.md`、`.cursor/rules/usage-key-quota.mdc`）。  
 > **目标**：在宿主 `llm/stream` 出口记每一次模型调用的 **真实 token 明细**，减少相对 DeepSeek 控制台的漏采；本机用量可按来源下钻。  
-> **非目标**：加总强制等于官网控制台；不做 LiteLLM 出口代理；不改 DSH 内核源码。  
+> **非目标**：加总强制等于官网控制台；不做 LiteLLM 出口代理；不改 DSH 内核源码；不做 Key 限额 / 用量总览页。  
 > **WorkBuddy 侧**：插件落盘后，本仓引擎只读采集进 `engine/data/usage/`（另开任务接线；本文先定契约）。
 
 对照背景：[`Token消耗统计分析方案.md`](./Token消耗统计分析方案.md)。  

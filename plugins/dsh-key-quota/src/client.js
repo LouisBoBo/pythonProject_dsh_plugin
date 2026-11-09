@@ -154,12 +154,19 @@ window.__ModuleLoader__.load({
     function api(path, options) {
       var init = Object.assign({ cache: 'no-store' }, options || {})
       function read(res) {
+        if (!res || !res.ok) throw new Error('http')
         var type = (res.headers && res.headers.get('content-type')) || ''
         if (type.indexOf('json') < 0) throw new Error('not-json')
-        return res.json()
+        return res.json().then(function (body) {
+          // 404「不提供额度账本」等失败体不能当成功，否则写码/LLM 全是 0
+          if (!body || body.ok === false) throw new Error('not-ok')
+          return body
+        })
       }
+      var port = portOf()
+      // 宿主代理走 /key-quota；直连限额端口无前缀（startQuotaServer 挂在 /v1/...）
       return fetch('/key-quota' + path, init).then(read).catch(function () {
-        return fetch('http://127.0.0.1:' + portOf() + path, init).then(read)
+        return fetch('http://127.0.0.1:' + port + path, init).then(read)
       })
     }
 

@@ -16,6 +16,7 @@ import {
   toolTodoSnippetFromArgs,
   type TranscriptItem,
 } from '../transcript.js'
+import { appendSdkUsage, pickSdkUsage, sanitizeLedgerKey, type SdkTokenUsage } from '../usageLedger.js'
 
 export type CursorRunEvent = {
   type: 'assistant' | 'thinking' | 'tool_event' | 'status' | 'error' | 'user'
@@ -42,6 +43,8 @@ export type CursorRunResult = {
   run_id: string
   error?: string
   mocked?: boolean
+  /** SDK 本轮 token；没有就不写用量账 */
+  usage?: SdkTokenUsage
 }
 
 export function buildPrompt(opts: {
@@ -502,6 +505,8 @@ export async function runCursorLocal(opts: {
   userPreface?: string
   /** Cursor SDK 多模态附图（base64 / url） */
   images?: Array<{ data: string; mimeType: string } | { url: string }>
+  /** 用量账 job 前缀（通常为 cch job id）；与 run_id 拼成唯一 job_id */
+  ledgerJobId?: string
 }): Promise<CursorRunResult> {
   mkdirSync(opts.sandbox, { recursive: true })
   if (shouldMock(opts.apiKey)) {
@@ -630,10 +635,22 @@ export async function runCursorLocal(opts: {
 
   const agentId = String(agent.agentId || '')
   let runId = ''
+  let streamUsage: SdkTokenUsage | undefined
 
   const emitFromBusThinking = (delta: string) => {
     if (!delta) return
     opts.onEvent({ type: 'thinking', message: delta, full: bus.thinking })
+  }
+
+  const recordUsage = (waitRaw: unknown): SdkTokenUsage | undefined => {
+    const waitObj = waitRaw && typeof waitRaw === 'object'
+      ? (waitRaw as { usage?: SdkTokenUsage })
+      : null
+    const usage = pickSdkUsage(waitObj?.usage, streamUsage)
+    if (!usage) return undefined
+    const key = sanitizeLedgerKey(opts.ledgerJobId, runId)
+    appendSdkUsage({ usage, jobKey: key, model })
+    return usage
   }
 
   try {
@@ -763,6 +780,13 @@ export async function runCursorLocal(opts: {
             bus.addStatus(text)
             opts.onEvent({ type: 'status', message: text })
           }
+          continue
+        }
+
+        if (mtype === 'usage') {
+          const raw = (payload.usage || payload) as SdkTokenUsage
+          const picked = pickSdkUsage(raw)
+          if (picked) streamUsage = picked
         }
       }
     } catch (streamErr) {
@@ -776,11 +800,13 @@ export async function runCursorLocal(opts: {
     bus.sealAssistant()
 
     if (opts.isCancel() && !idleTimedOut) {
+      let cancelWait: unknown = null
       try {
-        await run.wait()
+        cancelWait = await run.wait()
       } catch {
         /* ignore */
       }
+      const usage = recordUsage(cancelWait)
       await disposeAgent(agent)
       return {
         ok: false,
@@ -790,17 +816,26 @@ export async function runCursorLocal(opts: {
         agent_id: agentId,
         run_id: runId,
         error: '已取消',
+        ...(usage ? { usage } : {}),
       }
     }
 
-    let result: { status?: string; result?: string; error?: unknown } = { status: idleTimedOut ? 'finished' : '' }
+    let result: { status?: string; result?: string; error?: unknown; usage?: SdkTokenUsage } = {
+      status: idleTimedOut ? 'finished' : '',
+    }
     try {
-      result = (await run.wait()) as { status?: string; result?: string; error?: unknown }
+      result = (await run.wait()) as {
+        status?: string
+        result?: string
+        error?: unknown
+        usage?: SdkTokenUsage
+      }
     } catch (waitErr) {
       if (!idleTimedOut) {
         opts.onEvent({ type: 'error', message: `等待结束：${String(waitErr)}` })
       }
     }
+    const usage = recordUsage(result)
     const status = String(result.status || '')
     if (opts.isCancel() && !idleTimedOut) {
       await disposeAgent(agent)
@@ -812,6 +847,7 @@ export async function runCursorLocal(opts: {
         agent_id: agentId,
         run_id: runId,
         error: '已取消',
+        ...(usage ? { usage } : {}),
       }
     }
     if (status === 'error' && !idleTimedOut) {
@@ -826,6 +862,7 @@ export async function runCursorLocal(opts: {
         agent_id: agentId,
         run_id: runId,
         error: errMsg,
+        ...(usage ? { usage } : {}),
       }
     }
     const waitText = String((result as { result?: string }).result || '')
@@ -842,6 +879,7 @@ export async function runCursorLocal(opts: {
       transcript: bus.transcript,
       agent_id: agentId,
       run_id: runId,
+      ...(usage ? { usage } : {}),
     }
   } catch (err) {
     const msg =

@@ -1,0 +1,33 @@
+---
+description: 用量统计主插件是 dsh-key-quota——勿把 dsh-llm-meter 当用量产品入口
+alwaysApply: true
+---
+
+# 用量统计认 dsh-key-quota（勿用错插件）
+
+> **产品入口**：侧栏「用量统计」、按 Key / 按账号限额与展示 → **`plugins/dsh-key-quota`**（`@zhongruan/dsh-key-quota`）。  
+> **不要**把 `dsh-llm-meter` 当成当前用量统计、限额或用量页去改。
+
+## 分工（写死）
+
+| 诉求 | 落点 | 说明 |
+|---|---|---|
+| 用量页、按 Key 限额、平台账号绑定 Key、超额拦截 | `dsh-key-quota` | 现行交付；方案见 `docs/10-token用量统计/` |
+| token 分项/合计**公式**对照与冻结 | `dsh-llm-meter` + `.cursor/rules/llm-meter-locked.mdc` | 只锁口径；不是用量产品 |
+| 本机旁路 `llm/stream` → `events.jsonl` 观测 | `dsh-llm-meter` | 历史旁路计量；改公式须用户明确破窗 |
+
+## 禁止
+
+```text
+❌ 用户说「用量统计 / 限额 / 用量页」→ 去改 dsh-llm-meter
+❌ 在 dsh-llm-meter 里做总览表、Key 管理、超额停调
+❌ 为「用量对不上」去动已冻结的 meter 公式（见 llm-meter-locked）
+✅ 用量展示与限额 → dsh-key-quota
+✅ 合计口径与 meter 对齐即可；key-quota 自带 pickUsage，不改 meter 账本
+```
+
+## 文档入口
+
+- 主方案：`docs/10-token用量统计/按Key限额-可行性实施方案.md`
+- 总览/明细：`docs/10-token用量统计/按用户各模型token-总览与明细-可行性方案.md`
+- meter 仅口径：`docs/10-token用量统计/DSH-LLM用量计量插件-开发指导.md`

@@ -1146,7 +1146,11 @@ export function panelUsage(url: string, bundle = loadEngineBundle()): {
   const viewerAdmin = bundle.active?.role === 'admin'
   const scope = query.scope === 'enterprise' && viewerAdmin ? 'enterprise' : 'personal'
   const userId = scope === 'personal' ? (bundle.active?.id || null) : null
-  const usage = summarizeUsage(bundle.events, { on: query.on, grain: query.grain, userId })
+  // 个人视图无登录时：只留无 userId 的本机/会话补采行，禁止把已归属账号的账本整本摊开
+  const events = scope === 'personal' && !userId
+    ? bundle.events.filter((evt) => !evt.userId)
+    : bundle.events
+  const usage = summarizeUsage(events, { on: query.on, grain: query.grain, userId })
   const names = namesOf(bundle)
   usage.detail = viewerAdmin
     ? usage.detail.map((row) => ({
@@ -1161,6 +1165,6 @@ export function panelUsage(url: string, bundle = loadEngineBundle()): {
     }))
   const from = query.grain === 'month' ? usage.month_from : usage.on
   const to = query.grain === 'month' ? usage.month_to : usage.on
-  const people = scope === 'enterprise' ? peopleUsage(bundle.events, bundle.users, from, to) : null
-  return { usage, people, viewerAdmin, scope, loaded: bundle.events.length > 0 }
+  const people = scope === 'enterprise' ? peopleUsage(events, bundle.users, from, to) : null
+  return { usage, people, viewerAdmin, scope, loaded: events.length > 0 }
 }

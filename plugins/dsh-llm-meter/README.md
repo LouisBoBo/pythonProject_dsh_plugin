@@ -1,5 +1,7 @@
 # @zhongruan/dsh-llm-meter
 
+> **不是用量统计产品入口。** 侧栏「用量统计」、Key 限额、超额拦截 → 用 `@zhongruan/dsh-key-quota`（见 `.cursor/rules/usage-key-quota.mdc`）。本插件只做本机旁路计量与口径对照。
+
 在宿主 `llm/stream` 出口记录每一次模型调用的 **真实 token 分项**，追加到本机 `$DSH_HOME/llm-meter/events.jsonl`。
 
 **本机观测 ≠ DeepSeek 控制台账单。** 官网按 Key 的 HTTP 计；本插件只覆盖走 `ctx.llm.stream` 的调用。引擎直连 `api.deepseek.com`（如 PCB/审码）不经过这条 waterfall，仍由引擎自己的账本记。两边合在一起才接近本机全貌，不要求加总等于官网。

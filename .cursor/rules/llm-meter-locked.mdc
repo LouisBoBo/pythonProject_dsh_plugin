@@ -7,7 +7,8 @@ alwaysApply: true
 
 > **冻结日**：2026-09-17。本机用量页已与 DeepSeek 控制台对齐验收。  
 > **破窗**：**仅当用户在本对话明确允许**改计量规则；改代码前须先改本文件。  
-> **展示/汇总权威**：WorkBuddy `engine/app/usage/`（同口径规则：`DSH-ZR-WorkBuddy/.cursor/rules/workbuddy-usage-metering-locked.mdc`）。
+> **展示/汇总权威**：WorkBuddy `engine/app/usage/`（同口径规则：`DSH-ZR-WorkBuddy/.cursor/rules/workbuddy-usage-metering-locked.mdc`）。  
+> **产品入口别用错**：侧栏「用量统计」、按 Key 限额 → **`dsh-key-quota`**（见 `.cursor/rules/usage-key-quota.mdc`）。本规则只锁 `dsh-llm-meter` 的公式/schema/waterfall，**不是**用量产品改动入口。
 
 擅自改 = 事故。官网刷新延迟 **不是**改公式的理由。
 

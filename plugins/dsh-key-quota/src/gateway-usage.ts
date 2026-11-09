@@ -1,7 +1,8 @@
 /**
  * 用量页改读中软模型网关（接口文档1 · §7.3 / §7.4 / §7.5）。
  * 个人：GET /api/ai/Usage/My + GetUsageList；企业汇总：Summary。
- * 不再依赖本机 events.jsonl；也不再向 Usage/Report 上报（由 ensure 去掉 usageReportUrl）。
+ * LLM 合计与明细只认网关；写码（Cursor）由本机 cursor-ledger 补进，见 overlayCursorFromLocal。
+ * 不再向 Usage/Report 上报（由 ensure 去掉 usageReportUrl）。
  */
 import { readGatewayEndpoint, type GatewayEndpoint } from './gateway-catalog.js'
 import type { DayRow, PersonRow, UsageDetailRow, UsageSummary } from './stats.js'
@@ -190,6 +191,97 @@ function emptyDay(hour?: number, date?: string): DayRow {
     cursor_cache_miss: 0,
     cursor_output: 0,
     calls: 0,
+  }
+}
+
+function takeCursorFields(local: DayRow): Pick<DayRow,
+  'cursor_calls' | 'cursor_tokens' | 'cursor_cache_hit' | 'cursor_cache_miss' | 'cursor_output'
+> {
+  return {
+    cursor_calls: local.cursor_calls || 0,
+    cursor_tokens: local.cursor_tokens || 0,
+    cursor_cache_hit: local.cursor_cache_hit || 0,
+    cursor_cache_miss: local.cursor_cache_miss || 0,
+    cursor_output: local.cursor_output || 0,
+  }
+}
+
+function overlayHourly(gateway: DayRow[], local: DayRow[]): DayRow[] {
+  const byHour = new Map<number, DayRow>()
+  for (const row of gateway) {
+    if (typeof row.hour === 'number') byHour.set(row.hour, { ...row })
+  }
+  for (const loc of local) {
+    if (typeof loc.hour !== 'number') continue
+    const base = byHour.get(loc.hour) || emptyDay(loc.hour)
+    const cursor = takeCursorFields(loc)
+    byHour.set(loc.hour, {
+      ...base,
+      hour: loc.hour,
+      ...cursor,
+      calls: (base.llm_calls || 0) + cursor.cursor_calls,
+    })
+  }
+  // 网关无分时时仍保留本机写码时段；禁止 map 空数组把写码图冲成空白
+  if (byHour.size === 0) return gateway
+  return [...byHour.keys()]
+    .sort((a, b) => a - b)
+    .map((hour) => byHour.get(hour) || emptyDay(hour))
+}
+
+function overlayDaily(gateway: DayRow[], local: DayRow[]): DayRow[] {
+  const byDate = new Map<string, DayRow>()
+  for (const row of gateway) {
+    if (row.date) byDate.set(row.date, { ...row })
+  }
+  for (const loc of local) {
+    if (!loc.date) continue
+    const base = byDate.get(loc.date) || emptyDay(undefined, loc.date)
+    const cursor = takeCursorFields(loc)
+    byDate.set(loc.date, {
+      ...base,
+      date: loc.date,
+      ...cursor,
+      calls: (base.llm_calls || 0) + cursor.cursor_calls,
+    })
+  }
+  return [...byDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)))
+}
+
+/**
+ * 网关 LLM + 本机写码。只覆盖 cursor_* / today.cursor / cursor.models / 写码明细；
+ * 禁止改 today.llm、llm.models、llm_* 分时与网关 detail。
+ */
+export function overlayCursorFromLocal<T extends UsageSummary>(
+  gateway: T,
+  local: UsageSummary,
+): T {
+  const cursorDetail = local.detail.filter((row) => row.source === 'cursor')
+  const detail = gateway.detail
+    .concat(cursorDetail)
+    .sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
+    .slice(0, 200)
+  const hourly = overlayHourly(gateway.hourly || [], local.hourly || [])
+  const daily = overlayDaily(gateway.daily || [], local.daily || [])
+  const monthly = overlayDaily(gateway.monthly || [], local.monthly || [])
+  return {
+    ...gateway,
+    today: {
+      llm: gateway.today.llm,
+      cursor: {
+        calls: local.today.cursor.calls || 0,
+        tokens: local.today.cursor.tokens || 0,
+      },
+    },
+    hourly,
+    daily,
+    monthly,
+    llm: gateway.llm,
+    cursor: { models: local.cursor.models || [] },
+    detail,
+    ...('note' in gateway
+      ? { note: String((gateway as { note?: string }).note || '') || 'LLM 来自网关；写码来自本机 Cursor 账单' }
+      : {}),
   }
 }
 

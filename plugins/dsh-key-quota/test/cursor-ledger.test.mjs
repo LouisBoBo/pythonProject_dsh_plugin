@@ -3,10 +3,20 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { cursorLedgerRow, syncCursorUsage } from '../lib/cursor-ledger.js'
+import { cursorLedgerRow, syncCursorUsage, workosSessionCookie } from '../lib/cursor-ledger.js'
 import { panelUsage, loadEngineBundle } from '../lib/engine-usage.js'
 
 describe('cursor ledger', () => {
+  it('builds WorkOS session cookie from JWT sub', () => {
+    const payload = Buffer.from(JSON.stringify({ sub: 'github|user_abc' })).toString('base64url')
+    const token = `hdr.${payload}.sig`
+    assert.equal(
+      workosSessionCookie(token),
+      `WorkosCursorSessionToken=${encodeURIComponent('user_abc::' + token)}`,
+    )
+    assert.equal(workosSessionCookie('not-a-jwt'), '')
+  })
+
   it('keeps Cursor input and cache read apart', () => {
     const row = cursorLedgerRow({
       timestamp: Date.parse('2026-10-25T11:25:00+08:00'),
@@ -24,15 +34,16 @@ describe('cursor ledger', () => {
     assert.equal(row.ts, '2026-10-25T11:25:00+08:00')
     assert.equal(row.user_id, 'u_admin')
     assert.equal(cursorLedgerRow({ timestamp: 1, usageEventId: 'x', tokenUsage: {} }, 'u_admin'), null)
-    const chat = cursorLedgerRow({
+    const named = cursorLedgerRow({
       timestamp: Date.parse('2026-10-25T11:25:00+08:00'),
       model: 'grok-4.7-high',
       usageEventId: 'evt-chat',
       tokenUsage: { inputTokens: 20, outputTokens: 5, cacheReadTokens: 80 },
     }, 'u_admin')
-    assert.equal(chat.source, 'llm')
-    assert.equal(chat.lane, 'cursor_chat')
-    assert.equal(chat.total_tokens, 105)
+    // LLM 已走网关；Cursor 账单不论模型名一律进写码，避免网关路径丢数
+    assert.equal(named.source, 'cursor')
+    assert.equal(named.lane, 'cursor_code')
+    assert.equal(named.total_tokens, 105)
   })
 
   it('writes today onto the coding card and does not write the same call twice', async () => {
@@ -80,10 +91,10 @@ describe('cursor ledger', () => {
       assert.equal(second.appended, 0)
       const bundle = loadEngineBundle(env, dir)
       const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-25&scope=personal', bundle)
-      assert.equal(view.usage.today.cursor.calls, 1)
-      assert.equal(view.usage.today.cursor.tokens, 114)
-      assert.equal(view.usage.today.llm.calls, 1)
-      assert.equal(view.usage.today.llm.tokens, 105)
+      assert.equal(view.usage.today.cursor.calls, 2)
+      assert.equal(view.usage.today.cursor.tokens, 114 + 105)
+      assert.equal(view.usage.today.llm.calls, 0)
+      assert.equal(view.usage.today.llm.tokens, 0)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

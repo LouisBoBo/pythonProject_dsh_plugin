@@ -3,9 +3,9 @@ import { networkInterfaces } from 'node:os'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
-import { syncCursorUsage } from './cursor-ledger.js'
+import { panelSyncDays, syncCursorUsage } from './cursor-ledger.js'
 import { loadEngineBundle, panelQuery, panelUsage, platformSession, stampKeyTails } from './engine-usage.js'
-import { fetchGatewayPanel } from './gateway-usage.js'
+import { fetchGatewayPanel, overlayCursorFromLocal } from './gateway-usage.js'
 import { dispatch, isLoopback, type DispatchDeps, type DispatchResult } from './http.js'
 import { keyIdOf, tailOf } from './key-id.js'
 import { readProviderKeyMasks, type ProviderKeyMasks } from './workbuddy-key.js'
@@ -175,6 +175,19 @@ async function withUsage(
     // 用量页只展示本人；不再提供企业全员视图
     const scope = 'personal' as const
 
+    const syncDays = panelSyncDays(query.on, query.grain)
+    // 写码永远本机补 Cursor 账单；与网关 LLM 路径无关。
+    // 同步最多等 2.5s，超时仍用已有账本出面板，避免钥匙串/网络卡住整页。
+    await Promise.race([
+      syncCursorUsage({ days: syncDays }),
+      new Promise<{ appended: number }>((resolve) => {
+        setTimeout(() => resolve({ appended: 0 }), 2500)
+      }),
+    ])
+
+    const bundle = loadEngineBundle()
+    const local = panelUsage(url, bundle)
+
     if (opts.resolveGatewayToken) {
       const gateway = await fetchGatewayPanel({
         on: query.on,
@@ -191,19 +204,21 @@ async function withUsage(
         resolveToken: opts.resolveGatewayToken,
       })
       if (gateway) {
+        // LLM 保持网关原样；只把本机写码叠上去
+        const merged = overlayCursorFromLocal(gateway.usage, local.usage)
         const detail = gateway.viewerAdmin && opts.ledger
-          ? stampKeyTails(gateway.usage.detail, opts.ledger.entries())
-          : gateway.usage.detail
+          ? stampKeyTails(merged.detail, opts.ledger.entries())
+          : merged.detail
         const providerKeys: ProviderKeyMasks | undefined = gateway.viewerAdmin ? readProviderKeyMasks() : undefined
         return {
           status: 200,
           body: {
             ...result.body,
-            usage: { ...gateway.usage, detail },
+            usage: { ...merged, detail },
             people: gateway.people,
             viewerAdmin: gateway.viewerAdmin,
             scope: gateway.scope,
-            loaded: gateway.loaded,
+            loaded: gateway.loaded || local.usage.today.cursor.calls > 0 || local.usage.today.cursor.tokens > 0,
             gatewayError: gateway.gatewayError || '',
             ...(providerKeys ? { providerKeys } : {}),
           },
@@ -212,19 +227,17 @@ async function withUsage(
     }
 
     // 未配置网关时回落本机账本，避免用量页空白
-    await syncCursorUsage()
-    const panel = panelUsage(url, loadEngineBundle())
-    const detail = panel.viewerAdmin && opts.ledger
-      ? stampKeyTails(panel.usage.detail, opts.ledger.entries())
-      : panel.usage.detail
-    const providerKeys: ProviderKeyMasks | undefined = panel.viewerAdmin ? readProviderKeyMasks() : undefined
+    const detail = local.viewerAdmin && opts.ledger
+      ? stampKeyTails(local.usage.detail, opts.ledger.entries())
+      : local.usage.detail
+    const providerKeys: ProviderKeyMasks | undefined = local.viewerAdmin ? readProviderKeyMasks() : undefined
     return {
       status: 200,
       body: {
         ...result.body,
-        ...panel,
+        ...local,
         ...(providerKeys ? { providerKeys } : {}),
-        usage: { ...panel.usage, detail },
+        usage: { ...local.usage, detail },
       },
     }
   } catch (err) {

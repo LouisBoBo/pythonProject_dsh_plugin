@@ -215,6 +215,29 @@ function fillDays(from: string, to: string, map: Map<string, DayRow>): DayRow[] 
   return rows
 }
 
+/**
+ * 同日若已有 Cursor 控制台账单（cuev-），丢掉对话写码运行时行（cch-/ccj-），
+ * 避免 SDK 落盘与账单补记把同一天写码计两次。无账单日仍认运行时行。
+ */
+export function dedupeCursorSources(events: UsageEvent[]): UsageEvent[] {
+  const providerDays = new Set<string>()
+  for (const evt of events) {
+    if (evt.source !== 'cursor') continue
+    const day = String(evt.ts || '').slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue
+    if (String(evt.jobId || '').startsWith('cuev-')) providerDays.add(day)
+  }
+  if (providerDays.size === 0) return events
+  return events.filter((evt) => {
+    if (evt.source !== 'cursor') return true
+    const day = String(evt.ts || '').slice(0, 10)
+    if (!providerDays.has(day)) return true
+    const id = String(evt.jobId || '')
+    if (id.startsWith('cch-') || id.startsWith('ccj-')) return false
+    return true
+  })
+}
+
 export function summarizeUsage(events: UsageEvent[], opts: {
   on?: string
   grain?: string
@@ -227,6 +250,7 @@ export function summarizeUsage(events: UsageEvent[], opts: {
   const span = monthEnd(on, today)
   const userId = opts.userId ? String(opts.userId) : ''
   const inUser = (evt: UsageEvent) => !userId || evt.userId === userId
+  const rows = dedupeCursorSources(events)
 
   const dayMap = new Map<string, DayRow>()
   const hourMap = new Map<number, DayRow>()
@@ -237,7 +261,7 @@ export function summarizeUsage(events: UsageEvent[], opts: {
   }
   const detail: UsageDetailRow[] = []
 
-  for (const evt of events) {
+  for (const evt of rows) {
     if (!inUser(evt)) continue
     const stamp = shanghaiStamp(evt.ts)
     if (!stamp) continue
@@ -342,7 +366,7 @@ export function peopleUsage(events: UsageEvent[], users: Array<{
       cursor_calls: 0,
     })
   }
-  for (const evt of events) {
+  for (const evt of dedupeCursorSources(events)) {
     const stamp = shanghaiStamp(evt.ts)
     if (!stamp || stamp.ymd < from || stamp.ymd > to) continue
     const id = evt.userId || ''

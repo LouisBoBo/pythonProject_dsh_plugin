@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-key-quota",
-  "version": "0.1.40",
-  "description": "按平台账号分配 DeepSeek Key，管理员查看用量并设上限",
+  "version": "0.1.47",
+  "description": "用量统计主插件：按平台账号分配 DeepSeek Key，侧栏看用量并设上限",
   "dshMarket": {
-    "zh": "Key 用量限额：每把 Key 只看自己的用量，管理员看全部并设上限，超额后停止调用",
-    "en": "Per-key token quota: each key sees only itself, the admin key sees all and sets limits"
+    "zh": "用量统计（Key 限额）：侧栏看用量；按账号分配 Key，超额后停止调用（勿与 llm-meter 混淆）",
+    "en": "Usage stats & per-key quota (primary); not the frozen llm-meter sidecar"
   },
   "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "token", "quota"],
   "license": "MIT",

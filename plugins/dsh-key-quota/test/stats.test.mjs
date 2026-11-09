@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { formatDialogues, peopleUsage, summarizeUsage } from '../lib/stats.js'
+import { dedupeCursorSources, formatDialogues, peopleUsage, summarizeUsage } from '../lib/stats.js'
 
 const now = new Date('2026-10-22T04:00:00.000Z')
 
@@ -94,5 +94,33 @@ describe('usage charts', () => {
     ]), '第1轮第1–4步')
     assert.equal(formatDialogues([{ turn: 1, step: 2 }, { turn: 2, step: 1 }]), '第1轮第2步；第2轮第1步')
     assert.equal(formatDialogues([{ step: 21 }, { messageId: '21' }]), '')
+  })
+
+  it('drops runtime cursor rows on days that already have cuev bill rows', () => {
+    const events = [
+      {
+        ts: '2026-11-07T10:00:00+08:00', source: 'cursor', model: 'a', userId: 'u',
+        prompt: 40, completion: 10, cacheRead: 50, total: 100, jobId: 'cch-job-run1',
+      },
+      {
+        ts: '2026-11-07T11:00:00+08:00', source: 'cursor', model: 'b', userId: 'u',
+        prompt: 80, completion: 20, cacheRead: 100, total: 200, jobId: 'cuev-abc',
+      },
+      {
+        ts: '2026-11-06T11:00:00+08:00', source: 'cursor', model: 'c', userId: 'u',
+        prompt: 20, completion: 5, cacheRead: 25, total: 50, jobId: 'cch-only-day',
+      },
+    ]
+    const kept = dedupeCursorSources(events)
+    assert.equal(kept.length, 2)
+    assert.equal(kept.some((e) => e.jobId === 'cch-job-run1'), false)
+    assert.equal(kept.some((e) => e.jobId === 'cuev-abc'), true)
+    assert.equal(kept.some((e) => e.jobId === 'cch-only-day'), true)
+
+    const summary = summarizeUsage(events, {
+      on: '2026-11-07', grain: 'day', userId: 'u', now: new Date('2026-11-07T12:00:00+08:00'),
+    })
+    assert.equal(summary.today.cursor.calls, 1)
+    assert.equal(summary.today.cursor.tokens, 200)
   })
 })

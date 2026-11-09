@@ -6,6 +6,24 @@ import { describe, it } from 'node:test'
 import { zstdCompressSync } from 'node:zlib'
 import { loadEngineBundle, panelUsage, stampKeyTails } from '../lib/engine-usage.js'
 
+describe('panelUsage session gate', () => {
+  it('hides attributed accounts when personal scope has no active login', () => {
+    const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-27&grain=day&scope=personal', {
+      events: [
+        { ts: '2026-10-27T12:00:00+08:00', source: 'cursor', model: 'a', userId: 'u1', prompt: 1, completion: 1, cacheRead: 0, total: 100 },
+        { ts: '2026-10-27T13:00:00+08:00', source: 'llm', model: 'b', userId: 'u2', prompt: 1, completion: 1, cacheRead: 0, total: 200 },
+        { ts: '2026-10-27T14:00:00+08:00', source: 'llm', model: 'c', userId: '', prompt: 40, completion: 10, cacheRead: 0, total: 50 },
+      ],
+      users: [],
+      active: null,
+    })
+    assert.equal(view.usage.today.cursor.calls, 0)
+    assert.equal(view.usage.today.llm.calls, 1)
+    assert.equal(view.usage.today.llm.tokens, 50)
+    assert.equal(view.usage.detail.length, 1)
+  })
+})
+
 describe('engine usage files', () => {
   it('keeps the admin login when the newest usage copy has no session file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kq-auth-'))
@@ -527,7 +545,10 @@ describe('engine usage files', () => {
       }))
       const expired = loadEngineBundle(env, dir)
       assert.equal(expired.active, null)
-      assert.equal(panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26', expired).viewerAdmin, false)
+      const expiredView = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-26', expired)
+      assert.equal(expiredView.viewerAdmin, false)
+      // 已归属 u_admin 的行在未登录时不再摊开
+      assert.equal(expiredView.usage.today.llm.tokens, 0)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

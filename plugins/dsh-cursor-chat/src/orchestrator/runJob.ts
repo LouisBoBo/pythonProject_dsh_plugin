@@ -665,6 +665,7 @@ async function executeJob(jobId: string): Promise<void> {
       model: cfg.model,
       userPreface: job.requirement,
       images: sdkImages,
+      ledgerJobId: jobId,
       onEvent: emit,
       isCancel: () => Boolean(loadJob(jobId)?.cancelled),
     })
@@ -779,6 +780,7 @@ async function executeJob(jobId: string): Promise<void> {
               resumeAgentId: cre.agent_id,
               model: cfg.model,
               userPreface: job.requirement,
+              ledgerJobId: `${jobId}-retry`,
               onEvent: emit,
               isCancel: () => Boolean(loadJob(jobId)?.cancelled),
             })
@@ -829,6 +831,7 @@ async function executeJob(jobId: string): Promise<void> {
             resumeAgentId: cre.agent_id,
             model: cfg.model,
             userPreface: job.requirement,
+            ledgerJobId: `${jobId}-test`,
             onEvent: emit,
             isCancel: () => Boolean(loadJob(jobId)?.cancelled),
           })
@@ -860,6 +863,7 @@ async function executeJob(jobId: string): Promise<void> {
               resumeAgentId: cre.agent_id,
               model: cfg.model,
               userPreface: job.requirement,
+              ledgerJobId: `${jobId}-eval${round}`,
               onEvent: emit,
               isCancel: () => Boolean(loadJob(jobId)?.cancelled),
             })
@@ -937,6 +941,7 @@ async function executeSteer(jobId: string, message: string): Promise<void> {
       resumeAgentId: job.agent_id,
       model: cfg.model,
       userPreface: message,
+      ledgerJobId: `${jobId}-steer`,
       onEvent: emit,
       isCancel: () => Boolean(loadJob(jobId)?.cancelled),
     })

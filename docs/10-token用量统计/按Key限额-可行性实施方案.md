@@ -1,8 +1,8 @@
 # 按 Key 统计 token 并限额：可行性实施方案
 
 > **状态**：方案可实施（2026-10-23）  
-> **落点**：插件 `@zhongruan/dsh-key-quota`，目录 `plugins/dsh-key-quota/`  
-> **对照**：现有 `@zhongruan/dsh-llm-meter` 的 token 分项与合计口径（`.cursor/rules/llm-meter-locked.mdc`、`plugins/dsh-llm-meter/src/usage.ts`）。本插件复制同一公式，不改旧插件、不改 WorkBuddy 用量页。  
+> **落点**：插件 `@zhongruan/dsh-key-quota`，目录 `plugins/dsh-key-quota/`（**本仓库用量统计现行产品入口**）  
+> **对照**：现有 `@zhongruan/dsh-llm-meter` 的 token 分项与合计口径（`.cursor/rules/llm-meter-locked.mdc`、`plugins/dsh-llm-meter/src/usage.ts`）。本插件复制同一公式，不改旧插件。`dsh-llm-meter` **不是**用量页 / 限额入口。  
 > **交付**：公司插件市场安装。开发机联调可用本地 link，对用户说「去插件市场安装」。
 
 本文取代 2026-10-22 的「管理员电脑当额度服务」方案。2026-10-23 起，管理页认工作助手当前登录：admin 看到 Key 管理，同事只看分给自己的一行。2026-10-25 起，DeepSeek 官方路线按当前平台账号取分给它的那把 Key；系统配置里的 Key 可以留空。Key 原文只加密留在本机，页面只显示尾号。
