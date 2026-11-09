@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { dedupeCursorSources, formatDialogues, peopleUsage, summarizeUsage } from '../lib/stats.js'
+import { dedupeCursorSources, formatDialogues, peopleUsage, summarizeUsage, weekSpan } from '../lib/stats.js'
 
 const now = new Date('2026-10-22T04:00:00.000Z')
 
@@ -94,6 +94,37 @@ describe('usage charts', () => {
     ]), '第1轮第1–4步')
     assert.equal(formatDialogues([{ turn: 1, step: 2 }, { turn: 2, step: 1 }]), '第1轮第2步；第2轮第1步')
     assert.equal(formatDialogues([{ step: 21 }, { messageId: '21' }]), '')
+  })
+
+  it('week grain sums the last 7 Shanghai days ending on focus', () => {
+    const now = new Date('2026-11-09T12:00:00+08:00')
+    assert.deepEqual(weekSpan('2026-11-09', '2026-11-09'), {
+      from: '2026-11-03',
+      to: '2026-11-09',
+      month: '2026-11',
+    })
+    const events = [
+      {
+        ts: '2026-11-03T10:00:00+08:00', source: 'llm', model: 'a', userId: 'u',
+        prompt: 10, completion: 5, cacheRead: 0, total: 15,
+      },
+      {
+        ts: '2026-11-09T11:00:00+08:00', source: 'llm', model: 'a', userId: 'u',
+        prompt: 20, completion: 10, cacheRead: 0, total: 30,
+      },
+      {
+        ts: '2026-11-02T11:00:00+08:00', source: 'llm', model: 'a', userId: 'u',
+        prompt: 99, completion: 1, cacheRead: 0, total: 100,
+      },
+    ]
+    const summary = summarizeUsage(events, { on: '2026-11-09', grain: 'week', userId: 'u', now })
+    assert.equal(summary.grain, 'week')
+    assert.equal(summary.month_from, '2026-11-03')
+    assert.equal(summary.month_to, '2026-11-09')
+    assert.equal(summary.today.llm.calls, 2)
+    assert.equal(summary.today.llm.tokens, 45)
+    assert.equal(summary.monthly.length, 7)
+    assert.equal(summary.hourly.length, 0)
   })
 
   it('drops runtime cursor rows on days that already have cuev bill rows', () => {

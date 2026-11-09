@@ -107,12 +107,12 @@ export function readGatewayEndpoint(
 /**
  * 把页面选中的「某天/某月」换成网关的 [start, end) Unix 秒。
  * @param on - 页面上的日期（YYYY-MM-DD），空串表示今天。
- * @param grain - day 或 month。
+ * @param grain - day / week / month。
  * @param now - 当前时间，测试用。
  */
 export function usageWindow(
   on: string,
-  grain: 'day' | 'month',
+  grain: 'day' | 'week' | 'month',
   now = new Date(),
 ): { start: number; end: number } | null {
   const today = new Date(now.getTime() + OFFSET_MS).toISOString().slice(0, 10)
@@ -123,6 +123,12 @@ export function usageWindow(
     const startMs = Date.UTC(year, month - 1, 1) - OFFSET_MS
     const endMs = Date.UTC(year, month, 1) - OFFSET_MS
     return { start: Math.floor(startMs / 1000), end: Math.floor(endMs / 1000) }
+  }
+  if (grain === 'week') {
+    const endMs = Date.parse(`${day}T00:00:00+08:00`)
+    if (!Number.isFinite(endMs)) return null
+    const startMs = endMs - 6 * 86_400_000
+    return { start: Math.floor(startMs / 1000), end: Math.floor(endMs / 1000) + 86_400 }
   }
   const startMs = Date.parse(`${day}T00:00:00+08:00`)
   if (!Number.isFinite(startMs)) return null

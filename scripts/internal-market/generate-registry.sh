@@ -175,7 +175,8 @@ for plugin_dir, src_meta in discover_plugin_dirs():
         ver_meta.pop("devDependencies", None)
         return ver_meta, tarball_url
 
-    # Profile 常钉死旧版；packument 只留 latest 会 ERR_PNPM_NO_MATCHING_VERSION
+    # Profile 常钉死旧版；packument 只留 latest 会 ERR_PNPM_NO_MATCHING_VERSION。
+    # upload.sh 会先 rsync 拉回线上历史 tgz，再跑本脚本合并进 by_ver。
     by_ver = {version: artifact}
     art_prefix = name.replace("@", "").replace("/", "-") + "-"
     if ARTIFACTS.is_dir():

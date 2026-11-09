@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { zstdCompressSync } from 'node:zlib'
-import { loadEngineBundle, panelUsage, stampKeyTails } from '../lib/engine-usage.js'
+import { loadEngineBundle, localCursorUsage, panelUsage, stampKeyTails } from '../lib/engine-usage.js'
 
 describe('panelUsage session gate', () => {
   it('hides attributed accounts when personal scope has no active login', () => {
-    const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-27&grain=day&scope=personal', {
+    const bundle = {
       events: [
         { ts: '2026-10-27T12:00:00+08:00', source: 'cursor', model: 'a', userId: 'u1', prompt: 1, completion: 1, cacheRead: 0, total: 100 },
         { ts: '2026-10-27T13:00:00+08:00', source: 'llm', model: 'b', userId: 'u2', prompt: 1, completion: 1, cacheRead: 0, total: 200 },
@@ -16,11 +16,16 @@ describe('panelUsage session gate', () => {
       ],
       users: [],
       active: null,
-    })
+    }
+    const view = panelUsage('http://127.0.0.1/v1/local/panel?on=2026-10-27&grain=day&scope=personal', bundle)
     assert.equal(view.usage.today.cursor.calls, 0)
     assert.equal(view.usage.today.llm.calls, 1)
     assert.equal(view.usage.today.llm.tokens, 50)
     assert.equal(view.usage.detail.length, 1)
+    const cursor = localCursorUsage('http://127.0.0.1/v1/local/panel?on=2026-10-27&grain=day&scope=personal', bundle)
+    assert.equal(cursor.today.cursor.calls, 1)
+    assert.equal(cursor.today.cursor.tokens, 2)
+    assert.equal(cursor.today.llm.calls, 0)
   })
 })
 

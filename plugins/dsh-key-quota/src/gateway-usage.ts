@@ -5,7 +5,7 @@
  * 不再向 Usage/Report 上报（由 ensure 去掉 usageReportUrl）。
  */
 import { readGatewayEndpoint, type GatewayEndpoint } from './gateway-catalog.js'
-import type { DayRow, PersonRow, UsageDetailRow, UsageSummary } from './stats.js'
+import { parseUsageGrain, weekSpan, type DayRow, type PersonRow, type UsageDetailRow, type UsageGrain, type UsageSummary } from './stats.js'
 
 const OFFSET = 8 * 60 * 60 * 1000
 const MAX_DETAIL_PAGES = 200
@@ -66,6 +66,102 @@ function num(v: unknown): number {
 
 function text(v: unknown): string {
   return typeof v === 'string' ? v.trim() : ''
+}
+
+/** 用量/模型接口字段名不固定（Pascal / camel / 大小写混用），按候选键取值。 */
+export function pickApiText(row: Record<string, unknown>, keys: readonly string[]): string {
+  const lower = new Map<string, unknown>()
+  for (const [k, v] of Object.entries(row)) lower.set(k.toLowerCase(), v)
+  for (const key of keys) {
+    const v = text(lower.get(key.toLowerCase()))
+    if (v) return v
+  }
+  return ''
+}
+
+function asObjectList(datas: unknown): Record<string, unknown>[] {
+  if (Array.isArray(datas)) {
+    return datas.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object')
+  }
+  if (!datas || typeof datas !== 'object') return []
+  const o = datas as Record<string, unknown>
+  for (const key of ['models', 'list', 'rows', 'items', 'records']) {
+    if (Array.isArray(o[key])) return asObjectList(o[key])
+  }
+  return []
+}
+
+/** 厂商编号多为 DEEPSEEK 这类全大写代码，展示成 deepseek；已是名称则原样。 */
+function displayVendor(raw: string): string {
+  const s = raw.trim()
+  if (!s) return ''
+  if (/^[A-Z0-9][A-Z0-9_-]*$/.test(s)) return s.toLowerCase()
+  return s
+}
+
+export type AliasIdentity = {
+  alias: string
+  provider: string
+  model: string
+}
+
+const ALIAS_KEYS = ['CMODEL_ALIAS', 'modelAlias', 'CALIAS', 'alias'] as const
+const REAL_MODEL_KEYS = ['CREAL_MODEL', 'realModel', 'CMODEL_NAME', 'CMODEL'] as const
+const VENDOR_NO_KEYS = ['CVENDOR_NO', 'vendorNo', 'CPROVIDER', 'provider'] as const
+const VENDOR_NAME_KEYS = ['CVENDOR_NAME', 'vendorName', 'providerName'] as const
+
+/** 模型维护列表一行 → 别名对应的真实供应商、真实模型。值全部来自行字段。 */
+export function identityFromModelRow(row: Record<string, unknown>): AliasIdentity | null {
+  const alias = pickApiText(row, ALIAS_KEYS)
+  if (!alias) return null
+  const model = pickApiText(row, REAL_MODEL_KEYS) || alias
+  const provider = displayVendor(pickApiText(row, VENDOR_NO_KEYS) || pickApiText(row, VENDOR_NAME_KEYS))
+  return { alias, provider, model }
+}
+
+/**
+ * 用量行上的供应商/模型：先读行里已有的真实字段，没有再按别名查模型目录。
+ * 禁止写死 zr-gateway / standard；目录也没有时模型退回别名，供应商留空。
+ */
+export function identityFromUsageRow(
+  row: Record<string, unknown>,
+  catalog: ReadonlyMap<string, AliasIdentity>,
+): { provider: string, model: string } {
+  const alias = pickApiText(row, ALIAS_KEYS)
+  const hit = alias ? catalog.get(alias.toLowerCase()) : undefined
+  const provider = displayVendor(
+    pickApiText(row, VENDOR_NO_KEYS) || pickApiText(row, VENDOR_NAME_KEYS) || hit?.provider || '',
+  )
+  const model = pickApiText(row, REAL_MODEL_KEYS) || hit?.model || alias || '—'
+  return { provider, model }
+}
+
+async function fetchModelCatalog(
+  endpoint: GatewayEndpoint,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<Map<string, AliasIdentity>> {
+  const map = new Map<string, AliasIdentity>()
+  let page = 1
+  let total = Infinity
+  while (page <= 20 && map.size < total) {
+    const got = await gatewayGet(endpoint, token, '/api/ai/Models/GetModelList', {
+      pageIndex: page,
+      pageSize: 100,
+    }, fetchImpl)
+    if (!got.ok) break
+    total = got.totalRows || 0
+    const list = asObjectList(got.datas)
+    if (!list.length) break
+    for (const raw of list) {
+      const id = identityFromModelRow(raw)
+      if (!id) continue
+      map.set(id.alias.toLowerCase(), id)
+    }
+    if (list.length < 100) break
+    page += 1
+  }
+  return map
 }
 
 /**
@@ -257,7 +353,9 @@ export function overlayCursorFromLocal<T extends UsageSummary>(
   local: UsageSummary,
 ): T {
   const cursorDetail = local.detail.filter((row) => row.source === 'cursor')
+  // 网关回落本机账时 detail 里可能已有写码行；先去掉再叠，避免次数/明细翻倍
   const detail = gateway.detail
+    .filter((row) => row.source !== 'cursor')
     .concat(cursorDetail)
     .sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0))
     .slice(0, 200)
@@ -323,16 +421,17 @@ function clientTsMs(row: ListRow): number {
   return 0
 }
 
-function mapDetail(row: ListRow): UsageDetailRow {
+function mapDetail(row: ListRow, catalog: ReadonlyMap<string, AliasIdentity>): UsageDetailRow {
   const ms = clientTsMs(row)
   const input = num(row.CINPUT_TOKENS ?? row.cinput_tokens)
   const output = num(row.COUTPUT_TOKENS ?? row.coutput_tokens)
   const cache = num(row.CCACHED_INPUT_TOKENS ?? row.ccached_input_tokens)
   const reported = num(row.CTOTAL_TOKENS ?? row.ctotal_tokens)
+  const ident = identityFromUsageRow(row, catalog)
   return {
     ts: ms ? shanghaiIso(ms) : '',
-    provider: 'zr-gateway',
-    model: text(row.CMODEL_ALIAS ?? row.cmodel_alias) || '—',
+    provider: ident.provider,
+    model: ident.model,
     source: 'llm',
     lane: 'llm',
     tokens: billableTokens(input, output, reported),
@@ -351,6 +450,7 @@ async function fetchAllDetails(
   fromMs: number,
   toMs: number,
   fetchImpl: typeof fetch,
+  catalog: ReadonlyMap<string, AliasIdentity>,
   filterUser?: { id: string, name: string },
 ): Promise<{ rows: UsageDetailRow[], error?: string }> {
   const all: UsageDetailRow[] = []
@@ -373,7 +473,10 @@ async function fetchAllDetails(
     }
     for (const raw of list) {
       if (!raw || typeof raw !== 'object') continue
-      all.push(mapDetail(raw as ListRow))
+      const row = mapDetail(raw as ListRow, catalog)
+      // 与卡片/图同源：CTOTAL=0 的失败上报、客户端重复行不进明细和各模型次数
+      if (row.tokens <= 0) continue
+      all.push(row)
     }
     lastPageFull = list.length >= DETAIL_PAGE_SIZE
     if (!lastPageFull) break
@@ -433,16 +536,67 @@ function buildDailyFromDetails(details: UsageDetailRow[], month: string): DayRow
   return [...byDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)))
 }
 
-function modelsFromBreakdown(breakdown: MyBreakdown[]): UsageSummary['llm'] {
-  const models = breakdown
-    .filter((b) => text(b.modelAlias))
-    .map((b) => ({
-      provider: 'zr-gateway',
-      model: text(b.modelAlias),
-      tokens: num(b.totalTokens),
-      calls: num(b.calls),
-    }))
-    .sort((a, b) => b.tokens - a.tokens)
+/** 闭区间 [from, to] 逐日桶；缺日补 0，供近 7 天图。 */
+function buildDailyFromRange(details: UsageDetailRow[], from: string, to: string): DayRow[] {
+  const byDate = new Map<string, DayRow>()
+  let cur = from
+  while (cur <= to) {
+    byDate.set(cur, emptyDay(undefined, cur))
+    const nextMs = Date.parse(`${cur}T12:00:00+08:00`) + 86_400_000
+    const next = shanghaiYmd(nextMs)
+    if (next <= cur) break
+    cur = next
+  }
+  for (const row of details) {
+    const ms = Date.parse(row.ts)
+    if (!Number.isFinite(ms)) continue
+    const date = shanghaiYmd(ms)
+    if (date < from || date > to) continue
+    const bucket = byDate.get(date) || emptyDay(undefined, date)
+    applyTokens(bucket, row.input || 0, row.output || 0, row.cacheRead || 0, row.tokens, 1)
+    byDate.set(date, bucket)
+  }
+  return [...byDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)))
+}
+
+function modelsFromBreakdown(
+  breakdown: MyBreakdown[],
+  catalog: ReadonlyMap<string, AliasIdentity>,
+  details: UsageDetailRow[] = [],
+): UsageSummary['llm'] {
+  const buckets = new Map<string, { provider: string, model: string, tokens: number, calls: number }>()
+  const take = (provider: string, model: string) => {
+    const key = `${provider}\0${model}`
+    const existing = buckets.get(key)
+    if (existing) return existing
+    const created = { provider, model, tokens: 0, calls: 0 }
+    buckets.set(key, created)
+    return created
+  }
+  for (const b of breakdown) {
+    const row = b as unknown as Record<string, unknown>
+    if (!pickApiText(row, ALIAS_KEYS) && !pickApiText(row, REAL_MODEL_KEYS)) continue
+    const ident = identityFromUsageRow(row, catalog)
+    const bucket = take(ident.provider, ident.model)
+    bucket.tokens += num(b.totalTokens)
+    bucket.calls += num(b.calls)
+  }
+  // Usage/My 的 groupBy=model 没有 calls；次数与 KPI/图同源，按 GetUsageList 每一行计 1 次
+  const fromDetails = new Map<string, { n: number, tokens: number }>()
+  for (const d of details) {
+    const key = `${d.provider || ''}\0${d.model || '—'}`
+    const acc = fromDetails.get(key) || { n: 0, tokens: 0 }
+    acc.n += 1
+    acc.tokens += d.tokens || 0
+    fromDetails.set(key, acc)
+  }
+  for (const [key, acc] of fromDetails) {
+    const sep = key.indexOf('\0')
+    const bucket = take(key.slice(0, sep), key.slice(sep + 1))
+    if (!bucket.tokens) bucket.tokens = acc.tokens
+    if (bucket.calls < acc.n) bucket.calls = acc.n
+  }
+  const models = [...buckets.values()].sort((a, b) => b.tokens - a.tokens || b.calls - a.calls)
   return { models }
 }
 
@@ -466,7 +620,7 @@ function peopleFromBreakdown(breakdown: MyBreakdown[]): PersonRow[] {
  */
 export async function fetchGatewayPanel(opts: {
   on: string
-  grain: 'day' | 'month'
+  grain: UsageGrain
   scope: 'personal' | 'enterprise'
   viewerAdmin: boolean
   viewer?: { id: string, username?: string, displayName?: string } | null
@@ -476,11 +630,12 @@ export async function fetchGatewayPanel(opts: {
 }): Promise<GatewayPanel | null> {
   const endpoint = opts.endpoint === undefined ? readGatewayEndpoint() : opts.endpoint
   if (!endpoint) return null
+  const grain = parseUsageGrain(opts.grain)
   const cred = await opts.resolveToken(endpoint.credentialRef || 'ZR_GATEWAY_TOKEN')
   const token = String(cred?.value || '').trim()
   if (!token) {
     return {
-      usage: emptyUsage(opts.on, opts.grain),
+      usage: emptyUsage(opts.on, grain),
       people: null,
       viewerAdmin: opts.viewerAdmin,
       scope: opts.scope,
@@ -491,7 +646,6 @@ export async function fetchGatewayPanel(opts: {
   const fetchImpl = opts.fetchImpl || fetch
   const scope = opts.scope === 'enterprise' && opts.viewerAdmin ? 'enterprise' : 'personal'
   const on = opts.on || shanghaiYmd(Date.now())
-  const grain = opts.grain
 
   let fromMs: number
   let toMs: number
@@ -505,6 +659,14 @@ export async function fetchGatewayPanel(opts: {
     month = b.month
     monthFrom = b.fromYmd
     monthTo = b.toYmd
+  } else if (grain === 'week') {
+    const today = shanghaiYmd(Date.now())
+    const w = weekSpan(on, today)
+    fromMs = dayStartMs(w.from)
+    toMs = dayEndMs(w.to)
+    month = w.month
+    monthFrom = w.from
+    monthTo = w.to
   } else {
     const day = /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : shanghaiYmd(Date.now())
     fromMs = dayStartMs(day)
@@ -515,6 +677,7 @@ export async function fetchGatewayPanel(opts: {
   }
 
   const summaryPath = scope === 'enterprise' ? '/api/ai/Usage/Summary' : '/api/ai/Usage/My'
+  const catalogP = fetchModelCatalog(endpoint, token, fetchImpl)
   const dayGroup = await gatewayGet(endpoint, token, summaryPath, {
     from: fromMs,
     to: toMs,
@@ -542,6 +705,7 @@ export async function fetchGatewayPanel(opts: {
       groupBy: 'user',
     }, fetchImpl)
     : null
+  const catalog = await catalogP
 
   const dayDatas = (dayGroup.datas && typeof dayGroup.datas === 'object' ? dayGroup.datas : {}) as MyDatas
   const modelDatas = (modelGroup.ok && modelGroup.datas && typeof modelGroup.datas === 'object'
@@ -558,13 +722,19 @@ export async function fetchGatewayPanel(opts: {
     : undefined
   // 个人必须带网关用户过滤；解析失败则不拉全量明细（避免把别人的行算进个人页）。
   const details = filterUser || scope !== 'personal'
-    ? await fetchAllDetails(endpoint, token, fromMs, toMs, fetchImpl, filterUser)
+    ? await fetchAllDetails(endpoint, token, fromMs, toMs, fetchImpl, catalog, filterUser)
     : { rows: [] as UsageDetailRow[], error: '无法从网关令牌解析当前用户，个人明细暂不可用' }
 
-  const dayKey = grain === 'month' ? monthFrom : (/^\d{4}-\d{2}-\d{2}$/.test(on) ? on : shanghaiYmd(Date.now()))
+  const dayKey = grain === 'day'
+    ? (/^\d{4}-\d{2}-\d{2}$/.test(on) ? on : shanghaiYmd(Date.now()))
+    : monthTo
   // 分时/逐日只从 GetUsageList 明细按 CTOTAL 累加；KPI 与图必须同源，禁止另编次数。
   const hourly = grain === 'day' ? buildHourly(details.rows, dayKey) : []
-  const monthly = grain === 'month' ? buildDailyFromDetails(details.rows, month) : []
+  const monthly = grain === 'month'
+    ? buildDailyFromDetails(details.rows, month)
+    : grain === 'week'
+      ? buildDailyFromRange(details.rows, monthFrom, monthTo)
+      : []
   const daily = monthly.length
     ? monthly
     : (grain === 'day'
@@ -579,7 +749,7 @@ export async function fetchGatewayPanel(opts: {
       })()]
       : [])
 
-  const series = grain === 'month' ? monthly : hourly
+  const series = grain === 'day' ? hourly : monthly
   const seriesCalls = series.reduce((sum, row) => sum + (row.llm_calls || 0), 0)
   const seriesTokens = series.reduce((sum, row) => sum + (row.llm_tokens || 0), 0)
   // Token 优先用 My.totalTokens（接口字段；已核对 = SUM(CTOTAL)）；次数用与图相同的明细汇总
@@ -602,7 +772,7 @@ export async function fetchGatewayPanel(opts: {
     hourly,
     daily,
     monthly,
-    llm: modelsFromBreakdown(modelBreakdown),
+    llm: modelsFromBreakdown(modelBreakdown, catalog, details.rows),
     cursor: { models: [] },
     detail: details.rows,
   }
@@ -621,9 +791,33 @@ export async function fetchGatewayPanel(opts: {
   }
 }
 
-function emptyUsage(on: string, grain: 'day' | 'month'): GatewayPanel['usage'] {
-  const day = /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : shanghaiYmd(Date.now())
+function emptyUsage(on: string, grain: UsageGrain): GatewayPanel['usage'] {
+  const today = shanghaiYmd(Date.now())
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : today
+  if (grain === 'week') {
+    const w = weekSpan(day, today)
+    // 必须补齐 7 个零日桶；空 monthly 会让前端逐日图按 n=1 读 rows[0] 崩溃白屏
+    const monthly = buildDailyFromRange([], w.from, w.to)
+    return {
+      ok: true,
+      source: 'gateway',
+      note: '',
+      grain,
+      on: w.to,
+      month: w.month,
+      month_from: w.from,
+      month_to: w.to,
+      today: { llm: { calls: 0, tokens: 0 }, cursor: { calls: 0, tokens: 0 } },
+      hourly: [],
+      daily: monthly,
+      monthly,
+      llm: { models: [] },
+      cursor: { models: [] },
+      detail: [],
+    }
+  }
   const b = monthBounds(day)
+  const monthDays = grain === 'month' ? buildDailyFromRange([], b.fromYmd, b.toYmd) : []
   return {
     ok: true,
     source: 'gateway',
@@ -631,12 +825,12 @@ function emptyUsage(on: string, grain: 'day' | 'month'): GatewayPanel['usage'] {
     grain,
     on: day,
     month: b.month,
-    month_from: b.fromYmd,
-    month_to: b.toYmd,
+    month_from: grain === 'month' ? b.fromYmd : day,
+    month_to: grain === 'month' ? b.toYmd : day,
     today: { llm: { calls: 0, tokens: 0 }, cursor: { calls: 0, tokens: 0 } },
-    hourly: Array.from({ length: 24 }, (_, hour) => emptyDay(hour)),
-    daily: [],
-    monthly: [],
+    hourly: grain === 'day' ? Array.from({ length: 24 }, (_, hour) => emptyDay(hour)) : [],
+    daily: monthDays,
+    monthly: monthDays,
     llm: { models: [] },
     cursor: { models: [] },
     detail: [],

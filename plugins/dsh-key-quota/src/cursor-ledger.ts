@@ -180,11 +180,23 @@ export function shanghaiShiftYmd(ymd: string, days: number): string {
   return shanghaiToday(new Date(ms + days * 86_400_000))
 }
 
-/** 用量页选定日/月需要同步的上海自然日。 */
-export function panelSyncDays(on: string, grain: 'day' | 'month', now = new Date()): string[] {
+/** 用量页选定日/近7天/月需要同步的上海自然日。 */
+export function panelSyncDays(on: string, grain: 'day' | 'week' | 'month', now = new Date()): string[] {
   const today = shanghaiToday(now)
   const day = /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : today
   const focus = day > today ? today : day
+  if (grain === 'week') {
+    const from = shanghaiShiftYmd(focus, -6)
+    const days: string[] = []
+    let cur = from
+    while (cur <= focus) {
+      days.push(cur)
+      const next = shanghaiShiftYmd(cur, 1)
+      if (next <= cur) break
+      cur = next
+    }
+    return days.length ? days : [focus]
+  }
   if (grain !== 'month') {
     // 打开「今天」时顺带补昨天，避免漏同步后写码卡空白
     if (focus === today) {

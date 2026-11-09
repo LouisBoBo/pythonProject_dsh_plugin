@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { panelSyncDays, syncCursorUsage } from './cursor-ledger.js'
-import { loadEngineBundle, panelQuery, panelUsage, platformSession, stampKeyTails } from './engine-usage.js'
+import { loadEngineBundle, localCursorUsage, panelQuery, panelUsage, platformSession, stampKeyTails } from './engine-usage.js'
 import { fetchGatewayPanel, overlayCursorFromLocal } from './gateway-usage.js'
 import { dispatch, isLoopback, type DispatchDeps, type DispatchResult } from './http.js'
 import { keyIdOf, tailOf } from './key-id.js'
@@ -187,6 +187,9 @@ async function withUsage(
 
     const bundle = loadEngineBundle()
     const local = panelUsage(url, bundle)
+    // 写码叠本机 Cursor 账，不经过个人视图对 userId 的过滤（引擎会话过期时否则整卡为 0）。
+    const cursorLocal = localCursorUsage(url, bundle)
+    const hasCursor = cursorLocal.today.cursor.calls > 0 || cursorLocal.today.cursor.tokens > 0
 
     if (opts.resolveGatewayToken) {
       const gateway = await fetchGatewayPanel({
@@ -205,7 +208,7 @@ async function withUsage(
       })
       if (gateway) {
         // LLM 保持网关原样；只把本机写码叠上去
-        const merged = overlayCursorFromLocal(gateway.usage, local.usage)
+        const merged = overlayCursorFromLocal(gateway.usage, cursorLocal)
         const detail = gateway.viewerAdmin && opts.ledger
           ? stampKeyTails(merged.detail, opts.ledger.entries())
           : merged.detail
@@ -218,7 +221,7 @@ async function withUsage(
             people: gateway.people,
             viewerAdmin: gateway.viewerAdmin,
             scope: gateway.scope,
-            loaded: gateway.loaded || local.usage.today.cursor.calls > 0 || local.usage.today.cursor.tokens > 0,
+            loaded: gateway.loaded || hasCursor,
             gatewayError: gateway.gatewayError || '',
             ...(providerKeys ? { providerKeys } : {}),
           },
@@ -226,10 +229,11 @@ async function withUsage(
       }
     }
 
-    // 未配置网关时回落本机账本，避免用量页空白
+    // 未配置网关时回落本机账本，仍叠写码，避免引擎未登录把写码卡打成 0
+    const fallback = overlayCursorFromLocal(local.usage, cursorLocal)
     const detail = local.viewerAdmin && opts.ledger
-      ? stampKeyTails(local.usage.detail, opts.ledger.entries())
-      : local.usage.detail
+      ? stampKeyTails(fallback.detail, opts.ledger.entries())
+      : fallback.detail
     const providerKeys: ProviderKeyMasks | undefined = local.viewerAdmin ? readProviderKeyMasks() : undefined
     return {
       status: 200,
@@ -237,14 +241,32 @@ async function withUsage(
         ...result.body,
         ...local,
         ...(providerKeys ? { providerKeys } : {}),
-        usage: { ...local.usage, detail },
+        usage: { ...fallback, detail },
+        loaded: local.loaded || hasCursor,
       },
     }
   } catch (err) {
     opts.logger?.warn?.(
       `key-quota: 用量面板组装失败（${err instanceof Error ? err.message : String(err)}）`,
     )
-    return result
+    // 组装失败也要带回空 usage，避免前端 grain=week/month 时空 monthly 崩成白屏
+    try {
+      const bundle = loadEngineBundle()
+      const local = panelUsage(url, bundle)
+      const cursorLocal = localCursorUsage(url, bundle)
+      return {
+        status: 200,
+        body: {
+          ...result.body,
+          ...local,
+          usage: overlayCursorFromLocal(local.usage, cursorLocal),
+          loaded: false,
+          gatewayError: '用量面板组装失败，已回落本机账本',
+        },
+      }
+    } catch {
+      return result
+    }
   }
 }
 

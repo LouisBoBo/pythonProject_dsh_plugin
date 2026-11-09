@@ -199,6 +199,12 @@ window.__ModuleLoader__.load({
       return s.length >= 10 ? s.slice(5).replace('-', '/') : s
     }
 
+    function escapeSvg(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (ch) {
+        return ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : '&#39;'
+      })
+    }
+
     function monthLabel(ym) {
       var s = String(ym || '')
       if (s.length >= 7) return s.slice(0, 4) + '年' + String(Number(s.slice(5, 7))) + '月'
@@ -378,9 +384,15 @@ window.__ModuleLoader__.load({
       var hover = hoverState[0]
       var setHover = hoverState[1]
       var rows = props.rows || []
-      var n = Math.max(1, rows.length)
+      // 近7天/按月若接口失败留下空数组：禁止用 n=1 去读 rows[0]（会白屏）
+      var n = rows.length
       var W = 560, H = 200, L = 48, R = 14, T = 16, B = 30
       var iw = W - L - R, ih = H - T - B
+      if (!n) {
+        return h('div', { className: 'wb-usage-hour-plot' },
+          h('div', { className: 'wb-usage-hour-empty', style: { padding: '48px 12px', textAlign: 'center', color: '#94a3b8', fontSize: 12 } }, '暂无逐日数据'),
+        )
+      }
       var llm = rows.map(function (r) { return r.llm_tokens || 0 })
       var cur = rows.map(function (r) { return r.cursor_tokens || 0 })
       var max = niceMax(Math.max.apply(null, [0].concat(llm, cur)))
@@ -390,20 +402,23 @@ window.__ModuleLoader__.load({
       var marks = { 0: '00:00', 8: '08:00', 15: '15:00', 23: '23:00' }
       var bars = ''
       for (var j = 0; j < n; j++) {
+        var row = rows[j] || {}
         var cx = L + j * slot + slot / 2
         var xL = cx - pairW / 2
         var hL = max ? (llm[j] / max) * ih : 0
         var hC = max ? (cur[j] / max) * ih : 0
         if (hL > 0.6) bars += '<rect x="' + xL.toFixed(1) + '" y="' + (T + ih - hL).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + hL.toFixed(1) + '" fill="#ff5a1f"/>'
         if (hC > 0.6) bars += '<rect x="' + (xL + bw).toFixed(1) + '" y="' + (T + ih - hC).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + hC.toFixed(1) + '" fill="#14b8a6"/>'
-        var tick = props.axis === 'day' ? (showTick(j, n, rows[j] && rows[j].tick, 'day') ? rows[j].tick : '') : (marks[j] || '')
-        if (tick) bars += '<text x="' + cx + '" y="' + (H - 8) + '" text-anchor="middle" font-size="10" fill="#94a3b8">' + tick + '</text>'
+        var tick = props.axis === 'day'
+          ? (showTick(j, n, row.tick, 'day') ? row.tick : '')
+          : (marks[j] || '')
+        if (tick) bars += '<text x="' + cx + '" y="' + (H - 8) + '" text-anchor="middle" font-size="10" fill="#94a3b8">' + escapeSvg(tick) + '</text>'
       }
       var grid = [0, 0.5, 1].map(function (f) {
         var yy = T + ih - f * ih
         var label = f === 0 ? '0' : fmtTokens(max * f)
         return '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '" stroke="#eceef2"/>' +
-          '<text x="' + (L - 8) + '" y="' + (yy + 3) + '" text-anchor="end" font-size="10" fill="#94a3b8">' + label + '</text>'
+          '<text x="' + (L - 8) + '" y="' + (yy + 3) + '" text-anchor="end" font-size="10" fill="#94a3b8">' + escapeSvg(label) + '</text>'
       }).join('')
       var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="200" preserveAspectRatio="none">' + grid + bars + '</svg>'
       function onMove(ev) {
@@ -883,24 +898,32 @@ window.__ModuleLoader__.load({
 
       var usage = (data && data.usage) || null
       var monthMode = grain === 'month'
+      var weekMode = grain === 'week'
+      var daySeries = monthMode || weekMode
       var isAdmin = Boolean(data && ((data.viewer && data.viewer.admin) || data.viewerAdmin))
-      var series = monthMode ? ((usage && usage.monthly) || []) : ((usage && usage.hourly) || [])
-      var axis = monthMode ? 'day' : 'hour'
-      var rows = dualRows(series, monthMode)
+      var series = daySeries ? ((usage && usage.monthly) || []) : ((usage && usage.hourly) || [])
+      var axis = daySeries ? 'day' : 'hour'
+      var rows = dualRows(series, daySeries)
       var sumLlmTok = rows.reduce(function (a, r) { return a + r.llm_tokens }, 0)
       var sumCurTok = rows.reduce(function (a, r) { return a + r.cursor_tokens }, 0)
       var sumLlmCalls = rows.reduce(function (a, r) { return a + r.llm_calls }, 0)
       var sumCurCalls = rows.reduce(function (a, r) { return a + r.cursor_calls }, 0)
       var when = (usage && usage.on) || onDate
       var monthLab = monthLabel((usage && usage.month) || onDate)
+      var weekFrom = (usage && usage.month_from) || when
+      var weekTo = (usage && usage.month_to) || when
+      var weekLab = mdLabel(weekFrom) + '–' + mdLabel(weekTo)
       var dayLab = monthMode
         ? (monthLab || String(onDate).slice(0, 7))
-        : ((when === usageTodayYmd() ? '今日 ' + mdLabel(when) : mdLabel(when)))
+        : weekMode
+          ? ('近7天 ' + weekLab)
+          : ((when === usageTodayYmd() ? '今日 ' + mdLabel(when) : mdLabel(when)))
       var llmModel = (usage && usage.llm && usage.llm.models && usage.llm.models[0] && usage.llm.models[0].model) || '暂无调用'
       var codeModel = (usage && usage.cursor && usage.cursor.models && usage.cursor.models[0] && usage.cursor.models[0].model) || '暂无调用'
-      var stamp = monthMode ? (monthLab || '') : when
+      var stamp = monthMode ? (monthLab || '') : weekMode ? weekLab : when
       var today = (usage && usage.today) || {}
       var msg = err || statusText(data)
+      var dateLabel = monthMode ? '月份' : weekMode ? '截止日期' : '日期'
 
       return h('div', { className: 'kq-root' },
         h('div', { className: 'wb-usage-view' },
@@ -911,7 +934,7 @@ window.__ModuleLoader__.load({
                   h('h2', { className: 'kq-page-title' }, '用量统计'),
                 ),
                 h('div', { className: 'wb-usage-filter' },
-                  h('label', null, monthMode ? '月份' : '日期'),
+                  h('label', null, dateLabel),
                   h('input', {
                     type: monthMode ? 'month' : 'date',
                     value: monthMode ? String(onDate).slice(0, 7) : onDate,
@@ -924,9 +947,13 @@ window.__ModuleLoader__.load({
                   h('label', null, '统计粒度'),
                   h('select', {
                     value: grain,
-                    onChange: function (ev) { setGrain(ev.target.value === 'month' ? 'month' : 'day') },
+                    onChange: function (ev) {
+                      var v = ev.target.value
+                      setGrain(v === 'month' ? 'month' : v === 'week' ? 'week' : 'day')
+                    },
                   },
                     h('option', { value: 'day' }, '按日'),
+                    h('option', { value: 'week' }, '近7天'),
                     h('option', { value: 'month' }, '按月'),
                   ),
                   h('div', { className: 'kq-corner' },
@@ -954,10 +981,10 @@ window.__ModuleLoader__.load({
                 ),
               ),
               h('div', { className: 'wb-set-card' },
-                h('h3', null, monthMode ? '各日用量' : '各时段用量'),
+                h('h3', null, daySeries ? '各日用量' : '各时段用量'),
                 h('div', { className: 'body' },
                   h('div', { className: 'wb-usage-hour-sub' },
-                    (monthMode ? (monthLab + ' 逐日') : (when + ' 00:00–24:00')) +
+                    (monthMode ? (monthLab + ' 逐日') : weekMode ? (weekLab + ' 逐日') : (when + ' 00:00–24:00')) +
                     ' · LLM ' + sumLlmCalls + ' 次 / ' + fmtTokens(sumLlmTok) +
                     ' · 写码 ' + sumCurCalls + ' 次 / ' + fmtTokens(sumCurTok),
                   ),

@@ -63,9 +63,11 @@ export type DayRow = {
   calls: number
 }
 
+export type UsageGrain = 'day' | 'week' | 'month'
+
 export type UsageSummary = {
   ok: true
-  grain: 'day' | 'month'
+  grain: UsageGrain
   on: string
   month: string
   month_from: string
@@ -238,6 +240,21 @@ export function dedupeCursorSources(events: UsageEvent[]): UsageEvent[] {
   })
 }
 
+/** 解析用量粒度；非法值回落按日。 */
+export function parseUsageGrain(raw: unknown): UsageGrain {
+  const text = String(raw || '')
+  if (text === 'month') return 'month'
+  if (text === 'week') return 'week'
+  return 'day'
+}
+
+/** 近 7 日闭区间：截止日往前共 7 个上海自然日（含截止日）。 */
+export function weekSpan(on: string, today: string): { from: string, to: string, month: string } {
+  const to = focusDay(on, today)
+  const from = ymdAdd(to, -6)
+  return { from, to, month: to.slice(0, 7) }
+}
+
 export function summarizeUsage(events: UsageEvent[], opts: {
   on?: string
   grain?: string
@@ -245,9 +262,15 @@ export function summarizeUsage(events: UsageEvent[], opts: {
   now?: Date
 }): UsageSummary {
   const today = shanghaiToday(opts.now ?? new Date())
-  const grain = opts.grain === 'month' ? 'month' : 'day'
+  const grain = parseUsageGrain(opts.grain)
   const on = focusDay(opts.on || '', today)
-  const span = monthEnd(on, today)
+  const monthSpan = monthEnd(on, today)
+  const week = weekSpan(on, today)
+  const span = grain === 'month'
+    ? { from: monthSpan.from, to: monthSpan.to, month: monthSpan.month }
+    : grain === 'week'
+      ? week
+      : { from: on, to: on, month: on.slice(0, 7) }
   const userId = opts.userId ? String(opts.userId) : ''
   const inUser = (evt: UsageEvent) => !userId || evt.userId === userId
   const rows = dedupeCursorSources(events)
@@ -266,9 +289,9 @@ export function summarizeUsage(events: UsageEvent[], opts: {
     const stamp = shanghaiStamp(evt.ts)
     if (!stamp) continue
     const src = evt.source === 'cursor' ? 'cursor' : 'llm'
-    const inMonth = stamp.ymd >= span.from && stamp.ymd <= span.to
+    const inSpan = stamp.ymd >= span.from && stamp.ymd <= span.to
     const onFocus = stamp.ymd === on
-    const inModelWindow = grain === 'month' ? inMonth : onFocus
+    const inModelWindow = grain === 'day' ? onFocus : inSpan
     const parts = chartParts(evt)
     if (inModelWindow) {
       const provider = (evt.provider || '').trim()
@@ -279,7 +302,7 @@ export function summarizeUsage(events: UsageEvent[], opts: {
       bucket.calls += 1
       models[src].set(key, bucket)
     }
-    const inDetail = grain === 'month' ? inMonth : onFocus
+    const inDetail = grain === 'day' ? onFocus : inSpan
     if (inDetail) {
       detail.push({
         ts: evt.ts,
@@ -300,8 +323,12 @@ export function summarizeUsage(events: UsageEvent[], opts: {
         ...(evt.step ? { step: evt.step } : {}),
       })
     }
-    if (!inMonth) continue
-    if (grain === 'month' || onFocus) {
+    // 按日仍保留当月日桶（与旧行为一致）；近7天/按月只收窗口内
+    const keepDay = grain === 'day'
+      ? (stamp.ymd >= monthSpan.from && stamp.ymd <= monthSpan.to)
+      : inSpan
+    if (!keepDay) continue
+    if (grain === 'day' && onFocus) {
       const hour = hourMap.get(stamp.hour) || emptyDay()
       add(hour, evt)
       hour.hour = stamp.hour
@@ -312,18 +339,21 @@ export function summarizeUsage(events: UsageEvent[], opts: {
     dayMap.set(stamp.ymd, day)
   }
 
-  const monthly = fillDays(span.from, span.to, dayMap)
-  const hourly = [...hourMap.values()]
+  const chartFrom = grain === 'day' ? monthSpan.from : span.from
+  const chartTo = grain === 'day' ? monthSpan.to : span.to
+  const monthly = fillDays(chartFrom, chartTo, dayMap)
+  const hourly = grain === 'day' ? [...hourMap.values()] : []
   const focus = dayMap.get(on) || emptyDay()
-  const period = grain === 'month'
-    ? monthly.reduce((acc, row) => {
+  const period = grain === 'day'
+    ? focus
+    : monthly.reduce((acc, row) => {
+        if (row.date && (row.date < span.from || row.date > span.to)) return acc
         acc.llm_calls += row.llm_calls
         acc.llm_tokens += row.llm_tokens
         acc.cursor_calls += row.cursor_calls
         acc.cursor_tokens += row.cursor_tokens
         return acc
       }, emptyDay())
-    : focus
 
   const modelList = (src: 'llm' | 'cursor') => [...models[src].values()]
     .sort((a, b) => b.tokens - a.tokens || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model))
@@ -342,7 +372,7 @@ export function summarizeUsage(events: UsageEvent[], opts: {
     },
     hourly,
     daily: monthly,
-    monthly,
+    monthly: grain === 'week' ? fillDays(span.from, span.to, dayMap) : monthly,
     llm: { models: modelList('llm') },
     cursor: { models: modelList('cursor') },
     detail: detail.slice(0, 200),

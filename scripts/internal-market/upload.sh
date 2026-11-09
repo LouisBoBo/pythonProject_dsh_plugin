@@ -56,6 +56,17 @@ except Exception as e:
 PY
 
 ssh -i "$KEY" "$HOST" "mkdir -p '$REMOTE_ROOT/artifacts' '$REMOTE_ROOT/npm'"
+
+# 先把线上多出来的历史 tgz 拉回本地，再 --delete 推上去。
+# 否则本机 artifacts 缺旧版时会把同事 Profile 钉死的版本从私服抹掉 →
+# ERR_PNPM_NO_MATCHING_VERSION（例如曾钉 @zhongruan/dsh-cursor-chat@0.2.4）。
+echo "==> 合并线上历史制品（防删旧版本）…"
+mkdir -p "$REG_DIR/artifacts" "$REG_DIR/npm"
+rsync -az -e "ssh -i $KEY" "$HOST:$REMOTE_ROOT/artifacts/" "$REG_DIR/artifacts/"
+rsync -az -e "ssh -i $KEY" "$HOST:$REMOTE_ROOT/npm/" "$REG_DIR/npm/"
+# 拉回后重编 packument，把远程独有版本写进 index.json /latest
+"$ROOT/scripts/internal-market/generate-registry.sh"
+
 scp -i "$KEY" "$REG_DIR/plugins.json" "$HOST:$REMOTE_ROOT/plugins.json"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/artifacts/" "$HOST:$REMOTE_ROOT/artifacts/"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/npm/" "$HOST:$REMOTE_ROOT/npm/"

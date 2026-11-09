@@ -2,8 +2,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   billableTokens,
+  fetchGatewayPanel,
   gatewayUserFromJwt,
+  identityFromModelRow,
+  identityFromUsageRow,
   overlayCursorFromLocal,
+  pickApiText,
   stripGatewayUsageReportUrl,
   unwrapFunctionResult,
 } from '../lib/gateway-usage.js'
@@ -61,6 +65,231 @@ test('unwrapFunctionResult surfaces business Content', () => {
   })
   assert.equal(got.ok, false)
   assert.match(got.content, /开始时间/)
+})
+
+test('pickApiText reads Pascal or camel keys without a hardcoded value', () => {
+  assert.equal(pickApiText({ CREAL_MODEL: 'deepseek-v4-flash' }, ['CREAL_MODEL', 'realModel']), 'deepseek-v4-flash')
+  assert.equal(pickApiText({ realModel: 'glm-5' }, ['CREAL_MODEL', 'realModel']), 'glm-5')
+  assert.equal(pickApiText({ cvendor_no: 'DEEPSEEK' }, ['CVENDOR_NO']), 'DEEPSEEK')
+  assert.equal(pickApiText({}, ['CREAL_MODEL']), '')
+})
+
+test('identityFromModelRow takes vendor and real model from the catalog row', () => {
+  const id = identityFromModelRow({
+    CALIAS: 'standard',
+    CREAL_MODEL: 'deepseek-v4-flash',
+    CVENDOR_NO: 'DEEPSEEK',
+    CVENDOR_NAME: 'DeepSeek',
+  })
+  assert.deepEqual(id, { alias: 'standard', provider: 'deepseek', model: 'deepseek-v4-flash' })
+})
+
+test('identityFromUsageRow prefers row fields then catalog alias lookup', () => {
+  const catalog = new Map([
+    ['standard', { alias: 'standard', provider: 'deepseek', model: 'deepseek-v4-flash' }],
+  ])
+  assert.deepEqual(identityFromUsageRow({ CMODEL_ALIAS: 'standard' }, catalog), {
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+  })
+  assert.deepEqual(identityFromUsageRow({
+    CMODEL_ALIAS: 'standard',
+    CREAL_MODEL: 'glm-5.3',
+    CVENDOR_NO: 'ZHIPU',
+  }, catalog), {
+    provider: 'zhipu',
+    model: 'glm-5.3',
+  })
+  assert.deepEqual(identityFromUsageRow({ CMODEL_ALIAS: 'unknown-alias' }, catalog), {
+    provider: '',
+    model: 'unknown-alias',
+  })
+})
+
+function okBody(datas, totalRows = 0) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      success: true,
+      data: { Success: true, Content: '', Datas: datas, TotalRows: totalRows },
+    }),
+  }
+}
+
+test('fetchGatewayPanel resolves standard via Models/GetModelList, never hardcodes zr-gateway', async () => {
+  const token = fakeJwt({
+    'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier': 'u1',
+    'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name': 'lzh',
+  })
+  const seen = []
+  const fetchImpl = async (url) => {
+    const u = String(url)
+    seen.push(u)
+    if (u.includes('/api/ai/Models/GetModelList')) {
+      return okBody([{
+        CALIAS: 'standard',
+        CREAL_MODEL: 'deepseek-v4-flash',
+        CVENDOR_NO: 'DEEPSEEK',
+        CVENDOR_NAME: 'DeepSeek',
+      }], 1)
+    }
+    if (u.includes('/api/ai/Usage/GetUsageList')) {
+      return okBody([{
+        CREQUEST_ID: 'req-1',
+        CUSER_ID: 'u1',
+        CUSER_CREATED: 'lzh',
+        CMODEL_ALIAS: 'standard',
+        CINPUT_TOKENS: 10,
+        COUTPUT_TOKENS: 2,
+        CTOTAL_TOKENS: 12,
+        CCACHED_INPUT_TOKENS: 0,
+        CCLIENT_TS: Date.parse('2026-11-09T09:13:00+08:00'),
+      }], 1)
+    }
+    if (u.includes('/api/ai/Usage/My') && u.includes('groupBy=model')) {
+      return okBody({
+        totalTokens: 12,
+        totalCalls: 1,
+        breakdown: [{ modelAlias: 'standard', totalTokens: 12, calls: 1 }],
+      })
+    }
+    if (u.includes('/api/ai/Usage/My')) {
+      return okBody({ totalTokens: 12, totalCalls: 1, breakdown: [] })
+    }
+    return okBody({})
+  }
+  const panel = await fetchGatewayPanel({
+    on: '2026-11-09',
+    grain: 'day',
+    scope: 'personal',
+    viewerAdmin: false,
+    resolveToken: async () => ({ value: token }),
+    endpoint: { origin: 'http://gw.test', credentialRef: 'ZR_GATEWAY_TOKEN' },
+    fetchImpl,
+  })
+  assert.ok(panel?.loaded)
+  assert.equal(panel.usage.detail[0].provider, 'deepseek')
+  assert.equal(panel.usage.detail[0].model, 'deepseek-v4-flash')
+  assert.equal(panel.usage.llm.models[0].provider, 'deepseek')
+  assert.equal(panel.usage.llm.models[0].model, 'deepseek-v4-flash')
+  assert.equal(panel.usage.llm.models[0].calls, 1)
+  assert.equal(panel.usage.detail.some((row) => row.provider === 'zr-gateway'), false)
+  assert.equal(panel.usage.llm.models.some((row) => row.model === 'standard'), false)
+  assert.ok(seen.some((u) => u.includes('/api/ai/Models/GetModelList')))
+})
+
+test('各模型次数: Usage/My 无 calls 时按 GetUsageList 行数计次', async () => {
+  const token = fakeJwt({
+    'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier': 'u1',
+    'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name': 'lzh',
+  })
+  const fetchImpl = async (url) => {
+    const u = String(url)
+    if (u.includes('/api/ai/Models/GetModelList')) {
+      return okBody([{
+        CALIAS: 'standard',
+        CREAL_MODEL: 'deepseek-flash',
+        CVENDOR_NO: 'DEEPSEEK',
+      }], 1)
+    }
+    if (u.includes('/api/ai/Usage/GetUsageList')) {
+      const row = (id) => ({
+        CREQUEST_ID: id,
+        CUSER_ID: 'u1',
+        CUSER_CREATED: 'lzh',
+        CMODEL_ALIAS: 'standard',
+        CINPUT_TOKENS: 10,
+        COUTPUT_TOKENS: 2,
+        CTOTAL_TOKENS: 12,
+        CCACHED_INPUT_TOKENS: 0,
+        CCLIENT_TS: Date.parse('2026-11-09T09:13:00+08:00'),
+      })
+      return okBody([row('req-1'), row('req-2')], 2)
+    }
+    if (u.includes('/api/ai/Usage/My') && u.includes('groupBy=model')) {
+      return okBody({
+        totalTokens: 24,
+        breakdown: [{ modelAlias: 'standard', totalTokens: 24 }],
+      })
+    }
+    if (u.includes('/api/ai/Usage/My')) {
+      return okBody({ totalTokens: 24, breakdown: [] })
+    }
+    return okBody({})
+  }
+  const panel = await fetchGatewayPanel({
+    on: '2026-11-09',
+    grain: 'day',
+    scope: 'personal',
+    viewerAdmin: false,
+    resolveToken: async () => ({ value: token }),
+    endpoint: { origin: 'http://gw.test', credentialRef: 'ZR_GATEWAY_TOKEN' },
+    fetchImpl,
+  })
+  assert.equal(panel.usage.llm.models[0].model, 'deepseek-flash')
+  assert.equal(panel.usage.llm.models[0].tokens, 24)
+  assert.equal(panel.usage.llm.models[0].calls, 2)
+  assert.equal(panel.usage.today.llm.calls, 2)
+})
+
+test('调用明细丢掉 CTOTAL=0 的失败行，次数与卡片一致', async () => {
+  const token = fakeJwt({
+    'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier': 'u1',
+    'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name': 'lzh',
+  })
+  const fetchImpl = async (url) => {
+    const u = String(url)
+    if (u.includes('/api/ai/Models/GetModelList')) {
+      return okBody([{ CALIAS: 'standard', CREAL_MODEL: 'deepseek-flash', CVENDOR_NO: 'DEEPSEEK' }], 1)
+    }
+    if (u.includes('/api/ai/Usage/GetUsageList')) {
+      const billed = {
+        CREQUEST_ID: 'ok-1',
+        CUSER_ID: 'u1',
+        CUSER_CREATED: 'lzh',
+        CMODEL_ALIAS: 'standard',
+        CINPUT_TOKENS: 10,
+        COUTPUT_TOKENS: 2,
+        CTOTAL_TOKENS: 12,
+        CSTATUS: 'ok',
+        CCLIENT_TS: Date.parse('2026-11-09T09:13:00+08:00'),
+      }
+      const failed = {
+        CREQUEST_ID: 'err-1',
+        CUSER_ID: 'u1',
+        CUSER_CREATED: 'lzh',
+        CMODEL_ALIAS: 'standard',
+        CINPUT_TOKENS: 0,
+        COUTPUT_TOKENS: 0,
+        CTOTAL_TOKENS: 0,
+        CSTATUS: 'error',
+        CCLIENT_TS: Date.parse('2026-11-09T09:13:00+08:00'),
+      }
+      return okBody([billed, failed, { ...failed, CREQUEST_ID: 'err-2' }], 3)
+    }
+    if (u.includes('/api/ai/Usage/My') && u.includes('groupBy=model')) {
+      return okBody({ totalTokens: 12, breakdown: [{ modelAlias: 'standard', totalTokens: 12 }] })
+    }
+    if (u.includes('/api/ai/Usage/My')) {
+      return okBody({ totalTokens: 12, breakdown: [] })
+    }
+    return okBody({})
+  }
+  const panel = await fetchGatewayPanel({
+    on: '2026-11-09',
+    grain: 'day',
+    scope: 'personal',
+    viewerAdmin: false,
+    resolveToken: async () => ({ value: token }),
+    endpoint: { origin: 'http://gw.test', credentialRef: 'ZR_GATEWAY_TOKEN' },
+    fetchImpl,
+  })
+  assert.equal(panel.usage.detail.length, 1)
+  assert.equal(panel.usage.detail[0].task, 'ok-1')
+  assert.equal(panel.usage.llm.models[0].calls, 1)
+  assert.equal(panel.usage.today.llm.calls, 1)
+  assert.equal(panel.usage.detail.some((row) => row.tokens === 0), false)
 })
 
 test('stripGatewayUsageReportUrl removes report line only inside gateway block', () => {
@@ -204,6 +433,48 @@ test('overlayCursorFromLocal keeps gateway LLM and only fills coding', () => {
   assert.match(merged.note, /写码/)
 })
 
+test('overlayCursorFromLocal does not duplicate coding rows already on the ledger', () => {
+  const cursorRow = {
+    ts: '2026-11-06T11:00:00+08:00',
+    provider: 'cursor',
+    model: 'composer-1',
+    source: 'cursor',
+    lane: 'cursor_code',
+    tokens: 4500,
+    task: '写码',
+  }
+  const base = {
+    ok: true,
+    grain: 'day',
+    on: '2026-11-06',
+    month: '2026-11',
+    month_from: '2026-11-01',
+    month_to: '2026-11-06',
+    today: { llm: { calls: 1, tokens: 100 }, cursor: { calls: 1, tokens: 4500 } },
+    hourly: [],
+    daily: [],
+    monthly: [],
+    llm: { models: [{ provider: 'deepseek', model: 'deepseek-flash', tokens: 100, calls: 1 }] },
+    cursor: { models: [{ provider: 'cursor', model: 'composer-1', tokens: 4500, calls: 1 }] },
+    detail: [
+      {
+        ts: '2026-11-06T10:00:00+08:00',
+        provider: 'deepseek',
+        model: 'deepseek-flash',
+        source: 'llm',
+        lane: 'llm',
+        tokens: 100,
+        task: 'r1',
+      },
+      cursorRow,
+    ],
+  }
+  const merged = overlayCursorFromLocal(base, { ...base, detail: [cursorRow] })
+  assert.equal(merged.detail.filter((row) => row.source === 'cursor').length, 1)
+  assert.equal(merged.detail.filter((row) => row.source === 'llm').length, 1)
+  assert.equal(merged.today.cursor.calls, 1)
+})
+
 test('overlayCursorFromLocal keeps coding hours when gateway hourly is empty', () => {
   const gateway = {
     ok: true,
@@ -268,6 +539,28 @@ test('panelSyncDays covers selected day or month to today', () => {
   const month = panelSyncDays('2026-11-06', 'month', now)
   assert.equal(month[0], '2026-11-01')
   assert.equal(month[month.length - 1], '2026-11-07')
+  const week = panelSyncDays('2026-11-07', 'week', now)
+  assert.equal(week[0], '2026-11-01')
+  assert.equal(week[week.length - 1], '2026-11-07')
+  assert.equal(week.length, 7)
+})
+
+test('week emptyUsage fills 7 daily buckets (avoids client dual-chart white screen)', async () => {
+  const panel = await fetchGatewayPanel({
+    on: '2026-11-09',
+    grain: 'week',
+    scope: 'personal',
+    viewerAdmin: false,
+    resolveToken: async () => ({ value: '' }),
+    endpoint: { baseUrl: 'http://127.0.0.1:9', credentialRef: 'ZR_GATEWAY_TOKEN' },
+  })
+  assert.ok(panel)
+  assert.equal(panel.usage.grain, 'week')
+  assert.equal(panel.usage.month_from, '2026-11-03')
+  assert.equal(panel.usage.month_to, '2026-11-09')
+  assert.equal(panel.usage.monthly.length, 7)
+  assert.equal(panel.usage.monthly[0].date, '2026-11-03')
+  assert.equal(panel.usage.monthly[6].date, '2026-11-09')
 })
 
 test('decryptCursorSafeStorage unlocks Chromium v10 blobs', () => {

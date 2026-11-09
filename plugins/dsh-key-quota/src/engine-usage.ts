@@ -1125,12 +1125,17 @@ export function stampKeyTails(
   }))
 }
 
-export function panelQuery(url: string): { on: string, grain: 'day' | 'month', scope: 'personal' | 'enterprise' } {
+export function panelQuery(url: string): {
+  on: string
+  grain: 'day' | 'week' | 'month'
+  scope: 'personal' | 'enterprise'
+} {
   const q = url.includes('?') ? url.slice(url.indexOf('?') + 1) : ''
   const params = new URLSearchParams(q)
+  const grainRaw = params.get('grain') || ''
   return {
     on: params.get('on') || '',
-    grain: params.get('grain') === 'month' ? 'month' : 'day',
+    grain: grainRaw === 'month' ? 'month' : grainRaw === 'week' ? 'week' : 'day',
     scope: params.get('scope') === 'enterprise' ? 'enterprise' : 'personal',
   }
 }
@@ -1163,8 +1168,18 @@ export function panelUsage(url: string, bundle = loadEngineBundle()): {
       ...memberDetail(row),
       task: readableTask(row),
     }))
-  const from = query.grain === 'month' ? usage.month_from : usage.on
-  const to = query.grain === 'month' ? usage.month_to : usage.on
+  const from = query.grain === 'day' ? usage.on : usage.month_from
+  const to = query.grain === 'day' ? usage.on : usage.month_to
   const people = scope === 'enterprise' ? peopleUsage(events, bundle.users, from, to) : null
   return { usage, people, viewerAdmin, scope, loaded: events.length > 0 }
+}
+
+/**
+ * 本机写码账（source=cursor）。不跟引擎 active / 个人视图过滤走——
+ * 工作助手登录与引擎会话不是同一套 id，网关 LLM 仍可显示时写码会被滤成 0。
+ */
+export function localCursorUsage(url: string, bundle = loadEngineBundle()): UsageSummary {
+  const query = panelQuery(url)
+  const cursorOnly = bundle.events.filter((evt) => evt.source === 'cursor')
+  return summarizeUsage(cursorOnly, { on: query.on, grain: query.grain, userId: null })
 }

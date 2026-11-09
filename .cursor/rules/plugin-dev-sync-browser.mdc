@@ -1,44 +1,41 @@
 ---
-description: 插件改完必须同步到桌面宿主（默认）与浏览器；禁止只改仓库就当验收完成
+description: 禁止自动更新本机已装插件；本机同步/安装仅当用户明确要求；用户自行在市场点更新
 alwaysApply: true
 ---
 
-# 插件开发验收 = 桌面宿主（必同步）
+# 本机插件：禁止自动更新（用户手动）
 
-当前对接与日常验收入口是 **桌面 WorkBuddy**（江西中软工作助手）。  
-改完 `plugins/dsh-*` **不等于**桌面已更新：桌面读的是 Profile 里已装包。
+用户明确要求：**所有插件由用户自己在「设置 → 插件市场」手动安装/更新。**  
+Agent **不得**擅自把仓库改动覆盖进本机 Profile，也不得擅自跑 `install-latest`。
 
-插件装在 **DSH Profile**，不跟侧栏工作区/「新项目」走；换项目不会自动装新版本。
-
-## 主同步路径（桌面，默认 · 本机实测）
-
-进程参数里的 profile（优先）：
-
-`%LOCALAPPDATA%\ZR_DSH\dsh-home\profiles\desktop\node_modules\@zhongruan\dsh-<name>\`
-
-备选（旧/浏览器一体包曾用）：
-
-`%APPDATA%\zr-workbuddy-desktop\dsh-home\profiles\web\node_modules\@zhongruan\dsh-<name>\`
-
-改完后两处都覆盖更稳；**以进程 CommandLine 里的 `...\profiles\desktop` 为准**。
-
-## 硬要求（每次改插件 UI / 客户端 / 运行时代码后）
-
-1. 改仓库 `plugins/dsh-<name>/`（`src` → `build` / 同步 `lib`）。
-2. **立刻同步**到上式桌面 profile；若改了 `client.js`：覆盖该包下的 `lib/client.js`。
-3. **同时**同步浏览器壳（次要）：
-   - `~/.dsh/profiles/web/node_modules/@zhongruan/dsh-<name>/`
-4. 需要整包覆盖时可用：
-   `PREFER_LOCAL=1 ./scripts/internal-market/install-latest.sh dsh-<name>`
-5. 告知用户：**完全退出**江西中软工作助手再开；必要时清  
-   `%APPDATA%\@deepseek-ai\dsh-desktop\` 下 `Cache` / `Code Cache`。  
-   未同步到进程实际用的 profile **不得**说「已好」「刷新即可」。
-
-## 禁止
+## 禁止（未获明确口令）
 
 ```text
-❌ 只改 plugins/dsh-xxx 源码 → 让用户刷新
-❌ 只同步 ~/.dsh 或 zr-workbuddy-desktop，却用 ZR_DSH desktop profile 验收
-❌ 以为「新开工作区/项目」会带上仓库里的插件改动
-✅ 改源码 → 同步 Local\ZR_DSH\...\profiles\desktop → 完全退出再开桌面助手
+❌ rsync / cp 覆盖 …/profiles/*/node_modules/@zhongruan/dsh-*
+❌ PREFER_LOCAL=1 ./scripts/internal-market/install-latest.sh …
+❌ dsh plugin add ./… 当作「帮用户装上了」
+❌ 为「方便验收 / 测一下」主动升本机版本
+❌ 上架市场后顺手把本机也盖成最新
 ```
+
+改完 `plugins/dsh-*` 只改仓库（及用户要求的 pack/upload）。**不要**默认同步桌面或 `~/.dsh`。
+
+## 允许（须用户说清楚）
+
+| 用户说法（示例） | 可做 |
+|---|---|
+| 「同步到本机 / 桌面 profile / 覆盖安装」 | 再 rsync 或 `install-latest` 到其指定目标 |
+| 「上架 / 同步到插件市场 / pack+upload」 | `pack.sh` + `upload.sh`（**只动市场，不动本机**） |
+| 「帮我降到 x.y.z 好测更新」 | 仅降本机到指定版本，升新版仍由用户点市场「更新」 |
+
+口令含糊时先问，**默认当「不要动本机」**。
+
+## 验收话术
+
+未按用户要求同步本机时：**不得**说「已装好」「刷新即可」「桌面已是新版」。  
+应说明：改动在仓库（或已上架市场），请用户自行在插件市场更新后完全退出再开。
+
+## 路径备忘（仅当用户明确要求同步本机时）
+
+- 桌面（优先）：`%LOCALAPPDATA%\ZR_DSH\dsh-home\profiles\desktop\node_modules\@zhongruan\dsh-<name>\`
+- 浏览器壳：`~/.dsh/profiles/web/node_modules/@zhongruan\dsh-<name>\`
