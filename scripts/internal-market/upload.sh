@@ -67,6 +67,11 @@ rsync -az -e "ssh -i $KEY" "$HOST:$REMOTE_ROOT/npm/" "$REG_DIR/npm/"
 # 拉回后重编 packument，把远程独有版本写进 index.json /latest
 "$ROOT/scripts/internal-market/generate-registry.sh"
 
+# 本机 Profile 钉了私服上没有的版本时拒绝上传。
+# 源码版本还没 pack 只提示，市场继续用已有制品。
+echo "==> 核对源码版本与本机 Profile 钉死版本…"
+ROOT="$ROOT" REG_DIR="$REG_DIR" python3 "$ROOT/scripts/internal-market/check-pins.py"
+
 scp -i "$KEY" "$REG_DIR/plugins.json" "$HOST:$REMOTE_ROOT/plugins.json"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/artifacts/" "$HOST:$REMOTE_ROOT/artifacts/"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/npm/" "$HOST:$REMOTE_ROOT/npm/"

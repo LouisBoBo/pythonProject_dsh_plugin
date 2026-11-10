@@ -956,6 +956,7 @@ function createBlankDocument(workspace, baseId) {
   }
   const base = state.knowledgeBases.find(item => item.id === baseId && item.status === 'active')
   if (!base) return showToast('请先选择一个可用知识库。', 'error')
+  if (isExternalKnowledgeBase(base)) return showToast('这是第三方 Dify 知识库，文档在 Dify 里，这里不能新建。', 'error')
   const view = workspace.view
   view.knowledgeBaseId = base.id
   view.documentId = ''
@@ -991,6 +992,10 @@ const WORKBUDDY_COMPANY_BASE_ID = '__workbuddy_company__'
 
 function isWorkbuddyCompanyBase(baseId) {
   return String(baseId || '') === WORKBUDDY_COMPANY_BASE_ID
+}
+
+function isExternalKnowledgeBase(base) {
+  return Boolean(String(base?.externalUrl || '').trim())
 }
 
 function workbuddyCompanyBase() {
@@ -1328,6 +1333,7 @@ function knowledgeImportControl(workspace, preferredId, options = 'small') {
     if (target === 'local') {
       const base = resolveImportBase(workspace, preferredId)
       if (!base) return showToast('请先选/建知识库后再导入文件。', 'error')
+      if (isExternalKnowledgeBase(base)) return showToast('这是第三方 Dify 知识库，文档在 Dify 里，这里不能导入。', 'error')
     }
     pendingKnowledgeImportTarget = target
     input.click()
@@ -1369,6 +1375,9 @@ async function importKnowledgeFiles(workspace, preferredId, files, target) {
     base = resolveImportBase(workspace, preferredId)
     if (!base || isWorkbuddyCompanyBase(base.id)) {
       return showToast('请先选/建本机知识库后再导入文件。', 'error')
+    }
+    if (isExternalKnowledgeBase(base)) {
+      return showToast('这是第三方 Dify 知识库，文档在 Dify 里，这里不能导入。', 'error')
     }
   }
 
@@ -1633,6 +1642,11 @@ function dropKnowledgeDocument(event, workspace, targetBaseId) {
 async function moveKnowledgeDocument(workspace, documentId, targetBaseId) {
   if (isWorkbuddyCompanyBase(targetBaseId)) {
     showToast('不能拖到共享知识库；请用「导入文件」上传到公司共享。', 'error')
+    return false
+  }
+  const externalTarget = state.knowledgeBases.find(base => base.id === targetBaseId)
+  if (isExternalKnowledgeBase(externalTarget)) {
+    showToast('这是第三方 Dify 知识库，不能把本机文档拖进去。', 'error')
     return false
   }
   const bases = documentWorkspaceBases(workspace)
@@ -2245,7 +2259,6 @@ function renderKnowledgeBaseCard(base) {
         element('div', {}, element('h3', {}, base.name), element('small', { title: base.id }, base.id === 'default' ? '系统默认库' : `ID · ${base.id}`)),
       ),
       badge(archived ? '已归档' : '可用', archived ? '' : 'success'),
-      base.externalUrl ? badge('外部', 'accent') : null,
     ),
     base.description ? element('p', { class: 'base-description' }, base.description) : null,
     element('div', { class: 'base-card-tags' }, visibleTags.length
@@ -2255,6 +2268,7 @@ function renderKnowledgeBaseCard(base) {
     element('div', { class: 'base-card-meta' },
       element('span', {}, element('strong', {}, '分组'), base.group || '未分组'),
       base.externalUrl ? element('span', {}, element('strong', {}, '外部地址'), base.externalUrl) : null,
+      base.externalDatasetId ? element('span', {}, element('strong', {}, '知识库 ID'), base.externalDatasetId) : null,
     ),
     element('div', { class: 'base-card-actions' },
       actionButton('查看知识', () => { void openKnowledgeBaseDocuments(base) }, 'ghost small', { 'data-open-knowledge-base': base.id }),
@@ -2377,7 +2391,6 @@ function renderMountListRow(base, view, targetKind, targetId) {
       element('div', { class: 'mount-list-title' },
         element('strong', { class: 'mount-base-path', title: knowledgeBasePathLabel(base) }, knowledgeBasePathLabel(base)),
         badge(view.statusLabel, view.statusVariant),
-        base.externalUrl ? badge('外部', 'accent') : null,
       ),
       base.description ? element('p', {}, base.description) : null,
       element('div', { class: 'mount-list-meta' }, view.detail,
@@ -2474,13 +2487,13 @@ function renderDocumentWorkspace(workspace, options = {}) {
         element('span', { class: 'tree-base-name' }, base.name),
         isWorkbuddyCompanyBase(base.id)
           ? badge('共享', 'accent')
-          : (state.workbuddyCompany.configured ? badge('本机', 'success') : null),
+          : (!isExternalKnowledgeBase(base) && state.workbuddyCompany.configured ? badge('本机', 'success') : null),
         isWorkbuddyCompanyBase(base.id)
           ? badge('免挂载', '')
           : (!state.mountContext.sessionId && !state.mountContext.projectId
             ? badge('待关联会话', 'accent')
             : (!isKnowledgeBaseMountedOnSession(base.id) ? badge('未挂载', 'accent') : badge('已挂载', 'success'))),
-        element('span', { class: 'tree-count' }, query ? documents.length : page.loaded ? page.total : '—')),
+        isExternalKnowledgeBase(base) ? null : element('span', { class: 'tree-count' }, query ? documents.length : page.loaded ? page.total : '—')),
         !readOnly && !isWorkbuddyCompanyBase(base.id) && base.id !== 'default'
           ? actionButton('删除', () => confirmRemoveKnowledgeBase(base), 'ghost small note-tree-base-delete', { title: `删除「${base.name}」` })
           : null,
@@ -2515,10 +2528,14 @@ function renderDocumentWorkspace(workspace, options = {}) {
           type: 'button', class: 'note-tree-more', disabled: page.loading,
           onClick: () => { void loadDocumentPage(workspace, base.id, { append: true }).then(renderShell) },
         }, page.loading ? '正在加载…' : `继续加载（已显示 ${documents.length} / ${page.total}）`) : null,
-        !query && page.loaded && documents.length === 0 ? element('div', { class: 'note-tree-status' },
-          isWorkbuddyCompanyBase(base.id)
-            ? (canManageSharedKnowledge() ? '共享知识库还没有文档。可用右上角「新建文档」或「导入文件」。' : '共享知识库暂无文档。')
-            : '这个知识库还没有文档。') : null,
+        !query && page.loaded && documents.length === 0 ? element('div', {
+          class: `note-tree-status${isExternalKnowledgeBase(base) ? ' is-external' : ''}`,
+        },
+          isExternalKnowledgeBase(base)
+            ? '第三方 Dify 知识库。原文在 Dify，这里不列出文档。挂到会话后，提问时会去那里检索。'
+            : (isWorkbuddyCompanyBase(base.id)
+              ? (canManageSharedKnowledge() ? '共享知识库还没有文档。可用右上角「新建文档」或「导入文件」。' : '共享知识库暂无文档。')
+              : '这个知识库还没有文档。')) : null,
       ) : null,
     )
   })
@@ -2590,6 +2607,14 @@ function renderNoteEditor(workspace, editor, base) {
   const view = workspace.view
   const readOnly = documentWorkspaceReadOnly(workspace)
   if (view.editorLoading) return renderDocumentEditorLoading(base)
+  if (!editor && isExternalKnowledgeBase(base)) {
+    return element('main', { class: 'note-editor note-editor-empty' },
+      element('div', { class: 'note-empty-content' },
+        element('span', { class: 'empty-document-mark', 'aria-hidden': 'true' }),
+        element('h3', {}, '这是第三方 Dify 知识库'),
+        element('p', {}, '文档保存在 Dify。这个页面不新建、不导入，也不列出原文。把这个库挂到会话并打开召回后，提问时会检索 Dify。'),
+      ))
+  }
   if (!editor) return element('main', { class: 'note-editor note-editor-empty' },
     element('div', { class: 'note-empty-content' },
       element('span', { class: 'empty-document-mark', 'aria-hidden': 'true' }),
@@ -4837,33 +4862,36 @@ async function openKnowledgeBaseEditor(base) {
   const externalToggle = element('label', { class: 'check-option span-2' }, externalEnabled,
     element('span', {},
       element('strong', {}, '对接外部知识库'),
-      element('small', {}, '填写访问地址与帐号密码；本机保存凭据，密码不会回显。'),
+      element('small', {}, '访问地址只填到 /v1。知识库 ID 单独填写。API Key 只存在本机，不会回显。'),
     ))
+  const keyConfigured = Boolean(source.externalApiKeyConfigured || source.externalPasswordConfigured)
   const externalUrl = formField('访问地址', 'input', source.externalUrl || '', {
     type: 'url',
     maxlength: 500,
-    placeholder: 'https://knowledge.example.com/api',
+    placeholder: 'http://主机:端口/v1',
     autocomplete: 'url',
   })
-  const externalUsername = formField('帐号', 'input', source.externalUsername || '', {
-    maxlength: 200,
-    placeholder: '登录帐号',
-    autocomplete: 'username',
+  const externalDatasetId = formField('知识库 ID', 'input', source.externalDatasetId || '', {
+    maxlength: 64,
+    placeholder: '00000000-0000-4000-8000-000000000000',
+    autocomplete: 'off',
+    spellcheck: 'false',
   })
-  const externalPassword = formField('密码', 'input', '', {
+  const externalApiKey = formField('API Key', 'input', '', {
     type: 'password',
     maxlength: 500,
-    placeholder: source.externalPasswordConfigured ? '已保存；留空则保持不变' : '登录密码',
+    placeholder: keyConfigured ? '已保存；留空则保持不变' : 'Dataset API Key',
     autocomplete: 'new-password',
   })
+  for (const field of [externalUrl, externalDatasetId, externalApiKey]) field.wrapper.classList.add('span-2')
   const externalFields = element('div', { class: 'span-2 external-knowledge-fields' },
-    externalUrl.wrapper, externalUsername.wrapper, externalPassword.wrapper)
+    externalUrl.wrapper, externalDatasetId.wrapper, externalApiKey.wrapper)
   const syncExternalFields = () => {
     const on = externalEnabled.checked
     externalFields.hidden = !on
     externalUrl.input.required = on
-    externalUsername.input.required = on
-    externalPassword.input.required = on && !source.externalPasswordConfigured
+    externalDatasetId.input.required = on
+    externalApiKey.input.required = on && !keyConfigured
   }
   externalEnabled.addEventListener('change', syncExternalFields)
   syncExternalFields()
@@ -4876,7 +4904,8 @@ async function openKnowledgeBaseEditor(base) {
     primaryLabel: base ? '保存修改' : '创建',
     onPrimary: async () => {
       if (!form.reportValidity()) return false
-      const passwordValue = externalPassword.input.value
+      const datasetIdValue = externalDatasetId.input.value.trim()
+      const apiKeyValue = externalApiKey.input.value
       const draft = {
         name: name.input.value.trim(),
         group: base ? String(source.group || '') : '',
@@ -4891,14 +4920,19 @@ async function openKnowledgeBaseEditor(base) {
         ...(externalEnabled.checked
           ? {
               externalUrl: externalUrl.input.value.trim(),
-              externalUsername: externalUsername.input.value.trim(),
-              ...(passwordValue.length > 0 ? { externalPassword: passwordValue } : {}),
+              externalDatasetId: datasetIdValue,
+              ...(apiKeyValue.length > 0 ? { externalApiKey: apiKeyValue } : {}),
             }
-          : { externalUrl: '', externalUsername: '', externalPassword: '' }),
+          : { externalUrl: '', externalDatasetId: '', externalApiKey: '' }),
       }
-      if (externalEnabled.checked && !passwordValue && !source.externalPasswordConfigured) {
-        showToast('对接外部知识库时请填写密码。', 'error')
-        externalPassword.input.focus()
+      if (externalEnabled.checked && !datasetIdValue) {
+        showToast('对接外部知识库时请填写知识库 ID。', 'error')
+        externalDatasetId.input.focus()
+        return false
+      }
+      if (externalEnabled.checked && !apiKeyValue && !keyConfigured) {
+        showToast('对接外部知识库时请填写 API Key。', 'error')
+        externalApiKey.input.focus()
         return false
       }
       const returnView = state.view
@@ -4907,21 +4941,16 @@ async function openKnowledgeBaseEditor(base) {
         const created = await api('knowledge-bases', { method: 'POST', body: { draft } })
         if (created?.id && state.mountContext.sessionId) {
           try {
-            await api('mounts', {
-              method: 'POST',
-              body: {
-                draft: {
-                  targetKind: 'session',
-                  targetId: state.mountContext.sessionId,
-                  knowledgeBaseId: created.id,
-                  enabled: true,
-                  recallEnabled: true,
-                  writeMode: 'audit',
-                  includeTags: [],
-                  excludeTags: [],
-                  extractionInstructions: '',
-                },
-              },
+            await saveMountDraft({
+              targetKind: 'session',
+              targetId: state.mountContext.sessionId,
+              knowledgeBaseId: created.id,
+              enabled: true,
+              recallEnabled: true,
+              writeMode: 'audit',
+              includeTags: [],
+              excludeTags: [],
+              extractionInstructions: '',
             })
           } catch (error) {
             showToast(`知识库已创建，但自动挂载到当前会话失败：${friendlyError(error)}`, 'error')
@@ -4934,6 +4963,22 @@ async function openKnowledgeBaseEditor(base) {
     },
   })
   name.input.focus()
+}
+
+/** 会话上启用的挂载同时写到当前工作目录，重启后新会话仍能继承。关掉只写会话覆盖，不改项目。 */
+function projectMirrorDraft(draft) {
+  const projectId = state.mountContext.projectId
+  if (draft.targetKind !== 'session' || draft.enabled !== true || !projectId) return null
+  return { ...draft, targetKind: 'project', targetId: projectId }
+}
+
+async function saveMountDraft(draft) {
+  const mirror = projectMirrorDraft(draft)
+  if (!mirror) {
+    await api('mounts', { method: 'POST', body: { draft } })
+    return
+  }
+  await api('mounts/bulk', { method: 'POST', body: { upserts: [draft, mirror], deleteIds: [] } })
 }
 
 function openBulkMountEditor() {
@@ -4971,8 +5016,9 @@ function openBulkMountEditor() {
         showToast('同一标签不能同时包含和排除。', 'error')
         return false
       }
-      await api('mounts/bulk', { method: 'POST', body: {
-        upserts: bases.map(base => ({
+      const upserts = []
+      for (const base of bases) {
+        const draft = {
           targetKind: manager.targetKind,
           targetId,
           knowledgeBaseId: base.id,
@@ -4982,9 +5028,12 @@ function openBulkMountEditor() {
           includeTags: include,
           excludeTags: exclude,
           extractionInstructions: '',
-        })),
-        deleteIds: [],
-      } })
+        }
+        upserts.push(draft)
+        const mirror = projectMirrorDraft(draft)
+        if (mirror) upserts.push(mirror)
+      }
+      await api('mounts/bulk', { method: 'POST', body: { upserts, deleteIds: [] } })
       manager.selectedIds.clear()
       showToast(`已批量挂载 ${bases.length} 个知识库。`)
       await navigate('bases')
@@ -5070,7 +5119,7 @@ function openMountEditor(base, targetKind, targetId, explicit, inherited) {
         showToast('同一标签不能同时包含和排除。', 'error')
         return false
       }
-      await api('mounts', { method: 'POST', body: { draft: {
+      await saveMountDraft({
         targetKind, targetId, knowledgeBaseId: base.id,
         enabled: enabled.checked,
         recallEnabled: enabled.checked && recall.checked,
@@ -5078,7 +5127,7 @@ function openMountEditor(base, targetKind, targetId, explicit, inherited) {
         includeTags: include,
         excludeTags: exclude,
         extractionInstructions: instructions.input.value.trim(),
-      } } })
+      })
       showToast(enabled.checked ? '挂载设置已保存。' : '已在当前范围关闭这个知识库。')
       await navigate('bases')
       return true
@@ -5239,8 +5288,8 @@ function openEntryEditor(entry, candidate) {
   const title = formField('标题', 'input', source.title, { required: true, maxlength: 200, placeholder: '一句话说明这条知识' })
   const body = formField('正文', 'textarea', source.body, { required: true, maxlength: 50000, placeholder: '写下可在未来对话中复用的内容' })
   const type = selectField('类型', TYPES.map(value => ({ value, label: TYPE_LABELS[value] })), source.type)
-  const activeBases = state.knowledgeBases.filter(base => base.status === 'active')
-  const selectedBaseId = source.knowledgeBaseId || activeBases[0]?.id || 'default'
+  const activeBases = state.knowledgeBases.filter(base => base.status === 'active' && !isExternalKnowledgeBase(base))
+  const selectedBaseId = activeBases.some(base => base.id === source.knowledgeBaseId) ? source.knowledgeBaseId : (activeBases[0]?.id || 'default')
   const knowledgeBase = selectField('所属知识库', activeBases.map(base => ({ value: base.id, label: base.name })), selectedBaseId)
   const scope = selectField('范围', [{ value: 'global', label: '全局' }, { value: 'project', label: '项目' }], source.scope.kind)
   const project = formField('项目 ID / 路径', 'input', source.scope.kind === 'project' ? source.scope.id : '', { placeholder: '/workspace/project' })

@@ -1,10 +1,10 @@
 {
   "name": "@zhongruan/dsh-knowledge",
-  "version": "1.0.38",
-  "description": "中软知识库：导入 md/txt/pdf/docx；按项目/会话挂载召回与回写；公司共享库仅管理员可见",
+  "version": "1.0.41",
+  "description": "中软知识库：导入 md/txt/pdf/docx；按项目/会话挂载召回与回写，同一工作目录重启后仍保留；可对接 Dify 检索；公司共享库仅管理员可见",
   "dshMarket": {
-    "zh": "知识库：按项目/会话挂载后召回与回写；公司共享库仅管理员可见",
-    "en": "Knowledge: mount bases per project/session for recall and writeback; shared library for admins only"
+    "zh": "知识库：按项目/会话挂载后召回与回写，同一工作目录重启后仍保留；可对接 Dify 知识库检索；公司共享库仅管理员可见",
+    "en": "Knowledge: mount bases per project/session for recall and writeback; retrieve from a Dify knowledge base; shared library for admins only"
   },
   "keywords": [
     "deepseek-harness",
@@ -66,7 +66,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "node --check web/app.js && node --check web/knowledge-import.js && node --check web/api-client.js && node --check lib/knowledge-file-extract.js && node --check lib/knowledge-originals.js && node --check lib/docx-preview-page.js && node --check lib/company-shared-recall.js && node --check lib/recall.js && node --check lib/tools.js && node --check lib/secret-box.js && node --check lib/local-provider.js",
+    "build": "node --check web/app.js && node --check web/knowledge-import.js && node --check web/api-client.js && node --check lib/knowledge-file-extract.js && node --check lib/knowledge-originals.js && node --check lib/docx-preview-page.js && node --check lib/company-shared-recall.js && node --check lib/recall.js && node --check lib/tools.js && node --check lib/secret-box.js && node --check lib/local-provider.js && node --check lib/project-mount-inherit.js && node --check lib/dify-retrieve.js && node --check lib/domain.js && node --check lib/retrieval.js && node --check lib/extraction.js",
     "test": "node --test test/*.test.mjs",
     "pack:check": "npm pack --dry-run"
   },

@@ -264,7 +264,10 @@ for plugin_dir, src_meta in discover_plugin_dirs():
     }
     built[name] = entry
     if want_ver and version != want_ver:
-        print(f"  注意: {plugin_dir.name} 源码 {want_ver}，市场仍用制品 {version}（未 pack 新版本）", flush=True)
+        print(
+            f"  注意: {plugin_dir.name} 源码 {want_ver}，市场仍用制品 {version}（这次不会带上未打包改动）。",
+            flush=True,
+        )
     print(f"  npm: {name}@{version}")
     print(f"  tarball: {tarball_url}")
 

@@ -21,5 +21,8 @@ alwaysApply: true
 - 只 `dsh plugin --profile web add ./dsh-xxx` 然后当正式安装
 - 手工改服务器 `plugins.json` 却不打 npm tgz
 - `FORCE=1` 上传来「少几个插件也没关系」（除非产品明确要下架）
+- 把私服上还不存在的精确版本写进 Profile `package.json`。市场「更新 / 卸载」会按这份清单整份重装，缺一个版本就全部失败（`ERR_PNPM_NO_MATCHING_VERSION`）
+
+本机 Profile 钉死的版本必须已有 tgz，否则 `upload.sh` 拒绝上传。源码版本超前但还没 pack 时，市场继续用已有制品，不会把未打包改动一起带上。
 
 开发联调可以继续用本地 link；对用户说「去插件市场安装」。

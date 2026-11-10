@@ -1004,6 +1004,7 @@ html[data-embed="host"] .pane-toggle-button[data-pane="library"] { display: none
 .tree-document-copy small { margin-top: 1px; color: var(--text-tertiary); font-size: 10px; }
 .note-tree-new { min-height: 30px; gap: 7px; border-radius: 7px; padding: 4px 8px; color: var(--text-tertiary); font-size: 11px; }
 .note-tree-status { display: grid; gap: 7px; padding: 10px 9px; color: var(--text-tertiary); font-size: 10px; line-height: 1.45; }
+.note-tree-status.is-external { color: var(--text-secondary); font-size: 12px; }
 .note-tree-status.is-error { color: var(--danger); }
 .note-tree-status .button { justify-self: start; }
 .note-tree-more { width: 100%; min-height: 30px; border: 0; border-radius: 7px; padding: 5px 8px; background: transparent; color: var(--text-tertiary); font: inherit; font-size: 10px; text-align: left; transition: background .15s ease, color .15s ease; }
@@ -2161,6 +2162,7 @@ html[data-embed="host"] .pane-toggle-button[data-pane="library"] { display: none
   .document-toolbar-actions .button.primary { margin-left: auto; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid .span-2 { grid-column: auto; }
+  .external-knowledge-fields .span-2 { grid-column: 1 / -1; }
   .mount-context { grid-template-columns: 1fr; }
   .mount-delete { align-items: stretch; flex-direction: column; }
   .secret-value { flex-direction: column; }

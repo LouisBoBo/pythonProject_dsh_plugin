@@ -15,6 +15,8 @@ import { normalizeFinalizationChange } from './document-lifecycle.js';
 import { NoteStore } from './notes/store.js';
 import { isImportedOriginalEntryId, readImportedOriginalFile, removeImportedOriginal, writeImportedOriginal } from './knowledge-originals.js';
 import { createSecretBox } from './secret-box.js';
+import { retrieveDifyDataset } from './dify-retrieve.js';
+import { knowledgeHomeFromDatabasePath, projectMountDraftsToAdopt, sessionIdsForCwd } from './project-mount-inherit.js';
 const ENTRY_COLUMNS = `
   id, knowledge_base_id, title, body, type, tags_json, scope_kind, scope_id, confidence,
   status, document_state, finalized_at, finalization_note, version, source_json, created_at, updated_at
@@ -39,6 +41,7 @@ export class LocalKnowledgeProvider {
         if (path !== ':memory:')
             mkdirSync(dirname(path), { recursive: true });
         const inMemory = path === ':memory:';
+        this.databasePath = path;
         const storageRoot = inMemory
             ? join(tmpdir(), `dsh-knowledge-${randomUUID()}`)
             : dirname(path);
@@ -50,6 +53,7 @@ export class LocalKnowledgeProvider {
         this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
         migrateKnowledgeDatabase(this.db, this.notes);
         this.migrateExternalPasswordsAtRest();
+        this.db.exec('CREATE TABLE IF NOT EXISTS knowledge_project_mount_adoptions (project_id TEXT PRIMARY KEY, adopted_at TEXT NOT NULL);');
         this.db.exec('CREATE TABLE IF NOT EXISTS note_excerpt_receipts (request_id TEXT PRIMARY KEY, input_hash TEXT NOT NULL, knowledge_id TEXT NOT NULL);');
         this.db.exec('CREATE TABLE IF NOT EXISTS writeback_receipts (source_key TEXT NOT NULL, proposal_hash TEXT NOT NULL, result_json TEXT NOT NULL, PRIMARY KEY(source_key, proposal_hash));');
         this.documentsReady = this.enqueueDocumentSync(() => this.syncAllDocuments());
@@ -131,15 +135,15 @@ export class LocalKnowledgeProvider {
         await this.documentsReady;
         const draft = normalizeKnowledgeBaseDraft(input);
         if (draft.externalUrl && !(draft.externalPassword && draft.externalPassword.length > 0)) {
-            throw new Error('external knowledge password is required when linking an access URL');
+            throw new Error('external knowledge API key is required when linking an access URL');
         }
         const timestamp = nowIso();
         const id = newId();
         this.db.prepare(`
       INSERT INTO knowledge_bases(
-        id,name,description,default_tags_json,extraction_instructions,writeback_policy,writeback_provider,writeback_model,status,created_at,updated_at,group_name,external_url,external_username,external_password
-      ) VALUES(?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?)
-    `).run(id, draft.name, draft.description, JSON.stringify(draft.defaultTags), draft.extractionInstructions, draft.writebackPolicy, draft.writebackProvider ?? null, draft.writebackModel ?? null, timestamp, timestamp, draft.group ?? '', draft.externalUrl ?? '', draft.externalUsername ?? '', draft.externalUrl ? this.secretBox.persist(draft.externalPassword ?? null) : null);
+        id,name,description,default_tags_json,extraction_instructions,writeback_policy,writeback_provider,writeback_model,status,created_at,updated_at,group_name,external_url,external_username,external_password,external_dataset_id
+      ) VALUES(?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?)
+    `).run(id, draft.name, draft.description, JSON.stringify(draft.defaultTags), draft.extractionInstructions, draft.writebackPolicy, draft.writebackProvider ?? null, draft.writebackModel ?? null, timestamp, timestamp, draft.group ?? '', draft.externalUrl ?? '', draft.externalUsername ?? '', draft.externalUrl ? this.secretBox.persist(draft.externalPassword ?? null) : null, draft.externalDatasetId ?? '');
         await this.syncKnowledgeBaseManifestQueued(id);
         return (await this.getKnowledgeBase(id));
     }
@@ -162,15 +166,15 @@ export class LocalKnowledgeProvider {
                 externalPassword = this.secretBox.persist(String(currentRow.external_password));
             }
             else {
-                throw new Error('external knowledge password is required when linking an access URL');
+                throw new Error('external knowledge API key is required when linking an access URL');
             }
         }
         const updatedAt = nowIso();
         this.db.prepare(`
       UPDATE knowledge_bases SET
-        name=?,description=?,default_tags_json=?,extraction_instructions=?,writeback_policy=?,writeback_provider=?,writeback_model=?,updated_at=?,group_name=?,external_url=?,external_username=?,external_password=?
+        name=?,description=?,default_tags_json=?,extraction_instructions=?,writeback_policy=?,writeback_provider=?,writeback_model=?,updated_at=?,group_name=?,external_url=?,external_username=?,external_password=?,external_dataset_id=?
       WHERE id=?
-    `).run(draft.name, draft.description, JSON.stringify(draft.defaultTags), draft.extractionInstructions, draft.writebackPolicy, draft.writebackProvider ?? null, draft.writebackModel ?? null, updatedAt, draft.group ?? '', draft.externalUrl ?? '', draft.externalUsername ?? '', externalPassword, id);
+    `).run(draft.name, draft.description, JSON.stringify(draft.defaultTags), draft.extractionInstructions, draft.writebackPolicy, draft.writebackProvider ?? null, draft.writebackModel ?? null, updatedAt, draft.group ?? '', draft.externalUrl ?? '', draft.externalUsername ?? '', externalPassword, draft.externalDatasetId ?? '', id);
         await this.syncKnowledgeBaseManifestQueued(id);
         return (await this.getKnowledgeBase(id));
     }
@@ -192,11 +196,15 @@ export class LocalKnowledgeProvider {
             writebackPolicy: patch.writebackPolicy ?? current.writebackPolicy,
             ...clearRoute || provider === undefined || model === undefined ? {} : { writebackProvider: provider, writebackModel: model },
             ...(clearExternal
-                ? { externalUrl: '', externalUsername: '', externalPassword: '' }
+                ? { externalUrl: '', externalDatasetId: '', externalApiKey: '' }
                 : {
                     externalUrl: typeof patch.externalUrl === 'string' ? patch.externalUrl : (current.externalUrl ?? ''),
-                    externalUsername: typeof patch.externalUsername === 'string' ? patch.externalUsername : (current.externalUsername ?? ''),
-                    ...(typeof patch.externalPassword === 'string' ? { externalPassword: patch.externalPassword } : {}),
+                    externalDatasetId: typeof patch.externalDatasetId === 'string' ? patch.externalDatasetId : (current.externalDatasetId ?? ''),
+                    ...(typeof patch.externalApiKey === 'string'
+                        ? { externalApiKey: patch.externalApiKey }
+                        : typeof patch.externalPassword === 'string'
+                            ? { externalApiKey: patch.externalPassword }
+                            : {}),
                 }),
         });
     }
@@ -454,10 +462,55 @@ export class LocalKnowledgeProvider {
         if (result.changes === 0)
             throw notFound('knowledge mount', id);
     }
+    projectAdoptionMarked(projectId) {
+        return this.db.prepare('SELECT 1 AS ok FROM knowledge_project_mount_adoptions WHERE project_id=?').get(projectId) !== undefined;
+    }
+    /**
+     * 旧版本只把挂载写在会话上。应用重启后常打开同一工作目录里的新会话，那些行就对不上。
+     * 每个项目只补写一次：把该目录里最新一次会话挂载中仍启用的库，记成项目挂载。
+     * 不删原会话行；会话上 enabled=false 的覆盖仍然优先。补写失败不记“已继承”，下次再试。
+     */
+    async inheritProjectMountsFromSessions(projectId) {
+        if (this.projectAdoptionMarked(projectId))
+            return false;
+        const home = knowledgeHomeFromDatabasePath(this.databasePath);
+        if (home === undefined)
+            return false;
+        const found = sessionIdsForCwd(home, projectId);
+        if (!found.ok || found.ids.length === 0)
+            return false;
+        const sessionMounts = await this.listMounts('session');
+        const drafts = projectMountDraftsToAdopt(sessionMounts, found.ids)
+            .map(draft => ({ ...draft, targetId: projectId }));
+        return this.transaction(() => {
+            if (this.projectAdoptionMarked(projectId))
+                return false;
+            let wrote = false;
+            for (const draft of drafts) {
+                const base = this.db.prepare('SELECT status FROM knowledge_bases WHERE id=?').get(draft.knowledgeBaseId);
+                if (base === undefined || base.status !== 'active')
+                    continue;
+                this.upsertMountRow(draft);
+                wrote = true;
+            }
+            this.db.prepare('INSERT INTO knowledge_project_mount_adoptions(project_id, adopted_at) VALUES(?, ?)').run(projectId, nowIso());
+            return wrote;
+        });
+    }
     async resolveMounts(sessionId, projectId) {
         this.assertOpen();
         // 仅显式挂载（项目继承 + 会话覆盖）参与召回/回写；enabled=false 的挂载行会被跳过。
-        const project = projectId === undefined ? [] : await this.listMounts('project', projectId);
+        const projectKey = typeof projectId === 'string' && projectId.length > 0 ? projectId : undefined;
+        let project = projectKey === undefined ? [] : await this.listMounts('project', projectKey);
+        if (projectKey !== undefined && project.length === 0 && !this.projectAdoptionMarked(projectKey)) {
+            try {
+                await this.inheritProjectMountsFromSessions(projectKey);
+                project = await this.listMounts('project', projectKey);
+            }
+            catch {
+                // 补写失败不能挡住本次召回；下次解析会再试。
+            }
+        }
         const session = sessionId ? await this.listMounts('session', sessionId) : [];
         const resolved = new Map();
         for (const mount of project)
@@ -533,7 +586,63 @@ export class LocalKnowledgeProvider {
             throw error;
         }
     }
-    async search(request) {
+    async search(request, signal) {
+        this.assertOpen();
+        const limit = Math.max(0, Math.min(request.limit, 100));
+        if (limit === 0)
+            return [];
+        const requestedIds = [...new Set(request.knowledgeBaseIds ?? [])].filter(Boolean);
+        const externalRows = requestedIds.length === 0 ? [] : this.externalKnowledgeRows(requestedIds);
+        const externalIds = new Set(externalRows.map(row => String(row.id)));
+        const localIds = requestedIds.filter(id => !externalIds.has(id));
+        const localHits = requestedIds.length > 0 && localIds.length === 0
+            ? []
+            : this.searchStored({
+                ...request,
+                ...(requestedIds.length === 0 ? {} : { knowledgeBaseIds: localIds }),
+                limit,
+            });
+        const externalHits = await this.searchDifyBases(externalRows, request.text, Math.min(limit, 10), signal);
+        return [...localHits, ...externalHits]
+            .sort((left, right) => right.score - left.score || right.entry.updatedAt.localeCompare(left.entry.updatedAt))
+            .slice(0, limit);
+    }
+    externalKnowledgeRows(ids) {
+        return this.db.prepare(`
+      SELECT id, external_url, external_dataset_id, external_password
+      FROM knowledge_bases
+      WHERE id IN (${ids.map(() => '?').join(',')})
+        AND status = 'active'
+        AND length(trim(external_url)) > 0
+        AND length(trim(external_dataset_id)) > 0
+    `).all(...ids);
+    }
+    async searchDifyBases(rows, text, limit, signal) {
+        const query = String(text ?? '').trim();
+        if (!query || rows.length === 0)
+            return [];
+        const batches = await Promise.all(rows.map(async (row) => {
+            try {
+                const apiKey = row.external_password == null ? '' : this.secretBox.open(String(row.external_password));
+                if (!apiKey)
+                    return [];
+                return await retrieveDifyDataset({
+                    baseUrl: String(row.external_url),
+                    datasetId: String(row.external_dataset_id),
+                    apiKey,
+                    query,
+                    topK: limit,
+                    signal,
+                    knowledgeBaseId: String(row.id),
+                });
+            }
+            catch {
+                return [];
+            }
+        }));
+        return batches.flat();
+    }
+    searchStored(request) {
         this.assertOpen();
         const limit = Math.max(0, Math.min(request.limit, 100));
         if (limit === 0)
@@ -761,8 +870,12 @@ export class LocalKnowledgeProvider {
     }
     insertEntry(input) {
         const draft = normalizeDraft(input);
-        if (this.db.prepare("SELECT id FROM knowledge_bases WHERE id=? AND status='active'").get(draft.knowledgeBaseId) === undefined) {
+        const baseRow = this.db.prepare("SELECT id, external_url FROM knowledge_bases WHERE id=? AND status='active'").get(draft.knowledgeBaseId);
+        if (baseRow === undefined) {
             throw notFound('active knowledge base', draft.knowledgeBaseId);
+        }
+        if (String(baseRow.external_url ?? '').trim()) {
+            throw new Error('外部 Dify 知识库只用于检索，不能写入');
         }
         const id = newId();
         const timestamp = nowIso();
@@ -2082,8 +2195,8 @@ function rowToKnowledgeBase(row) {
     const writebackProvider = row.writeback_provider == null ? undefined : String(row.writeback_provider);
     const writebackModel = row.writeback_model == null ? undefined : String(row.writeback_model);
     const externalUrl = row.external_url == null ? '' : String(row.external_url).trim();
-    const externalUsername = row.external_username == null ? '' : String(row.external_username).trim();
-    const externalPasswordConfigured = typeof row.external_password === 'string' && row.external_password.length > 0;
+    const externalDatasetId = row.external_dataset_id == null ? '' : String(row.external_dataset_id).trim();
+    const externalApiKeyConfigured = typeof row.external_password === 'string' && row.external_password.length > 0;
     return {
         id: String(row.id),
         name: String(row.name),
@@ -2094,7 +2207,7 @@ function rowToKnowledgeBase(row) {
         writebackPolicy: String(row.writeback_policy),
         ...writebackProvider === undefined || writebackModel === undefined ? {} : { writebackProvider, writebackModel },
         ...(externalUrl
-            ? { externalUrl, externalUsername, externalPasswordConfigured }
+            ? { externalUrl, externalDatasetId, externalApiKeyConfigured, externalPasswordConfigured: externalApiKeyConfigured }
             : {}),
         status: String(row.status),
         createdAt: String(row.created_at),

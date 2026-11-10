@@ -192,6 +192,27 @@ if not out:
     print("错误: 没有可安装的 @zhongruan/* 插件", file=sys.stderr)
     sys.exit(1)
 
+# 只钉私服上已经存在的精确版本。本地 pack 了但还没 upload 时，不能写进 Profile，
+# 否则市场「更新」会按这份清单整份重装并报 ERR_PNPM_NO_MATCHING_VERSION。
+unpublished = []
+for item in out:
+    url = f"{npm_base}/{item['name']}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            body = json.loads(response.read().decode())
+        published = body.get("versions") or {}
+        latest = str((body.get("dist-tags") or {}).get("latest") or "")
+        if item["version"] not in published:
+            unpublished.append(f"{item['name']}@{item['version']}（私服最新 {latest or '?'}）")
+    except Exception as error:
+        unpublished.append(f"{item['name']}@{item['version']}（无法读取私服 {url}: {error}）")
+if unpublished:
+    print("错误: 拒绝把未上架版本钉进 Profile。市场「更新」会整份重装，缺一个版本就全部失败。", file=sys.stderr)
+    for line in unpublished:
+        print(f"  - {line}", file=sys.stderr)
+    print("先 pack 并 upload 这个版本，再安装。", file=sys.stderr)
+    sys.exit(2)
+
 Path("/tmp/zr-install-latest.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 for x in out:
     print(f"  将安装 {x['name']}@{x['version']}", flush=True)

@@ -86,18 +86,31 @@ export function normalizeExternalKnowledgeUrl(value) {
         throw new Error('external knowledge URL must use http or https');
     }
     if (url.username || url.password) {
-        throw new Error('external knowledge URL must not embed credentials; use username/password fields');
+        throw new Error('访问地址不能自带帐号或密码，API Key 填在单独一项');
     }
     if (url.hash) {
         throw new Error('external knowledge URL must not contain a fragment');
     }
-    // Prefer HTTPS; allow HTTP only for loopback so intranet testing still works.
-    const host = url.hostname.toLowerCase();
-    const loopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
-    if (url.protocol === 'http:' && !loopback) {
-        throw new Error('external knowledge URL must use https (http is allowed only for localhost)');
+    if (url.search) {
+        throw new Error('访问地址不要带查询参数，只填写到 /v1');
     }
-    return url.toString().replace(/\/+$/u, '') || url.origin;
+    const path = url.pathname.replace(/\/+$/u, '') || '/';
+    if (path !== '/v1') {
+        throw new Error('访问地址只填写到 /v1。知识库 ID 填在单独一项，不要带 /datasets 或 /retrieve');
+    }
+    url.pathname = '/v1';
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/u, '');
+}
+function normalizeExternalDatasetId(value) {
+    const id = String(value ?? '').trim();
+    if (!id)
+        return '';
+    if (!/^[A-Za-z0-9-]{1,64}$/u.test(id)) {
+        throw new Error('知识库 ID 只能包含字母、数字和连字符，最长 64 位');
+    }
+    return id;
 }
 export function normalizeKnowledgeBaseDraft(input) {
     const group = normalizeKnowledgeBaseGroup(input.group);
@@ -126,21 +139,18 @@ export function normalizeKnowledgeBaseDraft(input) {
         throw new Error('knowledge base writebackModel must contain at most 200 characters');
     }
     const externalUrl = normalizeExternalKnowledgeUrl(input.externalUrl ?? '');
-    const externalUsername = String(input.externalUsername ?? '').trim();
-    if (/[\u0000-\u001f\u007f]/u.test(externalUsername)) {
-        throw new Error('external knowledge username must not contain control characters');
-    }
-    const externalPassword = typeof input.externalPassword === 'string' ? input.externalPassword : undefined;
+    const externalDatasetId = normalizeExternalDatasetId(input.externalDatasetId ?? '');
+    const externalApiKey = externalApiKeyFromDraft(input);
     if (externalUrl) {
-        if (!externalUsername || externalUsername.length > 200) {
-            throw new Error('external knowledge username is required (at most 200 characters)');
+        if (!externalDatasetId) {
+            throw new Error('对接外部知识库时请填写知识库 ID');
         }
-        if (externalPassword !== undefined && externalPassword.length > 500) {
-            throw new Error('external knowledge password must contain at most 500 characters');
+        if (externalApiKey !== undefined && externalApiKey.length > 500) {
+            throw new Error('external knowledge API key must contain at most 500 characters');
         }
     }
-    else if (externalUsername || (externalPassword !== undefined && externalPassword.length > 0)) {
-        throw new Error('external knowledge username/password require an access URL');
+    else if (externalDatasetId || (externalApiKey !== undefined && externalApiKey.length > 0)) {
+        throw new Error('知识库 ID 和 API Key 需要同时填写访问地址');
     }
     return {
         name,
@@ -155,11 +165,19 @@ export function normalizeKnowledgeBaseDraft(input) {
         ...(externalUrl
             ? {
                 externalUrl,
-                externalUsername,
-                ...(externalPassword === undefined ? {} : { externalPassword }),
+                externalDatasetId,
+                externalUsername: '',
+                ...(externalApiKey === undefined ? {} : { externalPassword: externalApiKey }),
             }
-            : { externalUrl: '', externalUsername: '' }),
+            : { externalUrl: '', externalDatasetId: '', externalUsername: '', externalPassword: '' }),
     };
+}
+function externalApiKeyFromDraft(input) {
+    if (typeof input.externalApiKey === 'string')
+        return input.externalApiKey;
+    if (typeof input.externalPassword === 'string')
+        return input.externalPassword;
+    return undefined;
 }
 export function normalizeKnowledgeMountDraft(input) {
     const targetId = input.targetId.trim();

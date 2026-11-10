@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# 修复桌面 Profile 缺 .npmrc 导致的装/卸失败：
+# 补齐桌面 Profile 的 .npmrc，避免市场里点安装 / 更新 / 卸载失败：
 #   ERR_PNPM_FETCH_404 … registry.npmjs.org/@zhongruan%2F…
-#   ERR_PNPM_LOCKFILE_RESOLUTION_VERIFICATION（mom 旧版已下架 / minimumReleaseAge）
+#   当天刚上架的公司包被 pnpm 默认 minimumReleaseAge=24h 拦住
+#
+# 已有的源地址、token、其它 scope 一律保留。不要整文件覆盖，
+# 否则会把正在用的 https://…:8443 私服改成另一套地址。
 #
 # 用法:
 #   ./scripts/internal-market/ensure-desktop-npmrc.sh
@@ -37,28 +40,28 @@ PROFILE_DIR="$(pick_profile_dir)" || {
 }
 
 NPMRC="$PROFILE_DIR/.npmrc"
-# 只改这几项。已有的 token、其它 scope 保留，避免整文件覆盖把凭据冲掉。
-upsert_npmrc() {
-  local key="$1" line="$2" tmp
-  tmp="$(mktemp)"
-  if [[ -f "$NPMRC" ]]; then
-    grep -vE "^${key}=" "$NPMRC" >"$tmp" || true
-  else
-    : >"$tmp"
+# 只补缺的键。已写上的 registry / token 保持原样。
+append_npmrc_line() {
+  local key="$1" line="$2"
+  if [[ -f "$NPMRC" ]] && grep -qE "^${key}=" "$NPMRC" 2>/dev/null; then
+    echo "==> 已有 ${key}，保持不动"
+    return 0
   fi
-  if [[ -s "$tmp" ]] && [[ -n "$(tail -c 1 "$tmp" || true)" ]]; then
-    printf '\n' >>"$tmp"
+  if [[ -s "$NPMRC" ]] && [[ -n "$(tail -c 1 "$NPMRC" || true)" ]]; then
+    printf '\n' >>"$NPMRC"
   fi
-  printf '%s\n' "$line" >>"$tmp"
-  mv "$tmp" "$NPMRC"
+  printf '%s\n' "$line" >>"$NPMRC"
+  echo "==> 已补 ${key}"
 }
-upsert_npmrc "registry" "registry=https://registry.npmmirror.com/"
-upsert_npmrc "@zhongruan:registry" "@zhongruan:registry=${NPM_REG}"
-upsert_npmrc "@cursor:registry" "@cursor:registry=${NPM_REG}"
-upsert_npmrc "strict-ssl" "strict-ssl=false"
-upsert_npmrc "minimum-release-age" "minimum-release-age=0"
+append_npmrc_line "registry" "registry=https://registry.npmmirror.com/"
+append_npmrc_line "@zhongruan:registry" "@zhongruan:registry=${NPM_REG}"
+append_npmrc_line "@cursor:registry" "@cursor:registry=${NPM_REG}"
+append_npmrc_line "strict-ssl" "strict-ssl=false"
+# 桌面自带 pnpm 默认拒绝 24 小时内发布的包。公司插件经常当天上架，
+# 不写 0 的话，安装、更新、卸载都会卡在供应链校验。
+append_npmrc_line "minimum-release-age" "minimum-release-age=0"
 
-echo "==> 已写入 $NPMRC"
+echo "==> 核对完成 $NPMRC"
 cat "$NPMRC"
 echo ""
 echo "若仍报 TARBALL_URL_MISMATCH（lock 钉着私服已下架的旧版），可："

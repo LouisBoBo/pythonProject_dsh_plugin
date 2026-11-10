@@ -20,11 +20,11 @@ window.__ModuleLoader__.load({
     function ensureCss() {
       if (typeof document === 'undefined') return
       var old = document.getElementById('mom-lib-css')
-      if (old && old.getAttribute('data-v') === '3') return
+      if (old && old.getAttribute('data-v') === '4') return
       if (old && old.parentNode) old.parentNode.removeChild(old)
       var style = document.createElement('style')
       style.id = 'mom-lib-css'
-      style.setAttribute('data-v', '3')
+      style.setAttribute('data-v', '4')
       style.textContent = [
         '.mom-lib-root{position:relative;height:100%;min-height:0;display:flex;flex-direction:column;background:#f4f7f4;color:#243028;font-size:13px}',
         '.mom-lib-top{display:flex;align-items:center;gap:8px;padding:14px 16px 8px}',
@@ -61,6 +61,11 @@ window.__ModuleLoader__.load({
         '.mom-lib-article h2{font-size:18px;margin:16px 0 8px}',
         '.mom-lib-article h3{font-size:15px;margin:14px 0 6px}',
         '.mom-lib-article p{margin:0 0 14px;white-space:pre-wrap}',
+        '.mom-lib-article .mom-lib-table{overflow-x:auto;margin:0 0 16px}',
+        '.mom-lib-article table{width:100%;border-collapse:collapse;font-size:13px}',
+        '.mom-lib-article th,.mom-lib-article td{border:1px solid #d5e0d6;padding:6px 8px;text-align:left;vertical-align:top;white-space:normal}',
+        '.mom-lib-article th{background:#f3f7f3;font-weight:600}',
+        '.mom-lib-article img{max-width:100%;height:auto;display:block;margin:0 0 16px;border-radius:8px;background:#f7faf7}',
         '.mom-lib-empty{padding:28px 16px;color:#7d8a80}',
         '.mom-lib-error{margin:8px 16px;color:#9b3b3b}',
       ].join('')
@@ -138,30 +143,159 @@ window.__ModuleLoader__.load({
       return (n / (1024 * 1024)).toFixed(1) + ' MB'
     }
 
-    function previewBlocks(text) {
+    /* preview-blocks:start */
+    function isTableRow(line) {
+      var text = String(line || '').trim()
+      return text.charAt(0) === '|' && text.indexOf('|', 1) > 0
+    }
+
+    function splitCells(line) {
+      var text = String(line || '').trim()
+      if (text.charAt(0) === '|') text = text.slice(1)
+      if (text.charAt(text.length - 1) === '|') text = text.slice(0, -1)
+      return text.split('|').map(function (cell) { return cell.trim() })
+    }
+
+    function isSeparator(line) {
+      if (!isTableRow(line)) return false
+      var cells = splitCells(line)
+      return cells.length > 0 && cells.every(function (cell) {
+        return /^:?-{3,}:?$/.test(cell.replace(/\s/g, ''))
+      })
+    }
+
+    function fitCells(cells, width) {
+      var next = cells.slice(0, width)
+      while (next.length < width) next.push('')
+      return next
+    }
+
+    function fenceMarker(line) {
+      var match = /^(```+|~~~+)/.exec(String(line || '').trim())
+      return match ? match[1].charAt(0) : ''
+    }
+
+    function isSafeImageUrl(value) {
+      var url
+      try { url = new URL(value) } catch (err) { return false }
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return false
+      if (url.username || url.password) return false
+      var host = String(url.hostname || '').toLowerCase().replace(/^\[|\]$/g, '')
+      if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return false
+      if (host.indexOf(':') >= 0 || /^\d+$/.test(host)) return false
+      var parts = host.split('.')
+      if (parts.length === 4 && parts.every(function (part) { return /^\d{1,3}$/.test(part) })) {
+        var nums = parts.map(function (part) { return Number(part) })
+        if (nums.some(function (n) { return n > 255 })) return false
+        var a = nums[0]
+        var b = nums[1]
+        if (a === 0 || a === 10 || a === 127 || a >= 224) return false
+        if (a === 169 && b === 254) return false
+        if (a === 172 && b >= 16 && b <= 31) return false
+        if (a === 192 && b === 168) return false
+        return true
+      }
+      if (parts.length < 2) return false
+      return parts.every(function (part) {
+        return /^[a-z0-9-]+$/i.test(part) && part.charAt(0) !== '-' && part.charAt(part.length - 1) !== '-'
+      })
+    }
+
+    function previewBlocks(text, markdown) {
       var lines = String(text || '').replace(/\r\n/g, '\n').split('\n')
       var blocks = []
       var para = []
+      var fence = ''
       function flush() {
         if (!para.length) return
         blocks.push({ type: 'p', text: para.join('\n') })
         para = []
       }
-      lines.forEach(function (line) {
+      for (var index = 0; index < lines.length; index += 1) {
+        var line = lines[index]
+        if (markdown !== false) {
+          var marker = fenceMarker(line)
+          if (fence) {
+            if (marker === fence) fence = ''
+            else para.push(line)
+            continue
+          }
+          if (marker) {
+            flush()
+            fence = marker
+            continue
+          }
+        }
         var heading = /^(#{1,3})\s+(.*)$/.exec(line)
         if (heading) {
           flush()
           blocks.push({ type: 'h' + heading[1].length, text: heading[2] })
-          return
+          continue
+        }
+        if (markdown !== false) {
+          var image = /^!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)$/.exec(line.trim())
+          if (image && isSafeImageUrl(image[2])) {
+            flush()
+            blocks.push({ type: 'img', alt: image[1], src: image[2] })
+            continue
+          }
+          if (isTableRow(line) && index + 1 < lines.length && isSeparator(lines[index + 1])) {
+            flush()
+            var header = splitCells(line)
+            index += 1
+            var rows = []
+            while (index + 1 < lines.length && isTableRow(lines[index + 1]) && !isSeparator(lines[index + 1])) {
+              index += 1
+              rows.push(fitCells(splitCells(lines[index]), header.length))
+            }
+            blocks.push({ type: 'table', header: header, rows: rows })
+            continue
+          }
         }
         if (!line.trim()) {
           flush()
-          return
+          continue
         }
         para.push(line)
-      })
+      }
       flush()
       return blocks
+    }
+    /* preview-blocks:end */
+
+    function renderInline(text) {
+      var source = String(text || '')
+      var nodes = []
+      var pattern = /\*\*([^*]+)\*\*/g
+      var cursor = 0
+      var match
+      while ((match = pattern.exec(source))) {
+        if (match.index > cursor) nodes.push(source.slice(cursor, match.index))
+        nodes.push(h('strong', { key: 'b' + match.index }, match[1]))
+        cursor = match.index + match[0].length
+      }
+      if (cursor < source.length) nodes.push(source.slice(cursor))
+      return nodes.length ? nodes : ''
+    }
+
+    function renderPreviewBlock(block, index) {
+      if (block.type === 'img') {
+        return h('img', { key: index, src: block.src, alt: block.alt || '' })
+      }
+      if (block.type === 'table') {
+        return h('div', { key: index, className: 'mom-lib-table' },
+          h('table', null,
+            h('thead', null, h('tr', null, block.header.map(function (cell, cellIndex) {
+              return h('th', { key: cellIndex }, renderInline(cell))
+            }))),
+            h('tbody', null, block.rows.map(function (row, rowIndex) {
+              return h('tr', { key: rowIndex }, row.map(function (cell, cellIndex) {
+                return h('td', { key: cellIndex }, renderInline(cell))
+              }))
+            })),
+          ))
+      }
+      return h(block.type === 'p' ? 'p' : block.type, { key: index }, renderInline(block.text))
     }
 
     function momFetch(path) {
@@ -292,7 +426,7 @@ window.__ModuleLoader__.load({
         try { localStorage.setItem(STAR_KEY, JSON.stringify(next)) } catch (err) {}
       }
 
-      var blocks = previewBlocks(article)
+      var blocks = previewBlocks(article, !(selected && String(selected.fileName || '').toLowerCase().endsWith('.txt')))
 
       return h('div', { className: 'mom-lib-root' },
         h('div', { className: 'mom-lib-top' },
@@ -417,9 +551,7 @@ window.__ModuleLoader__.load({
             ),
             h('article', { className: 'mom-lib-article' },
               blocks.length
-                ? blocks.map(function (block, index) {
-                    return h(block.type === 'p' ? 'p' : block.type, { key: index }, block.text)
-                  })
+                ? blocks.map(renderPreviewBlock)
                 : h('p', null, article || '这份文件是空的。'),
             ),
         ) : null,

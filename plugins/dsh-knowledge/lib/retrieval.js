@@ -76,7 +76,7 @@ export async function searchMountedKnowledge(provider, agent, mounts, query, lim
         return hits.map(hit => ({
             ...hit,
             mount,
-            handle: codec.encode(agent.session.id, hit.entry),
+            ...(isDifySegment(hit.entry) ? {} : { handle: codec.encode(agent.session.id, hit.entry) }),
         }));
     });
     return batches.flat()
@@ -122,8 +122,9 @@ export function formatMountCatalog(mounts, maxChars, _writebackPolicy) {
             tags.length > 0 ? `topics/tags: ${tags.join(', ')}` : '',
             mount.excludeTags.length > 0 ? `excluded tags: ${mount.excludeTags.join(', ')}` : '',
         ].filter(Boolean).join('; ');
-        const permissions = [mount.recallEnabled ? 'recall' : '', mount.writeMode !== 'none' ? `write:${mount.writeMode}` : ''].filter(Boolean).join(', ') || 'metadata-only';
-        const item = `\n- ${mount.base.name} [${mount.knowledgeBaseId}] (${permissions}): ${description}${filters ? ` (${filters})` : ''}`;
+        const permissions = [mount.recallEnabled ? 'recall' : '', mount.base.externalUrl ? '' : mount.writeMode !== 'none' ? `write:${mount.writeMode}` : ''].filter(Boolean).join(', ') || 'metadata-only';
+        const source = mount.base.externalUrl ? ' Source: external Dify. Snippets already contain the retrieved text; do not call knowledge_read for them.' : '';
+        const item = `\n- ${mount.base.name} [${mount.knowledgeBaseId}] (${permissions}): ${description}${filters ? ` (${filters})` : ''}${source}`;
         if (output.length + item.length > maxChars)
             break;
         output += item;
@@ -194,7 +195,8 @@ export function formatSearchResults(query, hits) {
     let output = `${hits.length} ranked result(s) for ${JSON.stringify(query)}:`;
     for (const hit of hits)
         output += formatHit(hit);
-    output += '\n\nUse knowledge_read with an exact handle to open a result. Do not construct or modify handles.';
+    if (hits.some(hit => hit.handle))
+        output += '\n\nUse knowledge_read with an exact handle to open a local result. Do not construct or modify handles.';
     return output;
 }
 export function formatKnowledgeEntry(entry, mount, offset, maxChars) {
@@ -277,9 +279,16 @@ function normalizeMatchText(value) {
     return value.normalize('NFKC').toLocaleLowerCase('zh-CN').replace(/\s+/gu, ' ').trim();
 }
 function formatHit(hit) {
+    if (isDifySegment(hit.entry)) {
+        const snippet = compact(hit.entry.body).slice(0, 2000);
+        return `\n\n- [${hit.mount.base.name}] ${hit.entry.title}\n  ${snippet}\n  外部 Dify 片段，正文已在上方，不要调用 knowledge_read。`;
+    }
     const snippet = compact(hit.entry.body).slice(0, 420);
     const state = hit.entry.documentState === 'open' ? '' : ` · finalized:${hit.entry.documentState}`;
     return `\n\n- [${hit.mount.base.name}] ${knowledgeDocumentPath(hit.entry)} — ${hit.entry.title}${state}\n  ${snippet}\n  handle: ${hit.handle}`;
+}
+function isDifySegment(entry) {
+    return typeof entry?.id === 'string' && entry.id.startsWith('difyseg:');
 }
 function entryMatchesMount(entry, mount, projectId) {
     if (entry.scope.kind === 'project' && entry.scope.id !== projectId)

@@ -61,10 +61,15 @@ export interface KnowledgeBaseDraft {
     /** Empty means use the model route from the current assistant turn. */
     writebackProvider?: string;
     writebackModel?: string;
-    /** Optional upstream knowledge service; empty clears the link. */
+    /** Optional Dify service API root ending in /v1; empty clears the link. */
     externalUrl?: string;
+    /** Dify dataset id. Required when externalUrl is set. */
+    externalDatasetId?: string;
+    /** @deprecated Login account is not used. Kept so older payloads still parse. */
     externalUsername?: string;
-    /** Write-only; omitted on update keeps the stored secret. */
+    /** Dify Dataset API Key. Write-only; omitted on update keeps the stored secret. */
+    externalApiKey?: string;
+    /** @deprecated Alias of externalApiKey. */
     externalPassword?: string;
 }
 export interface KnowledgeBasePatch {
@@ -77,15 +82,19 @@ export interface KnowledgeBasePatch {
     writebackProvider?: string | null;
     writebackModel?: string | null;
     externalUrl?: string | null;
+    externalDatasetId?: string | null;
     externalUsername?: string | null;
+    externalApiKey?: string | null;
     externalPassword?: string | null;
 }
-export interface KnowledgeBase extends Omit<KnowledgeBaseDraft, 'externalPassword'> {
+export interface KnowledgeBase extends Omit<KnowledgeBaseDraft, 'externalApiKey' | 'externalPassword'> {
     id: string;
     status: KnowledgeBaseStatus;
     createdAt: string;
     updatedAt: string;
-    /** True when a password is stored; the secret itself is never returned. */
+    /** True when an API key is stored; the secret itself is never returned. */
+    externalApiKeyConfigured?: boolean;
+    /** @deprecated Alias of externalApiKeyConfigured. */
     externalPasswordConfigured?: boolean;
 }
 /** User-facing Markdown projection of approved knowledge entries. */

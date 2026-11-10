@@ -726,10 +726,11 @@ function parseKnowledgeBaseDraft(value) {
         const writebackModel = optionalNullableStringProperty(value, 'writebackModel');
         const group = optionalNullableStringProperty(value, 'group');
         const externalUrl = typeof value.externalUrl === 'string' ? value.externalUrl : '';
-        const externalUsername = typeof value.externalUsername === 'string' ? value.externalUsername : '';
-        const hasPassword = Object.hasOwn(value, 'externalPassword');
-        if (hasPassword && value.externalPassword !== undefined && typeof value.externalPassword !== 'string') {
-            throw httpError(400, 'knowledge base draft externalPassword must be a string');
+        const externalDatasetId = typeof value.externalDatasetId === 'string' ? value.externalDatasetId : '';
+        const hasApiKey = Object.hasOwn(value, 'externalApiKey') || Object.hasOwn(value, 'externalPassword');
+        const rawApiKey = Object.hasOwn(value, 'externalApiKey') ? value.externalApiKey : value.externalPassword;
+        if (hasApiKey && rawApiKey !== undefined && typeof rawApiKey !== 'string') {
+            throw httpError(400, 'knowledge base draft externalApiKey must be a string');
         }
         const draft = normalizeKnowledgeBaseDraft({
             ...(group == null ? {} : { group }),
@@ -741,8 +742,8 @@ function parseKnowledgeBaseDraft(value) {
             ...writebackProvider === undefined || writebackProvider === null ? {} : { writebackProvider },
             ...writebackModel === undefined || writebackModel === null ? {} : { writebackModel },
             externalUrl,
-            externalUsername,
-            ...hasPassword && typeof value.externalPassword === 'string' ? { externalPassword: value.externalPassword } : {},
+            externalDatasetId,
+            ...hasApiKey && typeof rawApiKey === 'string' ? { externalApiKey: rawApiKey } : {},
         });
         return { ...draft, ...(group === undefined ? {} : { group: group?.trim() ?? '' }) };
     }

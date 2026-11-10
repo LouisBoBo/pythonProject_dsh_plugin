@@ -36,7 +36,7 @@ export class ExtractionCoordinator {
         if (this.closing)
             throw new Error('knowledge coordinator is shutting down');
         const mounts = (await this.provider.resolveMounts(snapshot.sessionId, snapshot.projectId, parentSignal))
-            .filter(mount => mount.writeMode !== 'none');
+            .filter(mount => mount.writeMode !== 'none' && !mount.base.externalUrl);
         if (mounts.length === 0) {
             if (checkpoint?.load()?.length)
                 throw new Error('回写计划的可写挂载已撤回，请恢复挂载后重试');
