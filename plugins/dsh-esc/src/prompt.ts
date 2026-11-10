@@ -9,6 +9,14 @@ const EXPERT_CTX = 'dsh-esc:expert'
 const CATALOG_CTX = 'dsh-esc:skill-catalog'
 const CREATE_SKILL_CTX = 'dsh-esc:create-skill'
 const SKILL_PLUGIN = 'dsh-esc'
+/** 会话 V4 拒绝已退役的 `{ kind: 'plugin' }`，来源必须由生产者自己持有。 */
+const SKILL_SOURCE_KIND = `plugin:${SKILL_PLUGIN}`
+
+function isEscSkillNotice(message: { source?: { kind?: string; plugin?: string; form?: string } }): boolean {
+  const source = message.source
+  if (!source || (source.form !== 'skill' && source.form !== 'create-skill')) return false
+  return source.kind === SKILL_SOURCE_KIND || (source.kind === 'plugin' && source.plugin === SKILL_PLUGIN)
+}
 
 /** 窄匹配：仅识别「创建 ESC 技能」意图，用于注入路由提示（不是控制信号）。 */
 export function wantsCreateEscSkill(userQuery: string): boolean {
@@ -218,14 +226,7 @@ export function registerPromptHooks(ctx: {
     ) => {
       const decision = await next()
       if (decision.kind !== 'enter' || payload.step !== 1) return decision
-      const messages = (decision.messages || []).filter(
-        (m) =>
-          !(
-            m.source?.kind === 'plugin' &&
-            m.source.plugin === SKILL_PLUGIN &&
-            (m.source.form === 'skill' || m.source.form === 'create-skill')
-          ),
-      )
+      const messages = (decision.messages || []).filter((m) => !isEscSkillNotice(m))
       const dataRoot = loadConfig().dataRoot
       const sessionId = sessionIdOf(payload.agent)
       const query = userText(messages)
@@ -235,7 +236,7 @@ export function registerPromptHooks(ctx: {
           id: randomUUID(),
           role: 'user',
           content: [{ type: 'text', text: createSkillRouteText() }],
-          source: { kind: 'plugin', plugin: SKILL_PLUGIN, form: 'create-skill' },
+          source: { kind: SKILL_SOURCE_KIND, form: 'create-skill' },
         }
         return { kind: 'enter', messages: [...messages, route] }
       }
@@ -256,7 +257,7 @@ export function registerPromptHooks(ctx: {
             text: skillSopNoticeText(skill, duty),
           },
         ],
-        source: { kind: 'plugin', plugin: SKILL_PLUGIN, form: 'skill' },
+        source: { kind: SKILL_SOURCE_KIND, form: 'skill' },
       }
       return { kind: 'enter', messages: [...messages, notice] }
     }) as never,
