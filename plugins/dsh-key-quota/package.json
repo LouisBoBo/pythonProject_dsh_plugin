@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-key-quota",
-  "version": "0.1.53",
+  "version": "0.1.56",
   "description": "用量统计主插件：按平台账号分配 DeepSeek Key，侧栏看用量并设上限",
   "dshMarket": {
     "zh": "用量统计（Key 限额）：侧栏看用量；按账号分配 Key，超额后停止调用（勿与 llm-meter 混淆）",

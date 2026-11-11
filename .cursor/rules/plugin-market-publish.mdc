@@ -7,17 +7,28 @@ alwaysApply: true
 
 用户在「设置 → 插件市场 → 发现」里能装到的，才算交付。本地 `dsh plugin add ./` 只用于开发机联调，**不会**出现在发现列表。
 
-## 新插件 / 发版（必做）
+## 发版闸门（硬规则 · 2026-11-10）
+
+**禁止**改完代码就自动 `pack` / `upload` 上架。
+
+1. 先只改仓库，必要时在本机联调验证（须用户明确允许同步本机时才覆盖 Profile）
+2. **本机验证通过后**，等用户明确说「上架 / 同步到插件市场 / pack+upload」再发版
+3. 口令含糊 → **默认不上架**
+
+## 用户发令后的发版步骤
 
 1. 目录：`plugins/dsh-<name>/`，`package.json` 含 `dsh.bundle` 与 **`dshMarket.zh` / `dshMarket.en`**（发现页文案）。
 2. 升 `version` 后：`./scripts/internal-market/pack.sh dsh-<name>`
 3. `./scripts/internal-market/upload.sh`（会核对线上目录；缺包会拒绝上传）
 4. `curl -sS http://175.178.238.31/dsh-plugins/plugins.json` 确认新包在清单里
 
+**本机 Windows（必走正式脚本，禁止再手搓 scp）**：用 Git Bash，先 `source scripts/internal-market/windows-env.sh`（密钥默认 `%USERPROFILE%/.ssh/tc_staging_deploy`，可用 `SSH_KEY` 覆盖；rsync/python3 在 `%LOCALAPPDATA%/dsh-tools/bin`），再跑 `pack.sh` / `upload.sh`。不要 `FORCE=1`，不要跳过 rsync 合并历史包。
+
 `pack.sh` 会扫描 `plugins/` 下所有 `dsh-*` Bundle，不必再改脚本白名单。只打一个包时，其它已有 tgz 仍会写进 `plugins.json`，避免把线上插件冲掉。
 
 ## 禁止
 
+- **未获「上架」口令就 pack+upload**（含「修完顺便上架」「方便你更新」）
 - 只 `dsh plugin --profile web add ./dsh-xxx` 然后当正式安装
 - 手工改服务器 `plugins.json` 却不打 npm tgz
 - `FORCE=1` 上传来「少几个插件也没关系」（除非产品明确要下架）
@@ -25,4 +36,4 @@ alwaysApply: true
 
 本机 Profile 钉死的版本必须已有 tgz，否则 `upload.sh` 拒绝上传。源码版本超前但还没 pack 时，市场继续用已有制品，不会把未打包改动一起带上。
 
-开发联调可以继续用本地 link；对用户说「去插件市场安装」。
+开发联调可以继续用本地 link；对用户说「去插件市场安装」——**仅当该版本已按口令上架之后**。

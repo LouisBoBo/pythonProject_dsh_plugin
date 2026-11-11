@@ -363,7 +363,14 @@ async function enterReviewFromDiff(
   jobId: string,
   meta: PrepareResult,
   before: ReturnType<typeof snapshotSandbox>,
-  cre: { ok: boolean; text: string; thinking: string; mocked?: boolean; error?: string },
+  cre: {
+    ok: boolean
+    text: string
+    thinking: string
+    mocked?: boolean
+    error?: string
+    idle_timed_out?: boolean
+  },
 ): Promise<void> {
   patchJob(jobId, {
     assistant_text: clampAssistantText(cre.text || loadJob(jobId)?.assistant_text || ''),
@@ -431,6 +438,16 @@ async function enterReviewFromDiff(
     !deferred.length &&
     !deletedPart.deferred.length
   ) {
+    // 空闲超时打断且无 diff：不得标「已完成」+ 过程短句当结论（用户看到 0 文件却验收清单）
+    if (cre.idle_timed_out) {
+      const detail =
+        '写码未完成：等待超时且无文件变更（常见于探索阶段工具长时间无回传）。请直接续改重试，勿当已交付。' +
+        (cre.mocked ? '（Mock）' : '')
+      setStatus(loadJob(jobId)!, 'failed', detail)
+      patchJob(jobId, { last_synced_files: [] })
+      appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+      return
+    }
     const detail = 'Cursor 未产生可同步文件变更' + (cre.mocked ? '（Mock）' : '')
     setStatus(loadJob(jobId)!, 'succeeded', detail)
     patchJob(jobId, { last_synced_files: [] })
@@ -725,8 +742,9 @@ async function executeJob(jobId: string): Promise<void> {
           message: `引擎删除 ${rec.forced_deletes.length} 个文件 + 修补 ${rec.patched.length} 个接线文件`,
         })
       }
-      // 用引擎 delivery 替换 Cursor 假删文案
-      if (rec.forced_deletes.length || rec.patched.length || deletePreflight.checks.length === 0) {
+      // 仅当引擎确实删/补了文件时，才用引擎 delivery 覆盖 Cursor 文案。
+      // 禁止 checks=[]（含 feature_unknown）空套「已下线」——会把「新增…含 CRUD 删除字样」打成假成功。
+      if (rec.forced_deletes.length > 0 || rec.patched.length > 0) {
         const finalMode: 'engine_first' | 'cursor_plan' = cursorPlan.length > 0 ? 'cursor_plan' : 'engine_first'
         const delivery = buildEngineDeleteDelivery(job.requirement, rec, { mode: finalMode })
         cre.text = delivery

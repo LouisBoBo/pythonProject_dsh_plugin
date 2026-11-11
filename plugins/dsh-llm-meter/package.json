@@ -1,11 +1,7 @@
 {
   "name": "@zhongruan/dsh-llm-meter",
   "version": "0.1.3",
-  "description": "本机旁路 LLM 计量（非用量产品入口；用量统计请用 dsh-key-quota）：llm/stream 出口记 token 分项到 events.jsonl",
-  "dshMarket": {
-    "zh": "本机旁路计量（非用量页）：记 token 分项到本机 jsonl；用量统计/限额请用 key-quota",
-    "en": "Local llm/stream meter only (not the usage UI); use dsh-key-quota for stats & quota"
-  },
+  "description": "本机旁路 LLM 计量（非用量产品入口；用量统计请用 dsh-key-quota）：llm/stream 出口记 token 分项到 events.jsonl。已下架发现页，仅保留本地口径/联调。",
   "keywords": [
     "deepseek-harness",
     "dsh",

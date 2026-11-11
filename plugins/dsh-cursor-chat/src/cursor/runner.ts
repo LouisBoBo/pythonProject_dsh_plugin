@@ -43,8 +43,19 @@ export type CursorRunResult = {
   run_id: string
   error?: string
   mocked?: boolean
+  /** 因长时间无 SSE 进展而主动收口（工具仍可能在跑） */
+  idle_timed_out?: boolean
   /** SDK 本轮 token；没有就不写用量账 */
   usage?: SdkTokenUsage
+}
+
+/** 是否仍有进行中的工具（空闲超时须延期，避免探索阶段误杀） */
+export function transcriptHasRunningTools(items: readonly TranscriptItem[]): boolean {
+  return (items || []).some((it) => {
+    if (!it || it.kind !== 'tool') return false
+    const st = String(it.tool_status || '').toLowerCase()
+    return st === 'running' || st === 'in_progress'
+  })
 }
 
 export function buildPrompt(opts: {
@@ -677,18 +688,38 @@ export async function runCursorLocal(opts: {
     opts.onEvent({ type: 'status', message: 'Cursor 正在改码，过程见进度卡…' })
     bus.addStatus('Cursor 正在改码，过程见进度卡…')
 
+    // 90s 无 SSE 进展才收口；但工具仍 running 时延期（task/探索常见静默），避免「0 文件假成功」。
+    // 绝对上限防永久挂死（宿主「深度搜索中」）。
     const idleMs = 90_000
+    const absoluteMaxMs = 8 * 60_000
+    const runStartedAt = Date.now()
     let idleTimedOut = false
     let idleTimer: ReturnType<typeof setTimeout> | undefined
     const bumpIdle = () => {
       if (idleTimer) clearTimeout(idleTimer)
       idleTimer = setTimeout(() => {
+        const elapsed = Date.now() - runStartedAt
+        if (transcriptHasRunningTools(bus.transcript) && elapsed < absoluteMaxMs) {
+          opts.onEvent({
+            type: 'status',
+            message: '工具仍在执行，继续等待写码…',
+          })
+          bus.addStatus('工具仍在执行，继续等待写码…')
+          bumpIdle()
+          return
+        }
         idleTimedOut = true
         opts.onEvent({
           type: 'status',
-          message: '超过 90 秒无进展（常见于空等 Vite），已跳过编译等待并按已改文件收口',
+          message: transcriptHasRunningTools(bus.transcript)
+            ? '超过等待上限仍有工具未结束，已按已改文件收口'
+            : '超过 90 秒无进展（常见于空等 Vite），已跳过编译等待并按已改文件收口',
         })
-        bus.addStatus('超过 90 秒无进展，已跳过空等 Vite')
+        bus.addStatus(
+          transcriptHasRunningTools(bus.transcript)
+            ? '超过等待上限，已收口'
+            : '超过 90 秒无进展，已跳过空等 Vite',
+        )
         void Promise.resolve()
           .then(async () => {
             if (run.supports('cancel')) await run.cancel()
@@ -879,6 +910,7 @@ export async function runCursorLocal(opts: {
       transcript: bus.transcript,
       agent_id: agentId,
       run_id: runId,
+      ...(idleTimedOut ? { idle_timed_out: true } : {}),
       ...(usage ? { usage } : {}),
     }
   } catch (err) {

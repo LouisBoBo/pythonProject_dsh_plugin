@@ -37,12 +37,55 @@ const PARENT_MODULES = new Set([
   '仓储管理', '看板管理', '考勤管理', '业务管理',
 ])
 
+/**
+ * 抹掉 CRUD 三元组噪声，避免「新增/编辑/删除，走…路由」误命中删除意图。
+ * 仅影响意图判定；不改用户原话落盘。
+ */
+export function neutralizeCrudNoise(requirement: string): string {
+  let text = String(requirement || '')
+  // 新增/编辑/删除 · 创建/更新/删除 · 增删改查
+  text = text.replace(
+    /新增\s*[\/、,，]\s*编辑\s*[\/、,，]\s*删除/g,
+    'CRUD操作',
+  )
+  text = text.replace(
+    /创建\s*[\/、,，]\s*(?:更新|修改)\s*[\/、,，]\s*删除/g,
+    'CRUD操作',
+  )
+  text = text.replace(
+    /(?:支持|可|能)?\s*新增\s*[、,，\/]?\s*编辑\s*[、,，\/]?\s*删除/g,
+    'CRUD操作',
+  )
+  text = text.replace(/增删改查/g, 'CRUD操作')
+  text = text.replace(/增删改/g, 'CRUD操作')
+  return text
+}
+
+/**
+ * 主诉求是「新增入口/列表/页面」时，不得因文案里残留删除字样走删除分支。
+ * 真删除句式（删除…菜单/页面）仍返回 false，交给后面的 DELETE_INTENT_PATTERNS。
+ */
+function looksLikePrimaryAddIntent(text: string): boolean {
+  const t = String(text || '').replace(/\s+/g, '')
+  if (!t) return false
+  if (/(删除|去掉|移除|下线).{0,24}(菜单|子菜单|页面|界面|入口|模块|功能)/.test(t)) return false
+  if (/(菜单|子菜单|页面|界面|入口|模块|功能).{0,24}(删除|去掉|移除|下线)/.test(t)) return false
+  return (
+    /(新增|增加|添加|新建|做一[个张]|从零).{0,28}(菜单|子菜单|页面|界面|入口|列表|报表)/.test(t) ||
+    /(菜单|子菜单).{0,16}(新增|增加|添加|新建)/.test(t)
+  )
+}
+
 /** 判断诉求是否为删除类任务 */
 export function isDeleteIntent(requirement: string): boolean {
-  const text = String(requirement || '').trim()
-  if (!text) return false
-  if (DELETE_INTENT_SKIP.some(s => text.includes(s))) return false
-  return DELETE_INTENT_PATTERNS.some(p => p.test(text))
+  const raw = String(requirement || '').trim()
+  if (!raw) return false
+  if (DELETE_INTENT_SKIP.some((s) => raw.includes(s))) return false
+  // 先去 CRUD 噪声，再匹配「删除…菜单/路由」等真删除句式
+  const text = neutralizeCrudNoise(raw)
+  // 主诉求是新增时灵活走写码，禁止误入删除预检/假「已下线」
+  if (looksLikePrimaryAddIntent(text)) return false
+  return DELETE_INTENT_PATTERNS.some((p) => p.test(text))
 }
 
 /** 从诉求中提取待删功能/菜单名（可多个） */

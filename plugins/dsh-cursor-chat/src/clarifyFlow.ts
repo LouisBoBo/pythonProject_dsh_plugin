@@ -1,8 +1,10 @@
 /**
  * Cursor 对话写码：澄清门禁唯一规则（禁止在 WorkBuddy / 提示词里再抄一套）。
  *
+ * 产品原则：写码是核心；够开工则灵活放行；入口级/范围不清则拦下，逼模型用 ask_user 反问到能落地。
+ *
  * 状态机（入口级新增/删除页面·菜单·报表入口）：
- *   1. 未澄清 → 拦 begin，模型看见「先 ask_user_question」
+ *   1. 未澄清 → 拦 begin，模型看见「先 ask_user_question」（可多轮追问）
  *   2. 用户答完选择题（DSH tool/call+tool/result 配对为权威）→ 放行
  *   3. 读不到会话事件时的兜底：clarified=true 且 message 带「澄清结论」痕迹才放行
  *   4. 放行后 begin 立刻开工并秒回进度卡（已废除需求确认卡）

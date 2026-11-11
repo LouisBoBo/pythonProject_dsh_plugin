@@ -487,7 +487,6 @@ window.__ModuleLoader__.load({
         '.cc-card.cc-stream-card .cc-stream-actions:hover{opacity:.85}' +
         '.cc-card.cc-stream-card .cc-log-fold{display:none}' +
         '.cc-card.cc-stream-card.is-done .cc-log-fold{display:block;margin-top:10px;opacity:.4;font-size:12px}' +
-        '.cc-plan{display:flex;align-items:center;gap:8px;margin:10px 0 2px;font-size:13px;opacity:.55;line-height:1.4}' +
         '.cc-body{max-height:none;min-height:0;overflow:visible;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;border:1px solid var(--color-border,rgba(127,127,127,.35));border-radius:8px;padding:10px 12px;background:var(--color-bg-subtle,rgba(127,127,127,.06))}' +
         '.cc-body.empty{opacity:.55;font-style:italic}' +
         '.cc-quote{margin:4px 0 10px;padding:8px 10px;border:1px solid var(--color-border,rgba(127,127,127,.35));border-radius:8px;background:var(--color-bg-subtle,rgba(127,127,127,.06));font-size:13px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:none;overflow:visible}' +
@@ -505,26 +504,29 @@ window.__ModuleLoader__.load({
         '.cc-bubble .role{font-size:11px;opacity:.55;margin:0 0 4px;letter-spacing:.02em}' +
         '.cc-bubble.user .role{color:#2f6fed}' +
         '.cc-bubble.user .body{font-size:13.5px;line-height:1.6;white-space:pre-wrap}' +
-        /* Cursor 式：思考过程 = 弱化可展开链接，无胶囊 */ +
-        '.cc-bubble.thinking{margin:2px 0 10px}' +
-        '.cc-bubble.thinking details{border:none;padding:0;background:transparent}' +
-        '.cc-bubble.thinking summary{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:4px;font-size:13px;line-height:1.4;padding:0;border-radius:0;background:transparent;color:inherit;opacity:.48;user-select:none;font-weight:400}' +
+        /* 过程 UI：Thinking 淡紫胶囊，仅样式；开合逻辑不变 */ +
+        '.cc-bubble.thinking{margin:6px 0 12px}' +
+        '.cc-bubble.thinking details{border:1px solid rgba(109,40,217,.16);padding:8px 12px;background:rgba(109,40,217,.055);border-radius:12px}' +
+        '.cc-bubble.thinking summary{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:6px;font-size:13px;line-height:1.4;padding:0;border-radius:0;background:transparent;color:#6d28d9;opacity:.92;user-select:none;font-weight:600}' +
         '.cc-bubble.thinking summary::-webkit-details-marker{display:none}' +
-        '.cc-bubble.thinking summary .cc-chev{display:inline-block;transition:transform .15s ease;opacity:.7;font-size:12px}' +
+        '.cc-bubble.thinking summary .cc-think-ico{display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center;border-radius:999px;background:rgba(109,40,217,.12);font-size:10px;line-height:1;flex:0 0 auto}' +
+        '.cc-bubble.thinking summary .cc-chev{display:inline-block;transition:transform .15s ease;opacity:.65;font-size:12px;color:inherit}' +
         '.cc-bubble.thinking details[open] summary .cc-chev{transform:rotate(90deg)}' +
-        '.cc-bubble.thinking .body{margin-top:6px;padding:0;white-space:pre-wrap;font-size:12.5px;line-height:1.65;opacity:.62;max-height:none;overflow:visible;background:transparent}' +
-        '.cc-bubble.thinking.is-stream summary{opacity:.7}' +
+        '.cc-bubble.thinking .body{margin-top:8px;padding:0;white-space:pre-wrap;font-size:12.5px;line-height:1.65;opacity:.78;max-height:none;overflow:visible;background:transparent;color:inherit}' +
+        '.cc-bubble.thinking.is-stream details{border-color:rgba(109,40,217,.28);background:rgba(109,40,217,.08)}' +
+        '.cc-bubble.thinking.is-stream summary{opacity:1}' +
         /* 仅终态且用户未点展开时才裁切；进行中绝不裁切，避免结论未出先空白 */ +
         '.cc-bubble.thinking.is-done:not(.is-hold) .body{max-height:8.5em;overflow:hidden}' +
         '.cc-bubble.thinking details[open].is-full .body,.cc-bubble.thinking.is-hold .body{max-height:none!important;overflow:visible!important}' +
-        '.cc-hold{min-height:48px;margin:6px 0 10px;padding:10px 0;font-size:13px;opacity:.62;line-height:1.5}' +
+        '.cc-hold{min-height:48px;margin:6px 0 10px;padding:10px 12px;font-size:13px;opacity:.72;line-height:1.5;border-radius:10px;background:rgba(127,127,127,.06);border:1px dashed rgba(127,127,127,.22)}' +
         '.cc-dialog:empty::after{content:"正在准备过程…";display:block;padding:12px 0;opacity:.55;font-size:13px}' +
-        '.cc-think-more{display:inline-block;margin-top:4px;border:0;background:transparent;padding:0;font-size:12px;opacity:.5;cursor:pointer}' +
-        '.cc-think-more:hover{opacity:.8}' +
-        '.cc-bubble.thought{display:inline-flex;align-items:center;gap:6px;margin:2px 0 10px;font-size:13px;opacity:.48}' +
-        '.cc-bubble.thought .ico{opacity:.7}' +
+        '.cc-think-more{display:inline-block;margin-top:6px;border:0;background:transparent;padding:0;font-size:12px;opacity:.55;cursor:pointer;color:#6d28d9}' +
+        '.cc-think-more:hover{opacity:.9}' +
+        '.cc-bubble.thought{display:inline-flex;align-items:center;gap:8px;margin:6px 0 12px;padding:8px 12px;font-size:13px;opacity:.85;border-radius:12px;background:rgba(109,40,217,.055);border:1px solid rgba(109,40,217,.16);color:#6d28d9;font-weight:600}' +
+        '.cc-bubble.thought .ico{opacity:.8}' +
         /* 正文叙事：主视觉，专业可读 */ +
-        '.cc-bubble.assistant{margin:0 0 14px}' +
+        '.cc-bubble.assistant{margin:2px 0 16px}' +
+        '.cc-bubble.assistant .role{font-size:11px;letter-spacing:.08em;text-transform:uppercase;opacity:.42;margin:0 0 6px;font-weight:600}' +
         '.cc-bubble.assistant .body{white-space:pre-wrap;font-size:14px;line-height:1.7;color:inherit;letter-spacing:.01em}' +
         '.cc-bubble.assistant .body h3{font-size:13.5px;font-weight:600;margin:14px 0 6px;opacity:.95}' +
         '.cc-bubble.assistant .body strong{font-weight:600}' +
@@ -533,15 +535,20 @@ window.__ModuleLoader__.load({
         '.cc-bubble.assistant .body code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;padding:1px 6px;border-radius:5px;background:rgba(127,127,127,.16)}' +
         '.cc-bubble.assistant .body pre.cc-md-code{margin:10px 0;padding:12px 14px;border-radius:10px;background:rgba(24,24,27,.92);color:#e4e4e7;overflow:auto;max-height:none;border:1px solid rgba(255,255,255,.06);position:relative}' +
         '.cc-bubble.assistant .body pre.cc-md-code code{padding:0;background:transparent;color:inherit;font-size:12px;line-height:1.55;white-space:pre}' +
-        /* 工具汇总行：安静、可展开 */ +
-        '.cc-bubble.tool-group{margin:2px 0 10px}' +
+        /* 工具汇总：摘要弱化 + 行内浅蓝芯片（对齐 Cursor 过程条） */ +
+        '.cc-bubble.tool-group{margin:4px 0 12px}' +
         '.cc-bubble.tool-group details{border:none;padding:0;background:transparent}' +
-        '.cc-bubble.tool-group summary{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:4px;font-size:13px;line-height:1.45;opacity:.48;user-select:none;padding:0;background:transparent}' +
+        '.cc-bubble.tool-group summary{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;line-height:1.45;opacity:.62;user-select:none;padding:2px 0;background:transparent;font-weight:500}' +
         '.cc-bubble.tool-group summary::-webkit-details-marker{display:none}' +
         '.cc-bubble.tool-group summary .cc-chev{display:inline-block;transition:transform .15s ease;font-size:12px;opacity:.7}' +
         '.cc-bubble.tool-group details[open] summary .cc-chev{transform:rotate(90deg)}' +
-        '.cc-bubble.tool-group .cc-tool-list{margin:6px 0 0 2px;padding:0;display:flex;flex-direction:column;gap:4px}' +
-        '.cc-bubble.tool-group .cc-tool-line{font-size:12px;line-height:1.45;opacity:.55;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+        '.cc-bubble.tool-group .cc-tool-list{margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}' +
+        '.cc-bubble.tool-group .cc-tool-line{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 10px;border-radius:10px;border:1px solid rgba(47,111,237,.18);background:rgba(47,111,237,.07);color:#1d4ed8;font-size:12px;line-height:1.4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}' +
+        '.cc-bubble.tool-group .cc-tool-line .ico{flex:0 0 auto;opacity:.75;font-size:12px;line-height:1}' +
+        '.cc-bubble.tool-group .cc-tool-line .name{flex:0 0 auto;font-weight:600;color:#1d4ed8}' +
+        '.cc-bubble.tool-group .cc-tool-line .st{flex:0 0 auto;opacity:.62;font-size:11px;letter-spacing:.02em}' +
+        '.cc-bubble.tool-group .cc-tool-line .st.is-fail{color:#cf222e;opacity:.9}' +
+        '.cc-bubble.tool-group .cc-tool-line .path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.72;color:inherit}' +
         /* Cursor Diff：强制深色（!important 防宿主浅色主题冲掉） */ +
         '.cc-bubble.tool-rich{margin:8px 0 12px}' +
         '.cc-diff,.cc-card .cc-diff,.cc-stream-card .cc-diff{' +
@@ -598,14 +605,16 @@ window.__ModuleLoader__.load({
         'line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto;' +
         'background:#0d1117!important}' +
         /* 禁止入场动画：SSE/对账重渲会反复触发，造成整卡闪烁 */ +
-        '.cc-bubble.tool-live{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px;margin:2px 0 10px;font-size:13px;opacity:.62;line-height:1.45}' +
-        '.cc-bubble.tool-live .meta{opacity:.55;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}' +
-        '.cc-bubble.tool-live .cc-cmd{flex:1 1 100%;margin-top:2px;opacity:1}' +
-        '.cc-bubble.status{font-size:12.5px;opacity:.55;margin:2px 0 8px;display:flex;align-items:flex-start;gap:8px;line-height:1.45;padding:0;background:transparent;border:none}' +
-        '.cc-bubble.status.is-live{opacity:.7}' +
-        '.cc-spin{display:inline-block;width:11px;height:11px;border:1.5px solid rgba(127,127,127,.28);border-top-color:rgba(127,127,127,.85);border-radius:50%;animation:ccspin .65s linear infinite;flex:0 0 auto}' +
-        '.cc-live-bar{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:0;border-radius:0;background:transparent;border:none;font-size:13px;opacity:.62}' +
+        '.cc-bubble.tool-live{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 10px;padding:7px 10px;border-radius:10px;border:1px solid rgba(47,111,237,.2);background:rgba(47,111,237,.08);color:#1d4ed8;font-size:12.5px;opacity:1;line-height:1.4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}' +
+        '.cc-bubble.tool-live .name{flex:0 0 auto;font-weight:600}' +
+        '.cc-bubble.tool-live .meta{opacity:.7;font-size:12px;font-family:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}' +
+        '.cc-bubble.tool-live .cc-cmd,.cc-bubble.tool-live .cc-diff{flex:1 1 100%;margin-top:4px;opacity:1}' +
+        '.cc-bubble.status{font-size:12.5px;opacity:.7;margin:4px 0 10px;display:flex;align-items:flex-start;gap:8px;line-height:1.45;padding:7px 10px;background:rgba(127,127,127,.05);border:1px solid rgba(127,127,127,.14);border-radius:10px}' +
+        '.cc-bubble.status.is-live{opacity:.88;border-color:rgba(47,111,237,.18);background:rgba(47,111,237,.05);color:#1d4ed8}' +
+        '.cc-spin{display:inline-block;width:11px;height:11px;border:1.5px solid rgba(47,111,237,.22);border-top-color:#1d4ed8;border-radius:50%;animation:ccspin .65s linear infinite;flex:0 0 auto}' +
+        '.cc-live-bar{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:7px 10px;border-radius:10px;background:rgba(47,111,237,.06);border:1px solid rgba(47,111,237,.14);font-size:13px;opacity:.88;color:#1d4ed8}' +
         '.cc-live-bar .cc-spin{margin-top:0}' +
+        '.cc-plan{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:7px 10px;border-radius:10px;background:rgba(127,127,127,.05);border:1px solid rgba(127,127,127,.12);font-size:13px;opacity:.72;line-height:1.4}' +
         '.cc-steer{margin-top:10px;border-top:1px solid var(--color-border,rgba(127,127,127,.3));padding-top:10px}' +
         '.cc-done-panel{margin-top:12px;padding-top:4px;border-top:none}' +
         '.cc-done-panel h5{margin:0 0 8px;font-size:13px;opacity:.7;font-weight:500}' +
@@ -653,7 +662,7 @@ window.__ModuleLoader__.load({
         style.id = 'cc-set-css'
         document.head.appendChild(style)
       }
-      style.setAttribute('data-cc-css', '1.3.30-changes-card')
+      style.setAttribute('data-cc-css', '1.3.31-process-ui')
       style.textContent = css
     }
 
@@ -1341,7 +1350,20 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 须澄清时整卡隐藏。禁止在同组件里「先 return null 再跑 hooks」——
+     * slot 按工具名复用实例时 hooks 数量变化会触发 React #300，
+     * tool.call.toolview 整槽崩溃后只剩终态结论、写码过程不再渲染。
+     */
     function CursorCodingBeginCard(props) {
+      ensureCss()
+      if (readAwaitAskUser(props)) {
+        return null
+      }
+      return h(CursorCodingBeginCardLive, props)
+    }
+
+    function CursorCodingBeginCardLive(props) {
       ensureCss()
       var uiRaw = readUiFromProps(props) || {}
       var argsMsg = toolArgsMessage(props && props.block)
@@ -1349,10 +1371,6 @@ window.__ModuleLoader__.load({
       var detached = detachStaleJobUi(uiRaw, argsMsg, lastUser)
       var ui = detached.ui
       var staleReuse = detached.stale
-      // 须澄清：只认「本跳已终态」的 need_clarify / await_ask_user。进行中的 begin 必须出确认卡。
-      if (readAwaitAskUser(props)) {
-        return null
-      }
       var initialWs = resolveDshCwd(props) || String(ui.workspace || '').trim()
       var wsState = useState(initialWs)
       var workspace = wsState[0]
@@ -3221,6 +3239,15 @@ window.__ModuleLoader__.load({
         return st === 'completed' || st === 'done' || st === 'success' || st === 'error' || st === 'failed'
       }
 
+      /** 仅展示文案；不参与状态机。认 tool_status 权威字段。 */
+      function toolStatusLabel(it) {
+        var st = String((it && it.tool_status) || '').toLowerCase()
+        if (st === 'error' || st === 'failed') return 'failed'
+        if (st === 'completed' || st === 'done' || st === 'success') return 'completed'
+        if (st === 'running' || st === 'in_progress') return 'running'
+        return toolIsDone(it) ? 'completed' : 'running'
+      }
+
       function toolLiveWhy(name) {
         var b = toolBucket(name)
         if (b === 'cmd') return 'Running command'
@@ -3562,10 +3589,15 @@ window.__ModuleLoader__.load({
         var lines = (tools || []).map(function (t, i) {
           var meta = toolMetaLine(t)
           var label = String(t.name || 'tool')
+          var stLabel = toolStatusLabel(t)
+          var failed = stLabel === 'failed'
           return h(
             'div',
             { key: (t.id || i) + '', className: 'cc-tool-line', title: meta || label },
-            label + (meta ? ' · ' + meta : ''),
+            h('span', { className: 'ico', 'aria-hidden': 'true' }, '⚙'),
+            h('span', { className: 'name' }, label),
+            h('span', { className: 'st' + (failed ? ' is-fail' : '') }, stLabel),
+            meta ? h('span', { className: 'path' }, meta) : null,
           )
         })
         return h(
@@ -3621,11 +3653,18 @@ window.__ModuleLoader__.load({
           richKeep[id] = true
         })
         var richFoldBuf = []
+        // 展示层：相邻同文 status 只留一条（多条沙箱进度会改写成同一句）
+        var lastStatusShown = ''
+
+        function noteNonStatusNode() {
+          lastStatusShown = ''
+        }
 
         function flushTools() {
           if (!toolBuf.length) return
           var key = 'tg-' + (toolBuf[0].id || nodes.length)
           nodes.push(renderToolGroupNode(toolBuf.slice(), key))
+          noteNonStatusNode()
           toolBuf = []
         }
 
@@ -3656,6 +3695,7 @@ window.__ModuleLoader__.load({
               ),
             ),
           )
+          noteNonStatusNode()
           richFoldBuf = []
         }
 
@@ -3669,6 +3709,7 @@ window.__ModuleLoader__.load({
                 if (richKeep[tid] || richDoneIds.length <= 2) {
                   flushRichFold()
                   nodes.push(renderRichToolNode(it))
+                  noteNonStatusNode()
                 } else {
                   richFoldBuf.push(it)
                 }
@@ -3689,7 +3730,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { key: it.id, className: 'cc-bubble tool-live' },
                 h('span', { className: 'cc-spin', 'aria-hidden': 'true' }),
-                h('span', null, toolLiveWhy(it.name)),
+                h('span', { className: 'name' }, toolLiveWhy(it.name)),
                 metaLive && !liveCmd && !liveSnip
                   ? h('span', { className: 'meta' }, metaLive)
                   : null,
@@ -3699,6 +3740,7 @@ window.__ModuleLoader__.load({
                   : null,
               ),
             )
+            noteNonStatusNode()
             return
           }
           flushRichFold()
@@ -3727,16 +3769,18 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { key: it.id, className: 'cc-bubble thought' },
-                  h('span', null, 'Thought'),
+                  h('span', { className: 'ico', 'aria-hidden': 'true' }, '▸'),
+                  h('span', null, 'Thinking'),
                   h('span', { className: 'cc-cursor', 'aria-hidden': 'true' }),
                 ),
               )
+              noteNonStatusNode()
               return
             }
             var thinkLabel =
               streaming || stillRevealing || holdThought
-                ? 'Thought'
-                : 'Thought' + (durSec ? ' ' + durSec + 's' : '')
+                ? 'Thinking'
+                : 'Thinking' + (durSec ? ' · ' + durSec + 's' : '')
             var thinkOpen = streaming || stillRevealing || isLatestThink || holdThought
             var thinkFull = !!(thinkFullMap && thinkFullMap[thinkId]) || holdThought
             var fullLen = String(it.text || '').length
@@ -3761,6 +3805,7 @@ window.__ModuleLoader__.load({
                   h(
                     'summary',
                     null,
+                    h('span', { className: 'cc-think-ico', 'aria-hidden': 'true' }, '▸'),
                     thinkLabel,
                     h('span', { className: 'cc-chev', 'aria-hidden': 'true' }, '›'),
                   ),
@@ -3796,6 +3841,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
             )
+            noteNonStatusNode()
             return
           }
           if (it.kind === 'assistant') {
@@ -3806,12 +3852,14 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { key: it.id, className: 'cc-bubble assistant' },
+                h('div', { className: 'role' }, 'CURSOR'),
                 h('div', {
                   className: 'body',
                   dangerouslySetInnerHTML: { __html: renderMd(shown) },
                 }),
               ),
             )
+            noteNonStatusNode()
             return
           }
           if (it.kind === 'status') {
@@ -3827,6 +3875,9 @@ window.__ModuleLoader__.load({
               if (!streamActive) return
               msg = '正在准备写码环境…'
             }
+            // 仅展示去重：连续多条改写成同一句时只留一条，不改 transcript 账本
+            if (msg === lastStatusShown) return
+            lastStatusShown = msg
             var busy = streamActive && /同步|请稍候|失败|错误|准备|连接/i.test(msg)
             nodes.push(
               h(
@@ -3931,7 +3982,7 @@ window.__ModuleLoader__.load({
                   ? h(
                       'details',
                       { className: 'cc-log-fold', style: { marginTop: '10px' } },
-                      h('summary', null, '本轮过程（Thought / Diff）'),
+                      h('summary', null, '本轮过程（Thinking / Diff）'),
                       h(
                         'div',
                         {

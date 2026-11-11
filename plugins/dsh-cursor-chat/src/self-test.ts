@@ -63,6 +63,8 @@ import {
   needsRequirementClarify,
 } from './requirementGate.js'
 import { decideCodingGate, readAskUserAfterLastUser } from './clarifyFlow.js'
+import { isDeleteIntent } from './deleteIntent.js'
+import { transcriptHasRunningTools } from './cursor/runner.js'
 import {
   expandWriteScopeWithCompanions,
   selectCompanionPromotions,
@@ -167,6 +169,55 @@ async function main() {
     const denied = materializeImages([{ path: outside }], dest, { allowedRoots: [workspace] })
     assert(denied.refs.length === 0 && denied.errors.length >= 1, 'outside workspace path must be denied')
     console.log('ok: image multimodal pipeline')
+  }
+
+  // 空闲超时：工具仍 running 时须识别（避免探索阶段误杀 → 0 文件假成功）
+  {
+    assert(
+      transcriptHasRunningTools([
+        { id: '1', kind: 'tool', at: '', name: 'task', tool_status: 'running' },
+      ]) === true,
+      'running tool 须识别',
+    )
+    assert(
+      transcriptHasRunningTools([
+        { id: '1', kind: 'tool', at: '', name: 'glob', tool_status: 'completed' },
+      ]) === false,
+      'completed 不得当 running',
+    )
+    assert(transcriptHasRunningTools([]) === false, '空列表')
+    console.log('ok: running tools detect')
+  }
+
+  // 删除意图：禁止把「新增…含 CRUD 删除字样」判成删除（曾导致假「已下线」收口）
+  {
+    const addWithCrud =
+      '物料管理菜单新增物料信息列表\n完整前后端：列表查询 + 新增/编辑/删除，走工程现有的路由、菜单、接口、表格组件写法。'
+    assert(isDeleteIntent(addWithCrud) === false, '新增菜单含 CRUD「删除」字样不得判删除意图')
+    assert(isDeleteIntent('物料管理菜单新增物料信息列表') === false, '纯新增不得判删除')
+    assert(
+      looksLikeAddOrDeletePageMenu('物料管理菜单新增物料信息列表') === true,
+      '新增菜单入口须进澄清门禁（有疑先问）',
+    )
+    assert(
+      decideCodingGate({ message: '物料管理菜单新增物料信息列表' }).action === 'block',
+      '未澄清的新增菜单须拦 begin',
+    )
+    assert(isDeleteIntent('删除物料管理菜单') === true, '真删除菜单须判删除意图')
+    assert(isDeleteIntent('移除报表中心设备维修菜单') === true, '真移除菜单须判删除意图')
+    assert(
+      isDeleteIntent('完整前后端：列表查询 + 新增/编辑/删除，走工程现有的路由') === false,
+      '孤立 CRUD 三元组不得判删除意图',
+    )
+    assert(
+      isDeleteIntent('新增设备台账页面，支持列表查询与增删改') === false,
+      '主诉求新增不得因「增删改」进删除分支',
+    )
+    assert(
+      isDeleteIntent('本页支持增删改，走现有路由') === false,
+      '裸「增删改」不得判删除意图',
+    )
+    console.log('ok: delete intent CRUD noise')
   }
 
   // 门禁极薄：只拦空诉求；意图分流交给 LLM（工具 description）

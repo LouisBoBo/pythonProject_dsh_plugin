@@ -109,8 +109,14 @@ def discover_plugin_dirs():
         if not pkg_path.is_file():
             continue
         meta = json.loads(pkg_path.read_text(encoding="utf-8"))
-        if (meta.get("dsh") or {}).get("bundle"):
-            out.append((p, meta))
+        # 「发现」目录只收 dsh.bundle + dshMarket；无 dshMarket 的仍可本地 pack/联调，但不进市场。
+        if not (meta.get("dsh") or {}).get("bundle"):
+            continue
+        market = meta.get("dshMarket")
+        if not isinstance(market, dict) or not (str(market.get("zh") or "").strip() or str(market.get("en") or "").strip()):
+            print(f"跳过 {p.name}: 无 dshMarket，不进发现目录", flush=True)
+            continue
+        out.append((p, meta))
     return out
 
 prev_doc = {}

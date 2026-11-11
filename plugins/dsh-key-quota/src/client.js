@@ -5,10 +5,94 @@ window.__ModuleLoader__.load({
   id: '@zhongruan/dsh-key-quota',
   factory: (require) => {
     var module = { exports: {} }
+    // 桌面壳在宿主未就绪时对 /api/pluginManager/* 直接回空 HTTP 503，卸载/更新并未开始。
+    // 只对「本页已是本机/dsh-app 源」的 pluginManager POST 做有限次 503 重试；禁止 Request 体重放。
+    installPluginManagerRetry()
     var React = require('react')
     var h = React.createElement
     var useState = React.useState
     var useEffect = React.useEffect
+
+    function installPluginManagerRetry() {
+      if (typeof globalThis.fetch !== 'function' || globalThis.fetch.__zrPluginManagerRetry) return
+      var original = globalThis.fetch
+      // 约 0.4+0.8+1.2+2+3+3 ≈ 10s；宿主未起才重试，避免长时间风暴 / 双发
+      var maxAttempts = 6
+      function delayFor(attempt) {
+        if (attempt < 1) return 400
+        if (attempt < 2) return 800
+        if (attempt < 3) return 1200
+        if (attempt < 4) return 2000
+        return 3000
+      }
+      function pageIsTrustedOrigin() {
+        if (typeof location === 'undefined') return false
+        var proto = String(location.protocol || '')
+        var host = String(location.hostname || '')
+        if (proto === 'dsh-app:') return true
+        if (proto !== 'http:' && proto !== 'https:') return false
+        return host === '127.0.0.1' || host === 'localhost'
+      }
+      function resolvePluginManagerUrl(input) {
+        // 禁止 Request/未知对象：body 可能已读，且难以安全重放
+        if (typeof input !== 'string' || !input) return null
+        if (!pageIsTrustedOrigin()) return null
+        try {
+          var base =
+            typeof location !== 'undefined' && location.href
+              ? location.href
+              : 'http://127.0.0.1/'
+          var url = new URL(input, base)
+          if (url.protocol === 'dsh-app:') {
+            return url.pathname.indexOf('/api/pluginManager/') === 0 ? url : null
+          }
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+          if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') return null
+          return url.pathname.indexOf('/api/pluginManager/') === 0 ? url : null
+        } catch (err) {
+          return null
+        }
+      }
+      function canResend(input, init) {
+        if (!resolvePluginManagerUrl(input)) return false
+        var method = String((init && init.method) || 'GET').toUpperCase()
+        if (method !== 'POST') return false
+        var body = init && init.body
+        return body == null || typeof body === 'string'
+      }
+      function pause(ms, signal) {
+        return new Promise(function (resolve, reject) {
+          if (signal && signal.aborted) {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+            return
+          }
+          function onAbort() {
+            clearTimeout(timer)
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          }
+          var timer = setTimeout(function () {
+            if (signal) signal.removeEventListener('abort', onAbort)
+            resolve()
+          }, ms)
+          if (signal) signal.addEventListener('abort', onAbort, { once: true })
+        })
+      }
+      function discard(response) {
+        try { response.body && response.body.cancel && response.body.cancel() } catch (err) {}
+      }
+      async function send(input, init, attempt) {
+        var response = await original.call(globalThis, input, init)
+        if (response.status !== 503 || !canResend(input, init) || attempt >= maxAttempts) return response
+        discard(response)
+        await pause(delayFor(attempt), init && init.signal)
+        return send(input, init, attempt + 1)
+      }
+      function wrapped(input, init) {
+        return send(input, init, 0)
+      }
+      wrapped.__zrPluginManagerRetry = true
+      globalThis.fetch = wrapped
+    }
 
     var PLUGIN_ID = '@zhongruan/dsh-key-quota'
     var PANEL_ID = 'key-quota'
@@ -844,6 +928,11 @@ window.__ModuleLoader__.load({
       var dateState = useState(usageTodayYmd())
       var onDate = dateState[0]
       var setOnDate = dateState[1]
+      // 页面跨日仍挂着时，截止日期会停在打开那天，近7天就把今天的写码留在窗外。
+      // 只有手改日期才钉住；切到近7天重新截止到上海今天。
+      var datePinState = useState(false)
+      var datePinned = datePinState[0]
+      var setDatePinned = datePinState[1]
       var grainState = useState('day')
       var grain = grainState[0]
       var setGrain = grainState[1]
@@ -877,6 +966,17 @@ window.__ModuleLoader__.load({
           })
           .then(function (ok) { setBusy(false); return ok })
       }
+
+      useEffect(function () {
+        if (datePinned) return
+        function align() {
+          var today = usageTodayYmd()
+          setOnDate(function (current) { return current === today ? current : today })
+        }
+        align()
+        var timer = setInterval(align, 60 * 1000)
+        return function () { clearInterval(timer) }
+      }, [datePinned])
 
       useEffect(function () {
         var timer = 0
@@ -941,6 +1041,7 @@ window.__ModuleLoader__.load({
                     onChange: function (ev) {
                       var v = ev.target.value
                       if (!v) return
+                      setDatePinned(true)
                       setOnDate(v.length === 7 ? v + '-01' : v)
                     },
                   }),
@@ -949,7 +1050,12 @@ window.__ModuleLoader__.load({
                     value: grain,
                     onChange: function (ev) {
                       var v = ev.target.value
-                      setGrain(v === 'month' ? 'month' : v === 'week' ? 'week' : 'day')
+                      var next = v === 'month' ? 'month' : v === 'week' ? 'week' : 'day'
+                      if (next === 'week') {
+                        setDatePinned(false)
+                        setOnDate(usageTodayYmd())
+                      }
+                      setGrain(next)
                     },
                   },
                     h('option', { value: 'day' }, '按日'),

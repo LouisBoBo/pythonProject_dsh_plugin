@@ -44,13 +44,15 @@ export const inject = ['tools'] as const
 
 /** 系统提示层的写码路由：光靠工具描述，模型会先自己 bash/grep/read 探索工程而不调 begin */
 const CODING_ROUTE_SECTION =
-  '【对话写码路由·硬规则】用户要求改当前工程代码——新增/删除/修改页面、菜单、路由、报表入口、接口、字段、样式，或修 bug——必须直接调用 zr_cchat_begin（同一工程续改调用 zr_cchat_continue），把用户最新原话原样放进 message，workspace 传当前工作区绝对路径。' +
+  '【对话写码路由·硬规则】写码是核心能力：灵活承接用户改代码诉求，禁止自行猜错范围后硬开干。' +
+  '用户要求改当前工程代码——新增/删除/修改页面、菜单、路由、报表入口、接口、字段、样式，或修 bug——' +
+  '若范围已够开工，立刻 zr_cchat_begin（同工程续改 zr_cchat_continue），message 放用户最新原话，workspace 为当前工作区绝对路径；' +
+  '若关键范围不清（入口级新增/删除、删到哪一层、新页面挂哪、要不要 CRUD/接口、字段不确定等），必须先 ask_user_question 给 2～4 个选项，答完再 begin/continue（clarified=true）；可追问多轮直到能落地，禁止干等、禁止用长文代替选择题。' +
+  '也可先调 begin：若返回 need_clarify，下一步唯一动作仍是 ask_user_question，禁止空转再调 begin。' +
   '调用前禁止用 bash/grep/read/glob 探索工程，禁止自行改文件，禁止用其他工具代替写码，禁止先向用户长文解释方案。' +
   'begin/continue 会阻塞到写码结束并直接返回「本轮结论」（进度卡在阻塞期间流式展示 Thought/命令/Diff）。' +
   '返回后三段式结论已在 chat_body，禁止再写短复述盖掉正文。' +
   '禁止 bash/sleep 空等；一般不必再调 zr_cchat_wait/finish（仅 begin 超时未出结论时才用）。' +
-  '入口级新增/删除若被 begin 返回 need_clarify 拦下，立即调用 ask_user_question 给 2～4 个选项，用户答完再调 begin/continue（clarified=true）。' +
-  '需求不清时用 ask_user_question 追问，禁止干等。' +
   '只有用户明确只想了解代码（在哪、什么意思、帮我解释）且不需要改动时，才使用只读工具。' +
   '用户贴了截图时，把图片绝对路径放进 images。' +
   '已命中 ESC/MES 专用技能时按该技能流程走。'
@@ -100,16 +102,19 @@ function truthy(v: unknown): boolean {
   return s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === '确认' || s === 'ok'
 }
 
-/** 入口级变更被拦时：先出选择题，禁止再空调 begin */
+/** 入口级/范围不清被拦时：先出选择题，禁止再空调 begin */
 const CLARIFY_AGENT_HINT =
-  '【下一步唯一动作】立刻调用 ask_user_question：按用户原话自拟 2～4 个关键选项（如删范围：仅菜单 / 菜单+路由 / 菜单+页面+接口等），禁止长文反问。' +
-  '禁止再次调用 zr_cchat_begin/continue，直到用户答完。' +
-  '答完后一次调用 begin/continue（clarified=true）；message 尽量带结论。插件会立刻开工并出进度卡（无确认卡）。' +
+  '【下一步唯一动作】立刻调用 ask_user_question：按用户原话自拟 2～4 个关键选项，禁止长文反问、禁止臆测范围。' +
+  '新增入口示例：挂在哪个父菜单 / 只要列表还是含新增编辑删除 / 是否要新接口与路由。' +
+  '删除入口示例：仅菜单 / 菜单+路由 / 菜单+页面+接口。' +
+  '答完若仍缺关键信息可再问一轮；禁止再次调用 zr_cchat_begin/continue，直到能落地。' +
+  '澄清完成后一次调用 begin/continue（clarified=true）；message 尽量带结论。插件会立刻开工并出进度卡（无确认卡）。' +
   '禁止对用户说「已发出确认卡」。'
 
 const FOLLOWUP_AGENT_HINT =
   '续改：把用户最新原话原样传入 message；优先 zr_cchat_continue（同会话 resume）。' +
-  '入口级新增/删除须先 ask_user_question。澄清完成→zr_cchat_begin/continue（阻塞到结论）。禁止对旧 job 再 finish。'
+  '入口级新增/删除或范围不清须先 ask_user_question，可追问到澄清。' +
+  '澄清完成→zr_cchat_begin/continue（阻塞到结论）。禁止对旧 job 再 finish。'
 
 /** 硬规则：凡写码终态必须产出正文结论（begin/continue 收口或 finish 兜底） */
 const FINISH_DONE = new Set(['succeeded', 'failed', 'cancelled', 'blocked_no_runner'])
@@ -711,7 +716,7 @@ export function apply(ctx: Context) {
         'workspace=侧栏当前打开工程的绝对路径；禁止 Bash/Write 直接改盘。' +
         '本工具会阻塞到写码结束，直接返回本轮结论；阻塞期间进度卡流式展示 Thought/命令/Diff（无确认卡）。' +
         '返回后三段式结论（任务结果/做了什么/如何验证）已在 chat_body：禁止再写短复述盖掉正文；一般不必再调 wait/finish。' +
-        '入口级新增/删除页面·菜单·报表入口：先 ask_user_question，答完再调本工具（clarified=true）。' +
+        '入口级新增/删除页面·菜单·报表入口，或范围仍不清：先 ask_user_question（可多轮），答完再调本工具（clarified=true）。' +
         '用户贴了图：把本机图片绝对路径（或 data URL）放进 images；有图必须传。' +
         'MES/售后/测试用例等已命中 ESC 技能时不要用本工具；本会话已有成功写码后优先 zr_cchat_continue。',
       parameters: {
@@ -789,7 +794,7 @@ export function apply(ctx: Context) {
             detail: CLARIFY_AGENT_HINT,
             // 禁止空 chat_body：宿主会渲出大块空白
             chat_body:
-              '入口级改动需先确认范围。请回答下方问题；确认后我会立刻开工并在进度卡展示过程。',
+              '写码前需先确认关键范围。请回答下方问题；仍不清可继续追问，确认后我会立刻开工并在进度卡展示过程。',
             source: 'cursor_chat',
             cursor_chat_ui: { kind: 'await_ask_user', requirement: message },
           })
@@ -830,7 +835,7 @@ export function apply(ctx: Context) {
         '【Cursor 对话写码·续改】同工程多轮：用户最新原话 + 可选新截图；优先 resume 上一轮 Agent。' +
         '本工具阻塞到写码结束并直接返回本轮结论；进度卡在阻塞期间流式展示过程（无确认卡）。' +
         '返回后三段式结论已在 chat_body：禁止再写短复述盖掉正文。' +
-        '换了侧栏工程则 workspace 用新路径。入口级新增/删除页面·菜单·报表入口：先 ask_user_question，答完再调（clarified=true）。' +
+        '换了侧栏工程则 workspace 用新路径。入口级新增/删除或范围不清：先 ask_user_question（可多轮），答完再调（clarified=true）。' +
         FOLLOWUP_AGENT_HINT +
         ' 有新图时同样传入 images。',
       parameters: {
@@ -905,7 +910,7 @@ export function apply(ctx: Context) {
             detail: CLARIFY_AGENT_HINT + ' ' + FOLLOWUP_AGENT_HINT,
             // 禁止空 chat_body：宿主会渲出大块空白
             chat_body:
-              '还需要一点信息才能开工。请回答下方问题；确认后我会立刻继续并展示过程。',
+              '还需要一点信息才能继续写码。请回答下方问题；仍不清可再问一轮，确认后我会立刻继续并展示过程。',
             source: 'cursor_chat',
             cursor_chat_ui: { kind: 'await_ask_user', requirement: message },
           })
