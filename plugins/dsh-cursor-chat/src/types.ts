@@ -3,6 +3,7 @@
 import type { TranscriptItem } from './transcript.js'
 import type { ChatImageRef } from './images.js'
 import type { QualityReport } from './qualityGate.js'
+import type { BackendRestartOffer } from './backendRestart.js'
 
 export type CursorCodingConfig = {
   listen: string
@@ -29,6 +30,11 @@ export type CursorCodingJob = {
   status: JobStatus
   workspace: string
   requirement: string
+  /**
+   * code=改代码（沙箱 → 同步）；ops=重启/测试/日志等终端操作（真实项目，不改代码）。
+   * 缺省按诉求再判；旧账本没有该字段。
+   */
+  work_kind?: 'code' | 'ops'
   /** 本轮随诉求传入的截图（落盘路径，供 Cursor SDK 多模态） */
   images?: ChatImageRef[]
   parent_job_id: string | null
@@ -70,6 +76,44 @@ export type CursorCodingJob = {
   cancelled: boolean
   /** 质量门控报告（质量链 ① 步产出，绿色=通过，黄色=有问题，红色=阻塞同步） */
   quality_report?: QualityReport
+  /**
+   * 沙箱编译验证结果。仅在实际跑过 verifyInSandbox 时写入。
+   * false → 禁止自动同步（改人工审）；未跑则为 undefined。
+   */
+  verify_ok?: boolean
+  /**
+   * 同步后交付审计（落盘指纹 / API 挂载 / 菜单 / 删除验尸）。
+   * ok=false 时任务须为 failed，禁止「已完成」假交付。
+   */
+  delivery_audit?: {
+    ok: boolean
+    detail: string
+    checks?: { name: string; ok: boolean; detail: string }[]
+    /** 通过数 / 实际跑过的检查数。没有检查项时不写。 */
+    completion?: { passed: number; total: number; percent: number }
+  } | null
+  /**
+   * 门禁通过后才有：本机写码服务执行后端重启（可见终端窗）。
+   * 缺省/undefined = 本轮不提供自动重启。
+   */
+  backend_restart?: BackendRestartOffer | null
+  /**
+   * 有后端变更但无法自动解析启动命令/端口时的文案提示（保证仍告知需重启）。
+   */
+  backend_restart_hint?: string | null
+  /**
+   * 同步后由 Cursor SDK 在真实项目终端里确认前后端。
+   * ok=false 时不得写成「已完成、可以看页面」。
+   */
+  service_check?: {
+    required: boolean
+    ok: boolean
+    skipped?: boolean
+    detail: string
+    frontend: string
+    backend: string
+    api: string
+  } | null
 }
 
 export type StreamEvent = {
@@ -101,6 +145,7 @@ export type HitlAction =
   | 'cursor-chat.apply'
   | 'cursor-chat.steer'
   | 'cursor-chat.cancel'
+  | 'cursor-chat.restart-backend'
 
 export type HitlRecord = {
   action: HitlAction

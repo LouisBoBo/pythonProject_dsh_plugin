@@ -288,6 +288,29 @@ export function isWriteToolName(name?: string): boolean {
   )
 }
 
+/** Shell 命令会改或删文件。`2>&1` 这种只重定向到句柄的不算。 */
+export function shellCommandMutatesFiles(command?: string): boolean {
+  const c = String(command || '')
+  if (!c.trim()) return false
+  if (/(?:^|[^&])>(?!&)\s*\S/.test(c)) return true
+  return /\b(set-content|out-file|add-content|new-item|remove-item|clear-content|git\s+commit|git\s+push|git\s+reset|git\s+checkout)\b/i.test(c)
+    || /\b(rm|del|erase|unlink|rmdir)\b/i.test(c)
+}
+
+/**
+ * 开发操作 / 服务确认跑在真实项目上。
+ * 写文件工具，或会改盘的 shell，都算已经动过工程。
+ */
+export function transcriptMutatedProject(items: { kind?: string; name?: string; command?: string }[]): boolean {
+  return (items || []).some((it) => {
+    if (!it || it.kind !== 'tool') return false
+    const name = String(it.name || '')
+    if (isWriteToolName(name)) return true
+    if (/^(delete|remove|unlink)/i.test(name) || /delete_file|remove_file/i.test(name)) return true
+    return shellCommandMutatesFiles(it.command)
+  })
+}
+
 /**
  * 进度卡是否展示该 assistant 段：过程短句可展示；终稿标题段留给正文结论。
  */

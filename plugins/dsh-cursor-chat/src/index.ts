@@ -12,7 +12,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { cursorKeyReady, defaultDataRoot, loadConfig, publicConfigView } from './config.js'
 import { findLatestJobForSession, forceCancelJob, jobSummary, listJobs, loadJob, patchJob } from './jobs.js'
-import { applyJobReview, healStalePendingReview } from './orchestrator/runJob.js'
+import { applyJobReview, foldLiveAudit, healStalePendingReview } from './orchestrator/runJob.js'
 import { loadPendingConfirm } from './pendingConfirm.js'
 import { decideCodingGate, extractSessionEvents } from './clarifyFlow.js'
 import { looksLikeFollowUp } from './requirementGate.js'
@@ -42,18 +42,21 @@ function expandWorkspace(p: string): string {
 export const name = 'cursor-chat'
 export const inject = ['tools'] as const
 
-/** 系统提示层的写码路由：光靠工具描述，模型会先自己 bash/grep/read 探索工程而不调 begin */
+/** 系统提示层的开发路由：光靠工具描述，模型会先自己 bash/grep/read/pwsh 动手而不调 begin */
 const CODING_ROUTE_SECTION =
-  '【对话写码路由·硬规则】写码是核心能力：灵活承接用户改代码诉求，禁止自行猜错范围后硬开干。' +
-  '用户要求改当前工程代码——新增/删除/修改页面、菜单、路由、报表入口、接口、字段、样式，或修 bug——' +
-  '若范围已够开工，立刻 zr_cchat_begin（同工程续改 zr_cchat_continue），message 放用户最新原话，workspace 为当前工作区绝对路径；' +
+  '【对话写码路由·硬规则】当前工程的开发需求一律交给本插件里的 Cursor SDK，不限于改代码。' +
+  '开发需求包括：新增/删除/修改页面、菜单、路由、报表入口、接口、字段、样式，修 bug，以及启动/重启前后端、跑测试、安装依赖、看日志、查环境、排障。' +
+  'Cursor SDK 能处理这些开发操作。宿主禁止用 bash/grep/read/glob/pwsh 自己探索、改文件或启动服务。' +
+  '范围已够开工时立刻 zr_cchat_begin（同工程续做 zr_cchat_continue），message 放用户最新原话，workspace 为当前工作区绝对路径。' +
+  '启动、重启、测试、装依赖、看日志、排障同样立刻 begin/continue，不要先探索工程。' +
+  '不改代码的开发需求（启动/重启前后端、把项目跑起来、跑测试、安装依赖、看日志、查环境、排障）按 Cursor IDE 在真实项目终端执行，不进写码沙箱。改页面、修 bug 以及句子里同时还要改代码的，整轮走写码沙箱。' +
   '若关键范围不清（入口级新增/删除、删到哪一层、新页面挂哪、要不要 CRUD/接口、字段不确定等），必须先 ask_user_question 给 2～4 个选项，答完再 begin/continue（clarified=true）；可追问多轮直到能落地，禁止干等、禁止用长文代替选择题。' +
   '也可先调 begin：若返回 need_clarify，下一步唯一动作仍是 ask_user_question，禁止空转再调 begin。' +
-  '调用前禁止用 bash/grep/read/glob 探索工程，禁止自行改文件，禁止用其他工具代替写码，禁止先向用户长文解释方案。' +
-  'begin/continue 会阻塞到写码结束并直接返回「本轮结论」（进度卡在阻塞期间流式展示 Thought/命令/Diff）。' +
+  '调用前禁止用 bash/grep/read/glob/pwsh 探索或动手，禁止自行改文件，禁止用其他工具代替本插件，禁止先向用户长文解释方案。' +
+  'begin/continue 会阻塞到结束并直接返回「本轮结论」（进度卡在阻塞期间流式展示 Thought/命令/Diff）。' +
   '返回后三段式结论已在 chat_body，禁止再写短复述盖掉正文。' +
   '禁止 bash/sleep 空等；一般不必再调 zr_cchat_wait/finish（仅 begin 超时未出结论时才用）。' +
-  '只有用户明确只想了解代码（在哪、什么意思、帮我解释）且不需要改动时，才使用只读工具。' +
+  '只有用户明确只想了解代码（在哪、什么意思、帮我解释）且不需要改动、也不需要跑服务或排障时，才使用只读工具。' +
   '用户贴了截图时，把图片绝对路径放进 images。' +
   '已命中 ESC/MES 专用技能时按该技能流程走。'
 
@@ -711,10 +714,11 @@ export function apply(ctx: Context) {
     defineTool({
       name: 'zr_cchat_begin',
       description:
-        '【Cursor 对话写码·主入口】任意本地工作区、不限技术栈：改当前工程代码 / 聊着改 / 看图改。' +
-        '写码请求的第一步就调用本工具，禁止先用 bash/grep/read/glob 探索工程。' +
+        '【Cursor 开发·主入口】任意本地工作区、不限于改代码：改页面/接口/修 bug，以及启动/重启前后端、跑测试、装依赖、看日志、查环境、排障。由 Cursor SDK 执行。' +
+        '开发需求的第一步就调用本工具，禁止先用 bash/grep/read/glob/pwsh。' +
         'workspace=侧栏当前打开工程的绝对路径；禁止 Bash/Write 直接改盘。' +
-        '本工具会阻塞到写码结束，直接返回本轮结论；阻塞期间进度卡流式展示 Thought/命令/Diff（无确认卡）。' +
+        '本工具会阻塞到本轮结束，直接返回本轮结论；阻塞期间进度卡流式展示过程（无确认卡）。' +
+        '改代码会准备沙箱再同步，这条路径不变。不改代码的启动/重启、测试、装依赖、看日志、查环境、排障按 Cursor IDE 在真实项目终端执行。' +
         '返回后三段式结论（任务结果/做了什么/如何验证）已在 chat_body：禁止再写短复述盖掉正文；一般不必再调 wait/finish。' +
         '入口级新增/删除页面·菜单·报表入口，或范围仍不清：先 ask_user_question（可多轮），答完再调本工具（clarified=true）。' +
         '用户贴了图：把本机图片绝对路径（或 data URL）放进 images；有图必须传。' +
@@ -832,8 +836,9 @@ export function apply(ctx: Context) {
     defineTool({
       name: 'zr_cchat_continue',
       description:
-        '【Cursor 对话写码·续改】同工程多轮：用户最新原话 + 可选新截图；优先 resume 上一轮 Agent。' +
-        '本工具阻塞到写码结束并直接返回本轮结论；进度卡在阻塞期间流式展示过程（无确认卡）。' +
+        '【Cursor 开发·续做】同工程多轮，不限于改代码：用户最新原话 + 可选新截图；优先 resume 上一轮 Agent。启动/重启、测试、排障同样走本工具。' +
+        '本工具阻塞到本轮结束并直接返回本轮结论；进度卡在阻塞期间流式展示过程（无确认卡）。' +
+        '续做若不改代码（启动/重启、测试、看日志、排障），按 Cursor IDE 在真实项目终端执行。改代码的续做仍走写码沙箱，不会把上一轮终端任务的目录当成沙箱。' +
         '返回后三段式结论已在 chat_body：禁止再写短复述盖掉正文。' +
         '换了侧栏工程则 workspace 用新路径。入口级新增/删除或范围不清：先 ask_user_question（可多轮），答完再调（clarified=true）。' +
         FOLLOWUP_AGENT_HINT +
@@ -1179,7 +1184,12 @@ export function apply(ctx: Context) {
         // 禁止经 HTTP 自签 HITL：进度卡同步走 UI 签发；工具仅本进程直调（用户 confirmed）
         const out = applyJobReview({ job_id: jobId, accept })
         if (!out.ok) {
-          return asJson({ ok: false, detail: out.detail || 'apply 失败' })
+          if (out.code === 'delivery_audit') await foldLiveAudit(jobId)
+          const fresh = loadJob(jobId)
+          return asJson({
+            ok: false,
+            detail: fresh?.delivery_audit?.detail || fresh?.detail || out.detail || 'apply 失败',
+          })
         }
         const synced = out.synced_files || []
         return asJson({

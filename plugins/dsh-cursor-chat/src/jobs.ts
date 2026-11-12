@@ -80,6 +80,7 @@ function migrateJob(raw: CursorCodingJob): CursorCodingJob {
     review_deferred: raw.review_deferred || [],
     review_gate: raw.review_gate ?? null,
     events: raw.events || [],
+    work_kind: raw.work_kind === 'ops' || raw.work_kind === 'code' ? raw.work_kind : undefined,
   }
 }
 
@@ -114,12 +115,15 @@ export function jobCardView(job: CursorCodingJob): Record<string, unknown> {
     detail: job.detail,
     workspace: job.workspace,
     requirement: job.requirement,
+    work_kind: job.work_kind === 'ops' ? 'ops' : 'code',
     transcript: job.transcript || [],
     review_in_scope: job.review_in_scope || [],
     review_deleted: job.review_deleted || [],
     review_deferred: job.review_deferred || [],
     review_gate: job.review_gate ?? null,
     synced_files: job.synced_files || [],
+    backend_restart: job.backend_restart || null,
+    backend_restart_hint: job.backend_restart_hint || null,
     updated_at: job.updated_at,
     chat_conclusion: formatChatConclusion(job),
   }
@@ -183,6 +187,8 @@ function tryWriteAudit(job: CursorCodingJob, status: JobStatus): void {
       duration_ms: durationMs,
       quality_score: qualityReport?.score ?? null,
       quality_status: qualityReport?.status ?? null,
+      verify_ok: job.verify_ok ?? null,
+      delivery_audit_ok: job.delivery_audit ? job.delivery_audit.ok : null,
       synced_files: syncedCount,
       changed_files: job.changed_files?.length ?? 0,
       deleted_files: job.deleted_files?.length ?? 0,
@@ -212,20 +218,23 @@ export function createJob(input: {
   dsh_call_id?: string | null
   write_scope?: string[]
   continue_count?: number
+  work_kind?: 'code' | 'ops'
 }): CursorCodingJob {
   const now = new Date().toISOString()
+  const workKind = input.work_kind === 'ops' ? 'ops' : 'code'
   const job: CursorCodingJob = {
     id: newJobId(),
     status: 'queued',
     workspace: String(input.workspace || '').trim(),
     requirement: String(input.requirement || '').trim(),
+    work_kind: workKind,
     images: input.images && input.images.length ? input.images.slice(0, 8) : undefined,
     parent_job_id: input.parent_job_id ? String(input.parent_job_id).trim() : null,
     dsh_session_id: input.dsh_session_id ? String(input.dsh_session_id).trim() : null,
     dsh_call_id: input.dsh_call_id ? String(input.dsh_call_id).trim() : null,
     created_at: now,
     updated_at: now,
-    detail: '已入队',
+    detail: workKind === 'ops' ? '已开工，直接在项目终端处理，不改代码' : '已入队',
     events: [],
     changed_files: [],
     deleted_files: [],
@@ -250,7 +259,11 @@ export function createJob(input: {
     cancelled: false,
   }
   saveJob(job)
-  appendEvent(job, { type: 'status', status: 'queued', message: '已入队' })
+  appendEvent(job, {
+    type: 'status',
+    status: 'queued',
+    message: workKind === 'ops' ? '已开工，直接在项目终端处理，不改代码' : '已入队',
+  })
   return loadJob(job.id)!
 }
 

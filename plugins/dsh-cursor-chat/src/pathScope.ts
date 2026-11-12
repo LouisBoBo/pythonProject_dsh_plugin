@@ -52,6 +52,9 @@ const SENSITIVE_BASENAMES = new Set([
 
 const SENSITIVE_SUFFIXES = ['.pem', '.p12', '.pfx', '.key', '.ppk', '.env']
 
+/** 本机运行时库文件：常被后端进程占用，禁止进同步（否则 EPERM 拖死整批代码落盘） */
+const LOCAL_DB_SUFFIXES = ['.db', '.sqlite', '.sqlite3', '.db-wal', '.db-shm', '.db-journal']
+
 const SENSITIVE_PATH_PARTS = new Set(['.git', '.ssh', '.gnupg', '.aws', '.kube', '.docker'])
 
 export function normalizeRel(rel: string): string {
@@ -115,6 +118,15 @@ export function isSensitiveRel(rel: string): boolean {
   return false
 }
 
+/** SQLite 等本机库：不进审同、不覆盖目标（运行中 rename 会 EPERM，且不该由写码同步） */
+export function isLocalDbRel(rel: string): boolean {
+  const r = normalizeRel(rel)
+  if (!r) return false
+  const base = r.split('/').pop() || r
+  const lower = base.toLowerCase()
+  return LOCAL_DB_SUFFIXES.some((suf) => lower.endsWith(suf))
+}
+
 export function shouldSkipDirname(name: string): boolean {
   if (COPY_SKIP_DIR_NAMES.has(name) || name.startsWith('.git')) return true
   return false
@@ -128,7 +140,7 @@ export function partitionChangedPaths(
   const deferred: string[] = []
   for (const rel of changed) {
     const r = normalizeRel(rel)
-    if (!r || isSensitiveRel(r)) continue
+    if (!r || isSensitiveRel(r) || isLocalDbRel(r)) continue
     if (pathInScope(r, scope)) inScope.push(r)
     else deferred.push(r)
   }

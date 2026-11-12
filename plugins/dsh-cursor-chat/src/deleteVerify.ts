@@ -91,8 +91,8 @@ const RUNTIME_HINT =
   '【界面刷新】本机源码已写入；若本机 Vite 在跑，已触碰文件触发 HMR（不再默认杀进程/npm run dev）。' +
   '请硬刷新浏览器（Cmd+Shift+R）即可看到菜单/路由变化。'
 const BACKEND_HINT =
-  '【后端重启】本次改了接口或路由挂载文件。请重启本机后端后再打开页面，' +
-  '否则仍是旧进程，页面会弹出 Not Found（接口 404）。'
+  '【后端重启】本次改了接口或路由挂载文件；门禁通过时将自动经应用终端重启后端。' +
+  '若未能自动重启，请按工程既有方式重启后再打开页面，否则仍是旧进程（Not Found / 404）。'
 
 function readRel(root: string, rel: string, limit = 500_000): string | null {
   const p = join(root, rel.replace(/\\/g, '/').replace(/^\//, ''))

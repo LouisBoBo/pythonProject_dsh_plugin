@@ -83,7 +83,9 @@ export function safeFileUnderRoot(root: string, rel: string): string | null {
 export function safePathUnderRoot(root: string, rel: string): string | null {
   const rootR = resolve(root)
   const cand = resolve(rootR, rel)
-  if (!cand.startsWith(rootR + '/') && cand !== rootR) return null
+  const rootN = rootR.replace(/\\/g, '/').replace(/\/+$/, '')
+  const candN = cand.replace(/\\/g, '/')
+  if (candN !== rootN && !candN.startsWith(rootN + '/')) return null
   return cand
 }
 
@@ -164,11 +166,60 @@ export function extractDeletedPathsFromProcess(text: string): string[] {
 export type ValidateResult = { approved: string[]; rejected: string[] }
 
 /** 校验待删清单；引擎白名单必批；Cursor 清单中页面/API/路由在范围内放行 */
+const GENERIC_STEM = new Set([
+  'view', 'report', 'reports', 'kanban', 'index', 'page', 'list', 'dashboard',
+  'component', 'layout', 'home', 'app', 'main',
+])
+
+function dedicatedStemTokens(rel: string): string[] {
+  const base = normRel(rel).split('/').pop() || ''
+  const stem = base.replace(/\.(vue|jsx|tsx|js|ts)$/i, '')
+  return stem
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .map((s) => s.toLowerCase())
+    .filter((s) => s.length >= 3 && !GENERIC_STEM.has(s))
+}
+
+/** 未写入功能白名单的页面：文件名里的专有词能对上诉求才允许删。 */
+function requirementLinksDedicatedView(requirement: string, rel: string): boolean {
+  const req = String(requirement || '').toLowerCase()
+  return dedicatedStemTokens(rel).some((tok) => req.includes(tok))
+}
+
+/** 清单正文里标明保留 / 不删的路径，不得因为同段出现过路径就被删掉。 */
+export function pathsMarkedKeep(text: string): Set<string> {
+  const keep = new Set<string>()
+  for (const line of String(text || '').split(/\n/)) {
+    if (!/(不删|保留|❌)/.test(line)) continue
+    if (/✅/.test(line) && !/❌/.test(line)) continue
+    for (const m of line.matchAll(/`((?:frontend|backend|apps|src)\/[^`]+)`/g)) {
+      const rel = normRel(m[1]).split(/[：:\s]/)[0]
+      if (rel) keep.add(rel)
+    }
+  }
+  return keep
+}
+
+export function deleteTitleMarkers(requirement: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const re = /(?:删除|去掉|移除|下线)\s*[「『"]([^」』"]{2,24})[」』"]/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(requirement)) !== null) {
+    const label = m[1].trim()
+    if (!label || seen.has(label)) continue
+    seen.add(label)
+    out.push(label)
+  }
+  return out
+}
+
 export function validateDeletePlan(
   paths: string[],
   requirement: string,
   targetRoot: string,
-  opts?: { write_scope?: string[] },
+  opts?: { write_scope?: string[]; assistant_text?: string },
 ): ValidateResult {
   const root = resolve(targetRoot)
   const approved: string[] = []
@@ -221,6 +272,12 @@ export function validateDeletePlan(
 
     const base = relN.split('/').pop()!.toLowerCase()
     if (SHARED_WHOLE_FILE_DENY.has(base)) { rejected.push(`${relN}：共用壳文件，拒绝整删`); continue }
+    if (/后端保留|不含后端|不删后端|后端不删/.test(requirement) && relN.startsWith('backend/')) {
+      rejected.push(`${relN}：诉求写明后端保留`); continue
+    }
+    if (pathsMarkedKeep(opts?.assistant_text || '').has(relN)) {
+      rejected.push(`${relN}：清单标明保留`); continue
+    }
     if (relN.startsWith('frontend/src/api/') && /\.(js|ts|mjs|cjs)$/.test(relN)) { approve(relN); continue }
     if (relN.startsWith('backend/app/routers/') && relN.endsWith('.py') && base !== '__init__.py') { approve(relN); continue }
     if (relN.endsWith('.vue') && relN.includes('/views/')) {
@@ -230,6 +287,7 @@ export function validateDeletePlan(
         const tokens = FEATURE_TOKEN_MAP[feat]
         if (tokens && tokens.some(t => stem.includes(t))) { ok = true; break }
       }
+      if (!ok && requirementLinksDedicatedView(requirement, relN)) ok = true
       if (ok) { approve(relN); continue }
     }
     rejected.push(`${relN}：不确定，拒绝删除（共用壳或不支持整删类型）`)
@@ -359,16 +417,32 @@ function jsSyntaxOk(text: string): boolean {
  *
  * 返回被改动的相对路径列表。
  */
+function stripMarkerLines(text: string, markers: string[]): { text: string; changed: boolean } {
+  const usable = markers.map((m) => m.trim()).filter((m) => m.length >= 4)
+  if (!text || !usable.length) return { text, changed: false }
+  let changed = false
+  const out: string[] = []
+  for (const line of text.split('\n')) {
+    if (line.length < 300 && usable.some((m) => line.includes(m))) {
+      changed = true
+      continue
+    }
+    out.push(line)
+  }
+  const result = out.join('\n')
+  return { text: result + (text.endsWith('\n') ? '\n' : ''), changed }
+}
+
 export function patchMenuRouterInSandbox(
   sandbox: string,
   target: string,
   features: string[],
+  extraMarkers: string[] = [],
 ): string[] {
   const patched: string[] = []
   const sandboxR = resolve(sandbox)
   for (const rel of [...MENU_ROUTER_FILES]) {
-    if (relIsProtected(rel)) continue // 绝不允许整删菜单路由壳文件
-    // sandbox containment 双重校验
+    // 这里只改菜单/路由正文，不删除这些壳文件。整文件删除仍由 relIsProtected 拦住。
     const sbPath = safePathUnderRoot(sandboxR, rel)
     if (!sbPath) continue
     const tgPath = join(resolve(target), rel)
@@ -379,6 +453,9 @@ export function patchMenuRouterInSandbox(
     if (!existsSync(sbPath)) continue
     let body = readFileSync(sbPath, 'utf8')
     let anyChange = false
+    const marked = stripMarkerLines(body, extraMarkers)
+    body = marked.text
+    if (marked.changed) anyChange = true
     for (const feat of features) {
       const r1 = stripMenuLines(body, feat)
       body = r1.text; if (r1.changed) anyChange = true
@@ -475,7 +552,14 @@ export function reconcileDeleteArtifacts(
     if (removed) { forced.push(r); emit(`引擎已删除：${r}`) }
   }
 
-  const patched = patchMenuRouterInSandbox(sandbox, target, features)
+  const fileMarkers = planned
+    .map((rel) => normRel(rel).split('/').pop() || '')
+    .map((base) => base.replace(/\.(vue|jsx|tsx|js|ts)$/i, ''))
+    .filter((stem) => stem.length >= 8)
+  const patched = patchMenuRouterInSandbox(sandbox, target, features, [
+    ...deleteTitleMarkers(opts.requirement),
+    ...fileMarkers,
+  ])
   if (patched.length) emit('引擎已修补菜单/路由：' + [...new Set(patched)].join('、'))
 
   const detail = forced.length || patched.length

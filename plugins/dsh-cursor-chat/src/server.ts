@@ -30,10 +30,11 @@ import {
   listJobs,
   loadJob,
   onJobChange,
+  patchJob,
   saveJob,
   setStatus,
 } from './jobs.js'
-import { runJobBackground, applyJobReview, steerJobBackground, healStalePendingReview, recoverOrphanRunningJobs } from './orchestrator/runJob.js'
+import { runJobBackground, applyJobReview, steerJobBackground, healStalePendingReview, recoverOrphanRunningJobs, sealWithServices, foldLiveAudit } from './orchestrator/runJob.js'
 import { expandWriteScopeWithCompanions } from './scopeCompanions.js'
 import { needsRequirementClarify } from './requirementGate.js'
 import {
@@ -53,6 +54,7 @@ import {
 } from './pendingConfirm.js'
 import { formatChatConclusion } from './conclusion.js'
 import { formatDialogMarkdown } from './transcript.js'
+import { assertBackendRestartReady, executeBackendRestart } from './backendRestart.js'
 import type { HitlAction } from './types.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -386,14 +388,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       action !== 'cursor-chat.confirm' &&
       action !== 'cursor-chat.apply' &&
       action !== 'cursor-chat.steer' &&
-      action !== 'cursor-chat.cancel'
+      action !== 'cursor-chat.cancel' &&
+      action !== 'cursor-chat.restart-backend'
     ) {
       send(
         res,
         400,
         {
           ok: false,
-          detail: 'action 须为 cursor-chat.confirm / apply / steer / cancel',
+          detail: 'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend',
         },
         req,
       )
@@ -442,6 +445,30 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const job = loadJob(jobId)
       if (!job) {
         send(res, 404, { ok: false, detail: '任务不存在' }, req)
+        return
+      }
+      const issued = issue({
+        action,
+        workspace: job.workspace,
+        job_id: job.id,
+      })
+      send(res, 200, issued, req)
+      return
+    }
+    if (action === 'cursor-chat.restart-backend') {
+      const jobId = String(body.job_id || '').trim()
+      if (!jobId) {
+        send(res, 400, { ok: false, detail: '签发 restart-backend 须携带 job_id' }, req)
+        return
+      }
+      const job = loadJob(jobId)
+      if (!job) {
+        send(res, 404, { ok: false, detail: '任务不存在' }, req)
+        return
+      }
+      const ready = assertBackendRestartReady(job)
+      if (!ready.ok) {
+        send(res, 400, { ok: false, detail: ready.detail, code: ready.code }, req)
         return
       }
       const issued = issue({
@@ -678,7 +705,14 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const expand_scope = Array.isArray(body.expand_scope)
       ? body.expand_scope.map((x) => String(x))
       : []
-    const out = applyJobReview({ job_id: id, accept, reject, expand_scope })
+    const out = applyJobReview({ job_id: id, accept, reject, expand_scope, seal: false })
+    if (out.ok) {
+      await sealWithServices(id, out.synced_files || [], out.deleted_files || [], out.detail || '已同步')
+    } else if (out.code === 'delivery_audit') {
+      await foldLiveAudit(id)
+      const fresh = loadJob(id)
+      if (fresh?.detail) out.detail = fresh.detail
+    }
     send(res, out.ok ? 200 : 400, out, req)
     return
   }
@@ -861,6 +895,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         synced_files: synced,
         deleted_files: deleted,
         files: [...synced, ...deleted],
+        // 结论区常显重启条：进度卡折叠后仍可自动/手工下发
+        backend_restart: job.backend_restart || null,
+        backend_restart_hint: job.backend_restart_hint || null,
       }
     })
     // 顶层保留最新一条，兼容仍在运行的旧版客户端
@@ -1135,6 +1172,96 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return
     }
     send(res, 200, { ok: true, job }, req)
+    return
+  }
+
+  if (method === 'POST' && path.match(/^\/api\/cursor-chat\/jobs\/[^/]+\/restart-backend$/)) {
+    if (rejectBadOrigin(req, res)) return
+    const id = decodeURIComponent(path.split('/')[4] || '')
+    let body: Record<string, unknown> = {}
+    try {
+      const raw = await readBody(req)
+      if (raw && String(raw).trim()) body = parseJson(raw)
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const nonce = String(body.nonce || body.hitl_nonce || '').trim()
+    const hitl = consume({
+      nonce,
+      action: 'cursor-chat.restart-backend',
+      job_id: id,
+    })
+    if (!hitl.ok) {
+      send(res, 401, { ok: false, detail: hitl.detail, code: hitl.code }, req)
+      return
+    }
+    const job = loadJob(id)
+    if (!job) {
+      send(res, 404, { ok: false, detail: '任务不存在' }, req)
+      return
+    }
+    const ready = assertBackendRestartReady(job)
+    if (!ready.ok) {
+      send(res, 400, { ok: false, detail: ready.detail, code: ready.code }, req)
+      return
+    }
+    const now = new Date().toISOString()
+    // 门禁通过后由本机服务真正执行（可见 PowerShell 窗）；禁止只签发就宣称「已重启」
+    const exec = executeBackendRestart(ready.offer)
+    if (!exec.ok) {
+      // 失败不钉 started_at，允许点按钮重试
+      patchJob(id, {
+        backend_restart: {
+          ...ready.offer,
+          started_at: null,
+          executed: false,
+          done_at: null,
+          last_detail: exec.detail,
+        },
+      })
+      send(
+        res,
+        500,
+        {
+          ok: false,
+          job_id: id,
+          code: 'execute_failed',
+          detail: exec.detail,
+          cwd: ready.offer.cwd,
+          port: ready.offer.port,
+          command: ready.offer.command,
+          shell_lines: ready.offer.shell_lines,
+        },
+        req,
+      )
+      return
+    }
+    const offer = {
+      ...ready.offer,
+      started_at: now,
+      executed: true,
+      done_at: now,
+      last_detail: exec.detail,
+    }
+    patchJob(id, { backend_restart: offer })
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        job_id: id,
+        executed: true,
+        cwd: offer.cwd,
+        port: offer.port,
+        command: offer.command,
+        probe_url: offer.probe_url,
+        reason: offer.reason,
+        shell_lines: offer.shell_lines,
+        detail: exec.detail,
+      },
+      req,
+    )
     return
   }
 

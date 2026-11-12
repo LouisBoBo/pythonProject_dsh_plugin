@@ -92,9 +92,10 @@ export function buildPrompt(opts: {
     '【执行约束】\n' +
     '- cwd = 沙箱根目录，只改此目录内文件；下方为本机同步目录仅供对照，勿当 cwd。\n' +
     `- 本机同步目录：${opts.workspaceHint}\n` +
-    '- 先摸清再改，沿用仓库现有模式；最小必要改动。\n' +
-    '- 禁止 npm run dev/build、npx vite、长驻进程；改完即收工。\n' +
-    '- 像 Cursor IDE 短句推进；终稿第一行恰好是：## 说明方案\n' +
+    '- 本轮是写码：像 Cursor IDE 一样先摸清再改，沿用仓库现有模式，最小必要改动。只改沙箱内文件。\n' +
+    '- 禁止在沙箱里启动/重启前后端、npm run dev/build、npx vite 或再起长驻进程，改完即收工。真实项目里的服务由落盘后的确认阶段处理。\n' +
+    '- 单纯的启动/重启前后端、跑测试、安装依赖、看日志、查环境、排障不进入本沙箱，它们在真实项目终端里按 Cursor IDE 的方式执行。\n' +
+    '- 终稿第一行恰好是：## 说明方案\n' +
     '- 说明方案须含：**结论**（任务结果一句话）、**做了什么**（改了啥/效果；若排障写清根因与处理）、**验收**（用户怎么验证，3～5 步）、**改动文件**（路径列表）。写给人看，清楚友好。\n'
   )
 }
@@ -501,6 +502,23 @@ function unwrapSdkMessage(message: unknown): { mtype: string; payload: Record<st
   return { mtype: String(raw.type || ''), payload: raw }
 }
 
+/** 启动挂起时自动再试的次数。未连上之前不出失败结论。 */
+export const BOOT_ATTEMPTS = 3
+
+/** 网络、超时、可重试的网关错误才重试。取消和密钥错误立刻停。 */
+export function isTransientBootError(message: string): boolean {
+  return shouldRetryBoot(message, false)
+}
+
+/** SDK 标了 retryable 也不能覆盖取消和密钥错误。 */
+export function shouldRetryBoot(message: string, sdkRetryable = false): boolean {
+  const s = String(message || '')
+  if (/已取消/.test(s)) return false
+  if (/unauthorized|invalid api key|forbidden|\b401\b|\b403\b/i.test(s)) return false
+  if (sdkRetryable) return true
+  return /超时|timed out|timeout|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up|network|\b429\b|\b502\b|\b503\b|\b504\b/i.test(s)
+}
+
 /**
  * 在沙箱 cwd 跑 Cursor Local；支持 resume（续改/追问）。
  */
@@ -518,9 +536,37 @@ export async function runCursorLocal(opts: {
   images?: Array<{ data: string; mimeType: string } | { url: string }>
   /** 用量账 job 前缀（通常为 cch job id）；与 run_id 拼成唯一 job_id */
   ledgerJobId?: string
+  /** code=写码沙箱；service=同步后确认服务；ops=用户直接要求的终端操作。后两者禁止写 Mock 标记文件 */
+  phase?: 'code' | 'service' | 'ops'
+  idleMs?: number
+  absoluteMaxMs?: number
 }): Promise<CursorRunResult> {
+  const phase: 'code' | 'service' | 'ops' =
+    opts.phase === 'service' || opts.phase === 'ops' ? opts.phase : 'code'
+  const bootLabel = phase === 'code' ? '启动 Cursor Local' : '连接 Cursor'
+  const bootTip =
+    phase === 'ops'
+      ? '正在连接 Cursor，准备在项目终端处理…'
+      : phase === 'service'
+        ? '正在连接 Cursor，准备确认服务…'
+        : '正在启动 Cursor Local，请稍候…'
   mkdirSync(opts.sandbox, { recursive: true })
   if (shouldMock(opts.apiKey)) {
+    if (phase === 'service' || phase === 'ops') {
+      const ops = phase === 'ops'
+      opts.onEvent({ type: 'status', message: ops ? 'Mock：跳过开发操作' : 'Mock：跳过终端确认' })
+      return {
+        ok: true,
+        text: ops
+          ? '## 说明方案\n**结论**\nMock 已按开发操作收口，未改代码。\n**做了什么**\n未启动真实终端。\n**验收**\n自检不连接真实服务。\n'
+          : '',
+        thinking: '',
+        transcript: [],
+        agent_id: 'mock-agent',
+        run_id: ops ? 'mock-ops' : 'mock-service',
+        mocked: true,
+      }
+    }
     return runMock({
       sandbox: opts.sandbox,
       requirement: opts.prompt.includes('【用户诉求】')
@@ -540,13 +586,14 @@ export async function runCursorLocal(opts: {
     opts.onEvent({ type: 'user', message: opts.userPreface })
   }
 
-  opts.onEvent({ type: 'status', message: '正在启动 Cursor Local，请稍候…' })
-  bus.addStatus('正在启动 Cursor Local，请稍候…')
+  opts.onEvent({ type: 'status', message: bootTip })
+  bus.addStatus(bootTip)
 
   /** Agent.create/resume 无内置超时；API 挂起时会让 job 永久 running、宿主「深度搜索中」 */
   const AGENT_BOOT_TIMEOUT_MS = 45_000
   const withBootTimeout = async <T>(label: string, work: Promise<T>): Promise<T> => {
     let tick = 0
+    let abandon = false
     const hb = setInterval(() => {
       tick += 1
       opts.onEvent({
@@ -554,25 +601,34 @@ export async function runCursorLocal(opts: {
         message: `${label}（已等待 ${tick * 10}s，超时 ${AGENT_BOOT_TIMEOUT_MS / 1000}s）…`,
       })
     }, 10_000)
-    let timedOut = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let cancelTimer: ReturnType<typeof setInterval> | undefined
     try {
-      return await Promise.race([
-        work,
-        new Promise<T>((_, reject) =>
-          setTimeout(() => {
-            timedOut = true
-            reject(
-              new Error(
-                `${label}超时（>${AGENT_BOOT_TIMEOUT_MS / 1000}s）。请检查网络/代理与 Cursor API Key 后重试。`,
-              ),
-            )
-          }, AGENT_BOOT_TIMEOUT_MS),
-        ),
-      ])
+      return await new Promise<T>((resolveBoot, rejectBoot) => {
+        timer = setTimeout(() => {
+          abandon = true
+          rejectBoot(
+            new Error(
+              `${label}超时（>${AGENT_BOOT_TIMEOUT_MS / 1000}s）。请检查网络/代理与 Cursor API Key 后重试。`,
+            ),
+          )
+        }, AGENT_BOOT_TIMEOUT_MS)
+        cancelTimer = setInterval(() => {
+          if (!opts.isCancel()) return
+          abandon = true
+          rejectBoot(new Error('已取消'))
+        }, 400)
+        work.then(
+          (value) => resolveBoot(value),
+          (err) => rejectBoot(err),
+        )
+      })
     } finally {
       clearInterval(hb)
-      if (timedOut) {
-        // 超时后底层请求可能才成功：晚到的 Agent 必须立即释放，避免孤儿进程
+      if (timer) clearTimeout(timer)
+      if (cancelTimer) clearInterval(cancelTimer)
+      if (abandon) {
+        // 超时或取消后底层请求可能才成功：晚到的 Agent 必须立即释放，避免孤儿进程
         void work.then(
           (late) => disposeAgent(late as Parameters<typeof disposeAgent>[0]),
           () => {},
@@ -581,14 +637,13 @@ export async function runCursorLocal(opts: {
     }
   }
 
-  let agent: Awaited<ReturnType<typeof Agent.create>>
-  try {
+  const bootOnce = async (): Promise<Awaited<ReturnType<typeof Agent.create>>> => {
     if (opts.resumeAgentId) {
       const tip = `续跑 Agent ${opts.resumeAgentId.slice(0, 12)}…`
       opts.onEvent({ type: 'status', message: tip })
       bus.addStatus(tip)
       try {
-        agent = await withBootTimeout(
+        return await withBootTimeout(
           '续跑 Agent',
           Agent.resume(opts.resumeAgentId, {
             apiKey: opts.apiKey,
@@ -608,30 +663,71 @@ export async function runCursorLocal(opts: {
         const fallbackTip = `父 Agent 不可用，改用新 Agent（沙箱已复用）：${rmsg.slice(0, 120)}`
         opts.onEvent({ type: 'status', message: fallbackTip })
         bus.addStatus(fallbackTip)
-        agent = await withBootTimeout(
-          '启动 Cursor Local',
-          Agent.create({
-            apiKey: opts.apiKey,
-            model: { id: model },
-            local: { cwd: opts.sandbox },
-          }),
-        )
       }
-    } else {
-      agent = await withBootTimeout(
-        '启动 Cursor Local',
-        Agent.create({
-          apiKey: opts.apiKey,
-          model: { id: model },
-          local: { cwd: opts.sandbox },
-        }),
-      )
     }
-  } catch (err) {
-    const msg =
-      err instanceof CursorAgentError
-        ? `${err.message}（retryable=${Boolean(err.isRetryable)}）`
-        : String(err)
+    return withBootTimeout(
+      bootLabel,
+      Agent.create({
+        apiKey: opts.apiKey,
+        model: { id: model },
+        local: { cwd: opts.sandbox },
+      }),
+    )
+  }
+
+  let agent: Awaited<ReturnType<typeof Agent.create>> | undefined
+  for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt++) {
+    if (opts.isCancel()) {
+      return {
+        ok: false,
+        text: '',
+        thinking: '',
+        transcript: bus.transcript,
+        agent_id: '',
+        run_id: '',
+        error: '已取消',
+      }
+    }
+    if (attempt > 1) {
+      const tip = `写码还没连上，正在第 ${attempt}/${BOOT_ATTEMPTS} 次重试，先不收结论…`
+      opts.onEvent({ type: 'status', message: tip })
+      bus.addStatus(tip)
+    }
+    try {
+      agent = await bootOnce()
+      break
+    } catch (err) {
+      const msg =
+        err instanceof CursorAgentError
+          ? `${err.message}（retryable=${Boolean(err.isRetryable)}）`
+          : String(err)
+      const retryable = shouldRetryBoot(
+        msg,
+        err instanceof CursorAgentError && Boolean(err.isRetryable),
+      )
+      if (!retryable || attempt >= BOOT_ATTEMPTS) {
+        const finalMsg = retryable
+          ? `${msg} 已自动重试 ${attempt} 次，仍未开始写码。`
+          : msg
+        opts.onEvent({ type: 'error', message: finalMsg })
+        return {
+          ok: false,
+          text: '',
+          thinking: '',
+          transcript: bus.transcript,
+          agent_id: '',
+          run_id: '',
+          error: finalMsg,
+        }
+      }
+      opts.onEvent({
+        type: 'status',
+        message: `第 ${attempt} 次启动未成功，继续重试…`,
+      })
+    }
+  }
+  if (!agent) {
+    const msg = 'Cursor 执行失败'
     opts.onEvent({ type: 'error', message: msg })
     return {
       ok: false,
@@ -685,13 +781,20 @@ export async function runCursorLocal(opts: {
           })
         : await agent.send(opts.prompt)
     runId = String(run.id || '')
-    opts.onEvent({ type: 'status', message: 'Cursor 正在改码，过程见进度卡…' })
-    bus.addStatus('Cursor 正在改码，过程见进度卡…')
+    const working = phase === 'code' ? '写码' : phase === 'ops' ? '处理' : '确认服务'
+    const live =
+      phase === 'ops'
+        ? 'Cursor 正在项目终端里处理，不改代码…'
+        : phase === 'service'
+          ? 'Cursor 正在终端里确认前后端…'
+          : 'Cursor 正在改码，过程见进度卡…'
+    opts.onEvent({ type: 'status', message: live })
+    bus.addStatus(live)
 
-    // 90s 无 SSE 进展才收口；但工具仍 running 时延期（task/探索常见静默），避免「0 文件假成功」。
+    // 无 SSE 进展才收口；工具仍 running 时延期，避免探索阶段误杀。
     // 绝对上限防永久挂死（宿主「深度搜索中」）。
-    const idleMs = 90_000
-    const absoluteMaxMs = 8 * 60_000
+    const idleMs = opts.idleMs ?? 90_000
+    const absoluteMaxMs = opts.absoluteMaxMs ?? 8 * 60_000
     const runStartedAt = Date.now()
     let idleTimedOut = false
     let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -702,9 +805,9 @@ export async function runCursorLocal(opts: {
         if (transcriptHasRunningTools(bus.transcript) && elapsed < absoluteMaxMs) {
           opts.onEvent({
             type: 'status',
-            message: '工具仍在执行，继续等待写码…',
+            message: `工具仍在执行，继续等待${working}…`,
           })
-          bus.addStatus('工具仍在执行，继续等待写码…')
+          bus.addStatus(`工具仍在执行，继续等待${working}…`)
           bumpIdle()
           return
         }
@@ -712,13 +815,21 @@ export async function runCursorLocal(opts: {
         opts.onEvent({
           type: 'status',
           message: transcriptHasRunningTools(bus.transcript)
-            ? '超过等待上限仍有工具未结束，已按已改文件收口'
-            : '超过 90 秒无进展（常见于空等 Vite），已跳过编译等待并按已改文件收口',
+            ? `超过等待上限仍有工具未结束，已结束本轮${working}`
+            : phase === 'ops'
+              ? '终端处理超时，已按当前结果收口'
+              : phase === 'service'
+                ? '终端确认超时，已按端口探测结果收口'
+                : '超过 90 秒无进展（常见于空等 Vite），已跳过编译等待并按已改文件收口',
         })
         bus.addStatus(
           transcriptHasRunningTools(bus.transcript)
             ? '超过等待上限，已收口'
-            : '超过 90 秒无进展，已跳过空等 Vite',
+            : phase === 'ops'
+              ? '终端处理超时'
+              : phase === 'service'
+                ? '终端确认超时'
+                : '超过 90 秒无进展，已跳过空等 Vite',
         )
         void Promise.resolve()
           .then(async () => {

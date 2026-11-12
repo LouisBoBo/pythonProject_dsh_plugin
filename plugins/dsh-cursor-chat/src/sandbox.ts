@@ -22,7 +22,13 @@ import {
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join, relative, resolve, sep } from 'node:path'
-import { isSensitiveRel, normalizeRel, shouldSkipDirname } from './pathScope.js'
+import {
+  isLocalDbRel,
+  isSensitiveRel,
+  normalizeRel,
+  pathInScope,
+  shouldSkipDirname,
+} from './pathScope.js'
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024
 export const COPY_MAX_FILES = 4000
@@ -582,6 +588,65 @@ function fingerprintFile(path: string): string {
   }
 }
 
+/**
+ * 同步后验尸：清单内文件须在目标存在，且与沙箱指纹一致。
+ * 跳过敏感路径与本地库（故意不同步）。
+ */
+export function verifySyncedFingerprints(
+  sandbox: string,
+  target: string,
+  rels: string[],
+): { ok: boolean; missing: string[]; mismatched: string[]; detail: string } {
+  const sb = resolve(String(sandbox || ''))
+  const tg = resolve(String(target || ''))
+  const missing: string[] = []
+  const mismatched: string[] = []
+  if (!sb || !tg || !existsSync(sb) || !existsSync(tg)) {
+    return {
+      ok: false,
+      missing: [],
+      mismatched: [],
+      detail: '交付审计失败：沙箱或目标工程路径无效',
+    }
+  }
+  for (const raw of rels || []) {
+    const r = normalizeRel(raw)
+    if (!r || isSensitiveRel(r) || isLocalDbRel(r)) continue
+    const src = join(sb, r)
+    const dst = join(tg, r)
+    let srcFp = ''
+    try {
+      if (existsSync(src) && statSync(src).isFile()) srcFp = fingerprintFile(src)
+    } catch {
+      srcFp = ''
+    }
+    if (!srcFp) continue
+    let dstFp = ''
+    try {
+      if (existsSync(dst) && statSync(dst).isFile()) dstFp = fingerprintFile(dst)
+    } catch {
+      dstFp = ''
+    }
+    if (!dstFp) {
+      missing.push(r)
+      continue
+    }
+    if (dstFp !== srcFp) mismatched.push(r)
+  }
+  if (!missing.length && !mismatched.length) {
+    return { ok: true, missing, mismatched, detail: '落盘指纹与沙箱一致' }
+  }
+  const parts: string[] = []
+  if (missing.length) parts.push(`目标缺失：${missing.slice(0, 6).join('、')}`)
+  if (mismatched.length) parts.push(`内容不一致：${mismatched.slice(0, 6).join('、')}`)
+  return {
+    ok: false,
+    missing,
+    mismatched,
+    detail: `同步落盘验尸失败（${parts.join('；')}）`,
+  }
+}
+
 export function snapshotSandbox(sandbox: string): Map<string, string> {
   const root = resolve(sandbox)
   const map = new Map<string, string>()
@@ -677,6 +742,52 @@ export function diffSnapshots(
   return { changed, deleted }
 }
 
+/**
+ * 沙箱相对目标工程的内容漂移（写范围内）。
+ * 用于「相对开工快照无 diff」时仍可能沙箱≠目标（父沙箱复用/拷贝不全）——补同步，杜绝空跑。
+ */
+export function listSandboxTargetDrift(
+  sandbox: string,
+  target: string,
+  writeScope: string[],
+  maxItems = 200,
+): string[] {
+  const sb = resolve(String(sandbox || ''))
+  const tg = resolve(String(target || ''))
+  if (!sb || !tg || !existsSync(sb) || !existsSync(tg)) return []
+  const scope = Array.isArray(writeScope) ? writeScope : []
+  const sbMap = scope.length ? snapshotScope(sb, scope) : snapshotSandbox(sb)
+  const out: string[] = []
+  for (const [rel, fp] of sbMap) {
+    const r = normalizeRel(rel)
+    if (!r || isSensitiveRel(r) || isLocalDbRel(r)) continue
+    if (scope.length && !pathInScope(r, scope)) continue
+    const dest = join(tg, r)
+    let tFp = '__absent__'
+    try {
+      if (existsSync(dest) && statSync(dest).isFile()) tFp = fingerprintFile(dest)
+    } catch {
+      tFp = '__absent__'
+    }
+    if (tFp !== fp) out.push(r)
+    if (out.length >= maxItems) break
+  }
+  return out
+}
+
+/** 有效代码变更：去掉本地库等噪音 */
+export function filterMeaningfulRels(rels: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of rels || []) {
+    const r = normalizeRel(raw)
+    if (!r || isSensitiveRel(r) || isLocalDbRel(r) || seen.has(r)) continue
+    seen.add(r)
+    out.push(r)
+  }
+  return out
+}
+
 function assertInside(root: string, candidate: string): void {
   const r = resolve(root)
   const c = resolve(candidate)
@@ -699,7 +810,7 @@ export function syncChangedToTarget(
   let totalBytes = 0
   for (const raw of changedRels) {
     const rel = normalizeRel(raw)
-    if (!rel || isSensitiveRel(rel)) continue
+    if (!rel || isSensitiveRel(rel) || isLocalDbRel(rel)) continue
     const src = join(sb, rel)
     assertInside(sb, src)
     if (!existsSync(src) || !statSync(src).isFile()) {
@@ -731,6 +842,8 @@ export function syncChangedToTarget(
       } catch {
         /* ignore */
       }
+      // 库文件被占用时跳过，不得拖死同批代码落盘
+      if (isLocalDbRel(item.rel)) continue
       throw new Error(`同步写入失败：${item.rel}（${String(err)}）`)
     }
   }

@@ -185,6 +185,38 @@ window.__ModuleLoader__.load({
       return String(message || '')
     }
 
+    /** 与 workKind.ts 同一口径。账本 work_kind=code 时一律保持写码。 */
+    function looksLikeOpsOnlyClient(message) {
+      var t = String(message || '').replace(/\s+/g, '')
+      if (!t) return false
+      var code = t.replace(/不要改代码|不改代码|别改代码|无需改代码|不要改文件|别改文件|不要改任何文件/g, '')
+      if (/(新增|增加|添加|新建|修改|修复|实现|重构|优化)/.test(code)) return false
+      if (/(改|修)(一下|下|成|为|掉|这个|页面|接口|代码|样式|按钮|字段|文案|bug)/i.test(code)) return false
+      if (/(删除|去掉|移除|下线)/.test(code) && /(页面|菜单|接口|文件|代码|字段|路由|函数|组件)/.test(code)) {
+        return false
+      }
+      if (/(新增一列|加一列|增加一列|多一列|加列|增列)/.test(code)) return false
+      if (/(重启|重新启动|重开|拉起|启动).{0,8}(前端|后端|服务|前后端|项目|dev)/i.test(t)) return true
+      if (/(前端|后端|前后端|服务).{0,6}(重启|重新启动|重开|拉起)/.test(t)) return true
+      if (/^(请|帮我|帮忙|麻烦)?(把)?(前端|后端|前后端|服务|项目)?(重启|重新启动|重开|启动|拉起)(一下|下|前后端|前端|后端|服务|项目)?$/.test(t)) {
+        return true
+      }
+      if (/把(项目|服务|前后端|前端|后端)跑起来/.test(t)) return true
+      if (/(跑|执行|运行).{0,4}(测试|单测)/.test(t)) return true
+      if (/(安装|装).{0,4}依赖/.test(t)) return true
+      if (/npminstall|pnpminstall|yarninstall|pipinstall/i.test(t)) return true
+      if (/(看|查|查看|读).{0,6}日志/.test(t)) return true
+      if (/(查|看|检查).{0,4}环境/.test(t)) return true
+      if (/排障|排查(一下|下)?(问题|报错|服务|启动|原因)/.test(t)) return true
+      return false
+    }
+
+    function serviceRunCard(requirement, workKind) {
+      if (workKind === 'code') return false
+      if (workKind === 'ops') return true
+      return looksLikeOpsOnlyClient(requirement)
+    }
+
     var TERMINAL_JOB = {
       succeeded: 1,
       failed: 1,
@@ -618,6 +650,14 @@ window.__ModuleLoader__.load({
         '.cc-steer{margin-top:10px;border-top:1px solid var(--color-border,rgba(127,127,127,.3));padding-top:10px}' +
         '.cc-done-panel{margin-top:12px;padding-top:4px;border-top:none}' +
         '.cc-done-panel h5{margin:0 0 8px;font-size:13px;opacity:.7;font-weight:500}' +
+        '.cc-be-restart{margin:10px 0 0;padding:10px 12px;border:1px solid rgba(180,83,9,.28);background:rgba(245,158,11,.08);border-radius:10px}' +
+        '.cc-be-restart .cc-be-title{font-size:13px;font-weight:600;color:#b45309;margin:0 0 6px}' +
+        '.cc-be-restart .cc-be-reason{font-size:12.5px;line-height:1.5;opacity:.9;margin:0 0 8px;white-space:pre-wrap}' +
+        '.cc-be-restart .cc-be-cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;line-height:1.45;opacity:.78;margin:0 0 10px;word-break:break-all}' +
+        '.cc-be-restart .cc-set-actions{margin-top:0}' +
+        /* 挂在结论正文旁：进度卡折叠后仍可见，避免「一闪被结论盖住」 */
+        '.cc-conclusion-hoist .cc-be-restart{margin:12px 0 0;box-shadow:0 0 0 1px rgba(180,83,9,.12)}' +
+        '.cc-conclusion-hoist .cc-be-restart.cc-be-hoist{position:relative;z-index:2}' +
         '.cc-conclusion{margin:4px 0 0;padding:0;border:none;border-radius:0;line-height:1.6;background:transparent;max-height:none;overflow:visible;white-space:normal;font-size:14px;color:inherit}' +
         '.cc-conclusion h2{margin:0 0 10px;font-size:15px;font-weight:600;line-height:1.35}' +
         '.cc-conclusion .cc-sec-title{margin:10px 0 4px;font-size:14px;font-weight:600;line-height:1.35}' +
@@ -662,7 +702,7 @@ window.__ModuleLoader__.load({
         style.id = 'cc-set-css'
         document.head.appendChild(style)
       }
-      style.setAttribute('data-cc-css', '1.3.31-process-ui')
+      style.setAttribute('data-cc-css', '1.3.32-backend-restart')
       style.textContent = css
     }
 
@@ -1351,8 +1391,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 进度卡自己拦住渲染异常。
+     * tool.call.toolview 是 keyed + session：异常冒到宿主 SlotErrorBoundary 后，
+     * 该注册会被 abdicate，本会话后续 zr_cchat_begin 只剩空槽，写码过程不再出现。
+     * 09:22:19 重启任务结束时的 React #311 就是这样把 09:23 的写码卡注销的。
+     */
+    function CursorCodingCardBoundary(props) {
+      React.Component.call(this, props)
+      this.state = { failed: false }
+    }
+    CursorCodingCardBoundary.prototype = Object.create(React.Component.prototype)
+    CursorCodingCardBoundary.prototype.constructor = CursorCodingCardBoundary
+    CursorCodingCardBoundary.getDerivedStateFromError = function () {
+      return { failed: true }
+    }
+    CursorCodingCardBoundary.prototype.componentDidCatch = function (error) {
+      try {
+        console.error('[cursor-chat] 进度卡渲染失败，已拦住以免注销写码过程卡', error)
+      } catch (eLog) {}
+    }
+    CursorCodingCardBoundary.prototype.render = function () {
+      if (this.state && this.state.failed) {
+        return h(
+          'div',
+          { className: 'cc-note', 'data-cc-card-error': '1' },
+          '进度卡这一帧没有渲染出来。写码任务仍在本机进行；请再发一轮查看过程。',
+        )
+      }
+      return this.props.children
+    }
+
+    /**
      * 须澄清时整卡隐藏。禁止在同组件里「先 return null 再跑 hooks」——
-     * slot 按工具名复用实例时 hooks 数量变化会触发 React #300，
+     * slot 按工具名复用实例时 hooks 数量变化会触发 React #300 / #311，
      * tool.call.toolview 整槽崩溃后只剩终态结论、写码过程不再渲染。
      */
     function CursorCodingBeginCard(props) {
@@ -1360,7 +1431,7 @@ window.__ModuleLoader__.load({
       if (readAwaitAskUser(props)) {
         return null
       }
-      return h(CursorCodingBeginCardLive, props)
+      return h(CursorCodingCardBoundary, null, h(CursorCodingBeginCardLive, props))
     }
 
     function CursorCodingBeginCardLive(props) {
@@ -1492,6 +1563,9 @@ window.__ModuleLoader__.load({
       var statusLabelState = useState(boot.statusLabel)
       var statusLabel = statusLabelState[0]
       var setStatusLabel = statusLabelState[1]
+      var workKindState = useState('')
+      var workKind = workKindState[0]
+      var setWorkKind = workKindState[1]
       var conclusionState = useState(conclusionInit)
       var conclusionMd = conclusionState[0]
       var setConclusionMd = conclusionState[1]
@@ -1522,6 +1596,18 @@ window.__ModuleLoader__.load({
       var steerState = useState('')
       var steerText = steerState[0]
       var setSteerText = steerState[1]
+      var beRestartState = useState(null)
+      var beRestart = beRestartState[0]
+      var setBeRestart = beRestartState[1]
+      var beHintState = useState('')
+      var beHint = beHintState[0]
+      var setBeHint = beHintState[1]
+      var beConfirmState = useState(false)
+      var beConfirmOpen = beConfirmState[0]
+      var setBeConfirmOpen = beConfirmState[1]
+      // 本卡本轮写码过才武装自动重启，避免刷新旧卡误杀端口
+      var beAutoArmedRef = useRef(false)
+      var beAutoDoneRef = useRef('')
       var reviewReadyRef = useRef(false)
       var esRef = useRef(null)
       // 卡内过程区：进展中强制贴底；完成后才允许自由滚
@@ -1561,11 +1647,17 @@ window.__ModuleLoader__.load({
         setStreamText('')
         setTranscript([])
         setStatusLabel('')
+        setWorkKind('')
         setConclusionMd('')
         setReview({ inScope: [], deleted: [], deferred: [] })
         setSelected({})
         setConfirmToken('')
         setParentJobId('')
+        setBeRestart(null)
+        setBeHint('')
+        setBeConfirmOpen(false)
+        beAutoArmedRef.current = false
+        beAutoDoneRef.current = ''
         var req = String(nextReq || argsMsg || lastUser || '').trim()
         if (req) setRequirement(req)
       }
@@ -2235,6 +2327,11 @@ window.__ModuleLoader__.load({
         var reviewGate = job.review_gate || null
         var nextPhase = phaseFromJobStatus(st, detail, inScopeLen, reviewGate)
         var nextLabel = labelFromJobStatus(st, detail, inScopeLen, reviewGate)
+        if (job.work_kind === 'ops' || job.work_kind === 'code') {
+          setWorkKind(function (prev) {
+            return prev === job.work_kind ? prev : job.work_kind
+          })
+        }
         if (TERMINAL_JOB[st]) sealedStatusRef.current = st
         var phaseOut = nextPhase
         var labelOut = nextLabel
@@ -2248,6 +2345,7 @@ window.__ModuleLoader__.load({
           labelOut = nextLabel || '待审同步'
           dialogPinRef.current = true
           stickBottomRef.current = true
+          beAutoArmedRef.current = true
           if (job.review_in_scope || job.review_deferred) {
             enterReview({
               in_scope: job.review_in_scope || [],
@@ -2260,11 +2358,13 @@ window.__ModuleLoader__.load({
           labelOut = nextLabel || '自动同步中'
           dialogPinRef.current = true
           stickBottomRef.current = true
+          beAutoArmedRef.current = true
         } else if (st === 'running' || st === 'queued' || st === 'syncing') {
           phaseOut = 'running'
           labelOut = st === 'syncing' ? '自动同步中' : nextLabel || '写码中'
           dialogPinRef.current = true
           stickBottomRef.current = true
+          beAutoArmedRef.current = true
         } else if (st) {
           phaseOut = nextPhase === 'form' ? 'running' : nextPhase
           labelOut = nextLabel || ''
@@ -2294,6 +2394,32 @@ window.__ModuleLoader__.load({
             synced: Array.isArray(syncedNow) ? syncedNow : [],
             deleted: Array.isArray(deletedNow) ? deletedNow : [],
           })
+        }
+        if (job.backend_restart && job.backend_restart.offered) {
+          setBeRestart(function (prev) {
+            var next = job.backend_restart
+            // 本地已下发、账本尚未回写时，禁止 reconcile 冲掉 started_at（否则黄条一闪又变「将自动」）
+            if (
+              prev &&
+              prev.started_at &&
+              !next.started_at &&
+              Number(prev.port || 0) === Number(next.port || 0)
+            ) {
+              return Object.assign({}, next, {
+                started_at: prev.started_at,
+                last_detail: prev.last_detail || next.last_detail || null,
+                shell_lines: prev.shell_lines || next.shell_lines,
+              })
+            }
+            return next
+          })
+        } else if (job.backend_restart === null || job.backend_restart === undefined) {
+          setBeRestart(null)
+        }
+        if (typeof job.backend_restart_hint === 'string') {
+          setBeHint(String(job.backend_restart_hint || ''))
+        } else if (job.backend_restart_hint === null) {
+          setBeHint('')
         }
         var jid = String(job.id || jobId || '').trim()
         if (jid) {
@@ -2758,6 +2884,117 @@ window.__ModuleLoader__.load({
           })
       }
 
+      function onRestartBackend(opts) {
+        var auto = Boolean(opts && opts.auto)
+        setErr('')
+        var jid = String(jobId || '').trim()
+        if (!jid) {
+          if (!auto) setErr('缺少 job_id')
+          return
+        }
+        if (!beRestart || !beRestart.offered) {
+          if (!auto) setErr('本轮未开放后端重启')
+          return
+        }
+        if (beRestart.started_at) {
+          if (!auto) setErr('本轮已下发过重启，请查看应用终端')
+          return
+        }
+        // 自动路径跳过二次确认；手工点按钮仍保留「预览脚本 → 确认」两步
+        if (!auto && !beConfirmOpen) {
+          setBeConfirmOpen(true)
+          return
+        }
+        setBusy(true)
+        if (auto) {
+          appendStream('正在由本机服务自动重启后端 :' + String(beRestart.port || ''))
+        }
+        var autoKey =
+          jid +
+          '|' +
+          String((beRestart && beRestart.port) || '') +
+          '|' +
+          String(((beRestart && beRestart.hit_files) || []).join(','))
+        issueBackendRestartAndRun(jid)
+          .then(function (out) {
+            if (!out || !out.data || !out.data.ok) {
+              throw new Error((out && out.detail) || '重启准备失败')
+            }
+            var lines = Array.isArray(out.data.shell_lines) ? out.data.shell_lines : []
+            var term = out.term || { ok: out.ok, detail: out.detail }
+            setBeRestart(function (prev) {
+              return Object.assign({}, prev || {}, {
+                offered: true,
+                started_at: new Date().toISOString(),
+                command: out.data.command || (prev && prev.command) || '',
+                port: out.data.port || (prev && prev.port) || 0,
+                cwd: out.data.cwd || (prev && prev.cwd) || '',
+                reason: out.data.reason || (prev && prev.reason) || '',
+                shell_lines: lines,
+                last_detail: term && term.detail ? term.detail : out.data.detail || '',
+              })
+            })
+            setBeConfirmOpen(false)
+            beAutoMark(autoKey)
+            beAutoDoneRef.current = autoKey
+            if (out.data && out.data.executed) {
+              appendStream(
+                '本机已执行后端重启 :' +
+                  String(out.data.port || '') +
+                  (out.data.detail ? '（' + String(out.data.detail) + '）' : ''),
+              )
+            }
+            if (term && term.ok) {
+              appendStream('侧栏终端已镜像命令（仅展示）')
+            } else if (term && term.detail) {
+              appendStream(String(term.detail))
+            }
+            return reconcileJob(jid)
+          })
+          .catch(function (e) {
+            if (auto) {
+              beAutoMark(autoKey + '#failed')
+              beAutoDoneRef.current = autoKey + '#failed'
+              appendStream('自动重启失败：' + String(e && e.message ? e.message : e))
+            }
+            setErr(String(e && e.message ? e.message : e))
+            setBeConfirmOpen(false)
+          })
+          .finally(function () {
+            setBusy(false)
+          })
+      }
+
+      // 本轮写码武装后，门禁通过即自动下发重启（刷新旧卡不武装，避免误杀）
+      useEffect(
+        function () {
+          // 前后端改由同步后的 Cursor 终端确认，进度卡不再私下重启
+          return
+          if (!beRestart || !beRestart.offered || beRestart.started_at) return
+          if (!beAutoArmedRef.current) return
+          var jid = String(jobId || '').trim()
+          if (!jid) return
+          var autoKey =
+            jid +
+            '|' +
+            String(beRestart.port || '') +
+            '|' +
+            String((beRestart.hit_files || []).join(','))
+          if (beAutoKeyTaken(autoKey) || beAutoKeyTaken(autoKey + '#failed')) return
+          // 仅预约；真正占用键放在定时器回调里，避免重渲染 cleanup 清掉 timeout 后永不重试
+          var t = setTimeout(function () {
+            if (beAutoKeyTaken(autoKey) || beAutoKeyTaken(autoKey + '#failed')) return
+            beAutoMark(autoKey)
+            beAutoDoneRef.current = autoKey
+            onRestartBackend({ auto: true })
+          }, 450)
+          return function () {
+            clearTimeout(t)
+          }
+        },
+        [beRestart, jobId],
+      )
+
       function onApply() {
         setErr('')
         var jid = String(jobId || '').trim()
@@ -2983,8 +3220,12 @@ window.__ModuleLoader__.load({
           ? labelFromJobStatus(authStatus)
           : statusLabel
       // 已废除确认卡：标题永远是进度，禁止再出现「· 确认」造成一闪即失的假确认卡
-      var title =
-        parentJobId || kind === 'continue'
+      var opsCard = serviceRunCard(requirement, workKind)
+      var title = opsCard
+        ? phase === 'done' || visiblePhase === 'done'
+          ? 'Cursor 开发操作 · 本轮结论'
+          : 'Cursor 开发操作 · 进度'
+        : parentJobId || kind === 'continue'
           ? 'Cursor 对话写码 · 续改进度'
           : phase === 'done' || visiblePhase === 'done'
             ? 'Cursor 对话写码 · 本轮结论'
@@ -2992,6 +3233,7 @@ window.__ModuleLoader__.load({
 
       var statusZh = (function () {
         var s = String(visibleLabel || '')
+        if ((s === 'running' || s === 'queued' || s === '写码中') && opsCard) return '处理中'
         if (s === 'running' || s === 'queued') return '写码中'
         if (s === 'pending_review' || s === '待审同步') return '待审同步'
         if (s === 'succeeded' || s === 'done' || s === '已完成') return '已完成'
@@ -3873,7 +4115,7 @@ window.__ModuleLoader__.load({
               )
             ) {
               if (!streamActive) return
-              msg = '正在准备写码环境…'
+              msg = serviceRunCard(requirement, workKind) ? '正在准备执行，不改代码…' : '正在准备写码环境…'
             }
             // 仅展示去重：连续多条改写成同一句时只留一条，不改 transcript 账本
             if (msg === lastStatusShown) return
@@ -3939,7 +4181,13 @@ window.__ModuleLoader__.load({
                           'div',
                           { className: 'cc-hold' },
                           h('span', { className: 'cc-spin', 'aria-hidden': 'true' }),
-                          h('span', null, '写码已结束，正在汇总本轮结论…'),
+                          h(
+                            'span',
+                            null,
+                            serviceRunCard(requirement, workKind)
+                              ? '处理已结束，正在汇总本轮结论…'
+                              : '写码已结束，正在汇总本轮结论…',
+                          ),
                         )
                       : h('p', { className: 'cc-note' }, '本轮结论见下方正文'),
                     err ? h('p', { className: 'cc-set-msg err' }, err) : null,
@@ -3966,9 +4214,88 @@ window.__ModuleLoader__.load({
                             : null,
                         )
                       : null,
+                    beRestart && beRestart.offered
+                      ? h(
+                          'div',
+                          { className: 'cc-be-restart' },
+                          h(
+                            'p',
+                            { className: 'cc-be-title' },
+                            beRestart.started_at && beRestart.executed !== false
+                              ? '后端已自动重启（本机已执行）'
+                              : '后端将由本机自动重启以加载新接口',
+                          ),
+                          h(
+                            'p',
+                            { className: 'cc-be-reason' },
+                            String(beRestart.reason || '') +
+                              (beRestart.port ? '（端口 ' + beRestart.port + '）' : ''),
+                          ),
+                          h(
+                            'p',
+                            { className: 'cc-be-cmd' },
+                            beConfirmOpen
+                              ? '将在应用终端执行：\n' +
+                                  (Array.isArray(beRestart.shell_lines) &&
+                                  beRestart.shell_lines.length
+                                    ? beRestart.shell_lines.join('\n')
+                                    : String(beRestart.command || ''))
+                              : String(beRestart.command || ''),
+                          ),
+                          h(
+                            'div',
+                            { className: 'cc-set-actions' },
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'cc-set-btn primary',
+                                disabled: busy || Boolean(beRestart.started_at),
+                                onClick: function () {
+                                  onRestartBackend({ auto: false })
+                                },
+                              },
+                              beRestart.started_at && beRestart.executed !== false
+                                ? '本机已执行重启'
+                                : beConfirmOpen
+                                  ? busy
+                                    ? '执行中…'
+                                    : '确认并执行重启'
+                                  : busy
+                                    ? '自动重启中…'
+                                    : '若未自动执行可点此重启',
+                            ),
+                            beConfirmOpen && !beRestart.started_at
+                              ? h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    className: 'cc-set-btn',
+                                    disabled: busy,
+                                    onClick: function () {
+                                      setBeConfirmOpen(false)
+                                    },
+                                  },
+                                  '取消',
+                                )
+                              : null,
+                          ),
+                          beRestart.last_detail
+                            ? h('p', { className: 'cc-note' }, String(beRestart.last_detail))
+                            : null,
+                        )
+                      : beHint
+                        ? h(
+                            'div',
+                            { className: 'cc-be-restart' },
+                            h('p', { className: 'cc-be-title' }, '后端需按工程方式重启'),
+                            h('p', { className: 'cc-be-reason' }, String(beHint)),
+                          )
+                        : null,
                   )
                 : null,
-              !isDoneView
+              // 写码终态仍铺过程。开发操作保持折叠，避免终端流水把结论顶走。
+              !isDoneView || !opsCard
                 ? h(
                     'div',
                     {
@@ -4495,7 +4822,31 @@ window.__ModuleLoader__.load({
       var state = useState(null)
       var payload = state[0]
       var setPayload = state[1]
+      var beLocalState = useState(null)
+      var beLocal = beLocalState[0]
+      var setBeLocal = beLocalState[1]
+      var beBusyState = useState(false)
+      var beBusy = beBusyState[0]
+      var setBeBusy = beBusyState[1]
+      var beErrState = useState('')
+      var beErr = beErrState[0]
+      var setBeErr = beErrState[1]
       var sessionId = String((props && props.sessionId) || '').trim()
+      var turn = props && props.turn
+      var turnStart = Number(turn && turn.start && turn.start.time) || 0
+      var turnEnd = Number(turn && turn.end && turn.end.time) || 0
+      var item = payload ? pickConclusionForTurn(payload, turnStart, turnEnd) : null
+      var md = item ? normalizeConclusionMd(String(item.chat_conclusion || '')) : ''
+      var beOffer =
+        beLocal && beLocal.offered
+          ? beLocal
+          : item && item.backend_restart && item.backend_restart.offered
+            ? item.backend_restart
+            : null
+      var beHintText = item ? String(item.backend_restart_hint || '').trim() : ''
+      var jidTail = item ? String(item.id || '').trim() : ''
+      var turnRecent = turnEnd > 0 && Date.now() - turnEnd < 180000
+
       useEffect(
         function () {
           if (!sessionId) {
@@ -4505,9 +4856,8 @@ window.__ModuleLoader__.load({
           var stopped = false
           var timer = 0
           var tries = 0
-          var t = props && props.turn
-          var endMs = Number(t && t.end && t.end.time) || 0
-          var startMs = Number(t && t.start && t.start.time) || 0
+          var endMs = turnEnd
+          var startMs = turnStart
           // 只有刚结束的轮次才轮询：历史轮次各拉一次足够，避免长会话放大请求
           var recent = endMs > 0 && Date.now() - endMs < 180000
           function pull() {
@@ -4532,18 +4882,76 @@ window.__ModuleLoader__.load({
             if (timer) clearTimeout(timer)
           }
         },
-        [sessionId],
+        [sessionId, turnStart, turnEnd],
       )
-      if (!payload) return null
-      var turn = props && props.turn
-      var turnStart = Number(turn && turn.start && turn.start.time) || 0
-      var turnEnd = Number(turn && turn.end && turn.end.time) || 0
-      // 只挂结论所属的那一轮；同一会话历史轮次不得重复挂同一份
-      var item = pickConclusionForTurn(payload, turnStart, turnEnd)
-      if (!item) return null
-      ensureCss()
-      var md = normalizeConclusionMd(String(item.chat_conclusion || ''))
+
+      // 结论区兜底自动重启：进度卡折叠后仍执行一次（与进度卡共用 autoKey）
+      useEffect(
+        function () {
+          // 前后端改由同步后的 Cursor 终端确认，结论区不再私下重启
+          return
+          if (!turnRecent || !beOffer || !beOffer.offered || beOffer.started_at) return
+          if (!jidTail) return
+          var autoKey =
+            jidTail +
+            '|' +
+            String(beOffer.port || '') +
+            '|' +
+            String((beOffer.hit_files || []).join(','))
+          if (beAutoKeyTaken(autoKey) || beAutoKeyTaken(autoKey + '#failed')) return
+          var offerSnap = beOffer
+          var t = setTimeout(function () {
+            if (beAutoKeyTaken(autoKey) || beAutoKeyTaken(autoKey + '#failed')) return
+            beAutoMark(autoKey)
+            setBeBusy(true)
+            setBeErr('')
+            issueBackendRestartAndRun(jidTail)
+              .then(function (out) {
+                if (!out || !out.data || !out.data.ok) {
+                  throw new Error((out && out.detail) || '重启失败')
+                }
+                setBeLocal(
+                  Object.assign({}, offerSnap, {
+                    started_at: new Date().toISOString(),
+                    command: out.data.command || offerSnap.command || '',
+                    port: out.data.port || offerSnap.port || 0,
+                    cwd: out.data.cwd || offerSnap.cwd || '',
+                    reason: out.data.reason || offerSnap.reason || '',
+                    shell_lines: Array.isArray(out.data.shell_lines)
+                      ? out.data.shell_lines
+                      : offerSnap.shell_lines || [],
+                    last_detail:
+                      (out.term && out.term.detail) || out.detail || out.data.detail || '',
+                  }),
+                )
+                if (!out.ok) {
+                  setBeErr(
+                    String(out.detail || '未能写入应用终端') +
+                      '。请打开右侧「终端」查看或粘贴执行。',
+                  )
+                }
+                loadSessionConclusion(sessionId, { fresh: true }).then(function (d) {
+                  if (d && d.ok) setPayload(d)
+                })
+              })
+              .catch(function (e) {
+                beAutoMark(autoKey + '#failed')
+                setBeErr(String(e && e.message ? e.message : e))
+              })
+              .finally(function () {
+                setBeBusy(false)
+              })
+          }, 600)
+          return function () {
+            clearTimeout(t)
+          }
+        },
+        [jidTail, beOffer && beOffer.port, beOffer && beOffer.started_at, turnRecent, sessionId],
+      )
+
+      if (!payload || !item) return null
       if (!md || md.indexOf('本轮结论') < 0) return null
+      ensureCss()
       var files = []
         .concat(item.synced_files || [])
         .concat(item.deleted_files || [])
@@ -4566,6 +4974,55 @@ window.__ModuleLoader__.load({
             })
             .join('\n')
       }
+
+      function runTailRestartManual() {
+        if (!jidTail || !beOffer || beOffer.started_at || beBusy) return
+        var autoKey =
+          jidTail +
+          '|' +
+          String(beOffer.port || '') +
+          '|' +
+          String((beOffer.hit_files || []).join(','))
+        var offerSnap = beOffer
+        setBeBusy(true)
+        setBeErr('')
+        issueBackendRestartAndRun(jidTail)
+          .then(function (out) {
+            if (!out || !out.data || !out.data.ok) {
+              throw new Error((out && out.detail) || '重启失败')
+            }
+            beAutoMark(autoKey)
+            setBeLocal(
+              Object.assign({}, offerSnap, {
+                started_at: new Date().toISOString(),
+                command: out.data.command || offerSnap.command || '',
+                port: out.data.port || offerSnap.port || 0,
+                cwd: out.data.cwd || offerSnap.cwd || '',
+                reason: out.data.reason || offerSnap.reason || '',
+                shell_lines: Array.isArray(out.data.shell_lines)
+                  ? out.data.shell_lines
+                  : offerSnap.shell_lines || [],
+                last_detail: (out.term && out.term.detail) || out.detail || out.data.detail || '',
+              }),
+            )
+            if (!out.ok) {
+              setBeErr(
+                String(out.detail || '未能写入应用终端') +
+                  '。请打开右侧「终端」查看或粘贴执行。',
+              )
+            }
+            loadSessionConclusion(sessionId, { fresh: true }).then(function (d) {
+              if (d && d.ok) setPayload(d)
+            })
+          })
+          .catch(function (e) {
+            setBeErr(String(e && e.message ? e.message : e))
+          })
+          .finally(function () {
+            setBeBusy(false)
+          })
+      }
+
       return h(
         'div',
         {
@@ -4578,6 +5035,57 @@ window.__ModuleLoader__.load({
           className: 'cc-conclusion',
           dangerouslySetInnerHTML: { __html: lightMdHtml(md + extra) },
         }),
+        beOffer
+          ? h(
+              'div',
+              { className: 'cc-be-restart cc-be-hoist' },
+              h(
+                'p',
+                { className: 'cc-be-title' },
+                beOffer.started_at && beOffer.executed !== false
+                  ? '后端已自动重启（本机已新开终端执行）'
+                  : beBusy
+                    ? '正在自动重启后端…'
+                    : '后端将由本机自动重启以加载新接口',
+              ),
+              h(
+                'p',
+                { className: 'cc-be-reason' },
+                String(beOffer.reason || '') +
+                  (beOffer.port ? '（端口 ' + beOffer.port + '）' : ''),
+              ),
+              h('p', { className: 'cc-be-cmd' }, String(beOffer.command || '')),
+              h(
+                'div',
+                { className: 'cc-set-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'cc-set-btn primary',
+                    disabled: beBusy || Boolean(beOffer.started_at),
+                    onClick: runTailRestartManual,
+                  },
+                  beOffer.started_at && beOffer.executed !== false
+                    ? '本机已执行重启'
+                    : beBusy
+                      ? '执行中…'
+                      : '若未自动执行可点此重启',
+                ),
+              ),
+              beOffer.last_detail
+                ? h('p', { className: 'cc-note' }, String(beOffer.last_detail))
+                : null,
+              beErr ? h('p', { className: 'cc-set-msg err' }, beErr) : null,
+            )
+          : beHintText
+            ? h(
+                'div',
+                { className: 'cc-be-restart cc-be-hoist' },
+                h('p', { className: 'cc-be-title' }, '后端需按工程方式重启'),
+                h('p', { className: 'cc-be-reason' }, beHintText),
+              )
+            : null,
       )
     }
 
@@ -4719,11 +5227,159 @@ window.__ModuleLoader__.load({
       } catch (eMo) {}
     }
 
+    /** 宿主 Context：可选 remote.terminal / sidebar，用于自动/手工写入应用终端 */
+    var hostCtxRef = { ctx: null }
+
+    /** 进度卡与结论 turnTail 共用：避免重复签发、重渲染丢定时器后永不重试 */
+    function beAutoKeyStore() {
+      if (typeof window === 'undefined') return { keys: {} }
+      if (!window.__ccBeAutoKeys) window.__ccBeAutoKeys = { keys: {} }
+      return window.__ccBeAutoKeys
+    }
+    function beAutoKeyTaken(key) {
+      var k = String(key || '')
+      if (!k) return false
+      return Boolean(beAutoKeyStore().keys[k])
+    }
+    function beAutoMark(key) {
+      var k = String(key || '')
+      if (!k) return
+      beAutoKeyStore().keys[k] = 1
+    }
+
+    /**
+     * 签发 HITL + 写入应用终端。进度卡与结论区共用，保证折叠后仍能自动重启。
+     * @returns {Promise<{ok:boolean, detail?:string, data?:object}>}
+     */
+    function issueBackendRestartAndRun(jobId) {
+      var jid = String(jobId || '').trim()
+      if (!jid) {
+        return Promise.resolve({ ok: false, detail: '缺少 job_id' })
+      }
+      var api = serviceBase()
+      if (!api) {
+        return Promise.resolve({ ok: false, detail: '写码服务未就绪' })
+      }
+      return fetch(api + '/api/hitl/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cursor-chat.restart-backend', job_id: jid }),
+      })
+        .then(function (r) {
+          return r.json()
+        })
+        .then(function (issued) {
+          if (!issued || !issued.ok || !issued.nonce) {
+            throw new Error((issued && issued.detail) || '签发重启 HITL 失败')
+          }
+          return fetch(api + '/api/cursor-chat/jobs/' + encodeURIComponent(jid) + '/restart-backend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nonce: issued.nonce }),
+          }).then(function (r2) {
+            return r2.json().then(function (d) {
+              return { status: r2.status, data: d }
+            })
+          })
+        })
+        .then(function (out) {
+          if (!out.data || !out.data.ok) {
+            throw new Error((out.data && out.data.detail) || '重启准备失败 HTTP ' + out.status)
+          }
+          var lines = Array.isArray(out.data.shell_lines) ? out.data.shell_lines : []
+          return runBackendRestartInAppTerminal(lines).then(function (term) {
+            return {
+              ok: Boolean(term && term.ok),
+              detail: (term && term.detail) || out.data.detail || '',
+              data: out.data,
+              term: term,
+            }
+          })
+        })
+        .catch(function (e) {
+          return { ok: false, detail: String(e && e.message ? e.message : e) }
+        })
+    }
+
+    function currentSessionId(ctx) {
+      try {
+        var sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : null
+        if (!sessions || !sessions.list || typeof sessions.list.getSnapshot !== 'function') return ''
+        return String(sessions.list.getSnapshot().current || '').trim()
+      } catch (e) {
+        return ''
+      }
+    }
+
+    function openSidebarTerminal(ctx) {
+      try {
+        var sidebar = ctx && typeof ctx.get === 'function' ? ctx.get('sidebarRight') : null
+        if (sidebar && typeof sidebar.openTab === 'function') {
+          sidebar.openTab('terminal')
+          return true
+        }
+      } catch (e) {}
+      return false
+    }
+
+    /**
+     * 可选：把重启命令镜像到「当前已存在」的应用终端，方便对照。
+     * 禁止 create 新终端——会留下「此终端已不存在」空页，且 cmd 跑不了旧版多行 PS。
+     * 真正重启由本机服务 executeBackendRestart（新开 PowerShell）完成。
+     */
+    function runBackendRestartInAppTerminal(lines) {
+      var script = (Array.isArray(lines) ? lines : []).filter(Boolean).join('\n')
+      if (!script) {
+        return Promise.resolve({ ok: false, detail: '无镜像脚本' })
+      }
+      var ctx = hostCtxRef.ctx
+      if (!ctx) {
+        return Promise.resolve({ ok: false, detail: '宿主上下文未就绪（不影响本机已执行的重启）' })
+      }
+      try {
+        openSidebarTerminal(ctx)
+      } catch (eOpen) {}
+      var payload = script + '\r'
+
+      try {
+        var web = typeof ctx.get === 'function' ? ctx.get('webTerminals') : null
+        if (web) {
+          var view =
+            (typeof web.activeView === 'function' && web.activeView()) ||
+            (typeof web.view === 'function' && web.view()) ||
+            null
+          if (view && typeof view.write === 'function') {
+            view.write(payload)
+            return Promise.resolve({ ok: true, detail: '已镜像到当前应用终端（webTerminals）' })
+          }
+          if (typeof web.write === 'function') {
+            web.write(payload)
+            return Promise.resolve({ ok: true, detail: '已镜像到当前应用终端（webTerminals.write）' })
+          }
+        }
+      } catch (eWeb) {}
+
+      // 不再 remote.terminal.create：避免幽灵终端「已不存在」
+      return Promise.resolve({
+        ok: false,
+        detail: '未镜像到侧栏终端（可忽略；本机 PowerShell 窗才是实际执行处）',
+      })
+    }
+
     function apply(ctx) {
       if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function') {
         console.error('[cursor-chat] 无 slots，无法注册设置页')
         return
       }
+      hostCtxRef.ctx = ctx
+      // 可选：预热 remote / sidebar（缺失时不阻断插件加载）
+      try {
+        if (typeof ctx.inject === 'function') {
+          ctx.inject(['remote', 'sidebarRight', 'sessions', 'webTerminals'], function () {
+            hostCtxRef.ctx = ctx
+          })
+        }
+      } catch (eInj) {}
       installGlobalConclusionPublisher()
       ctx.slots.inject('settings.section', function () {
         return ctx.slots.register(
