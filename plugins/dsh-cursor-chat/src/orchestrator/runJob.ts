@@ -51,8 +51,8 @@ import {
   formatPrefsForPrompt,
   recordFailures,
 } from '../preferences.js'
-import { dropStaleFrontendDownNote, finishAudit, probeLiveAudit } from '../completionAudit.js'
-import { runDeliveryAudit } from '../deliveryAudit.js'
+import { finishAudit, probeLiveAudit } from '../completionAudit.js'
+import { auditBlocksDelivery, runDeliveryAudit } from '../deliveryAudit.js'
 import {
   applyDeletesToTarget,
   diffSnapshots,
@@ -422,39 +422,37 @@ export async function foldLiveAudit(jobId: string): Promise<void> {
     })
     if (!extra.length) return
     const merged = finishAudit([...(audit.checks || []), ...extra])
-    patchJob(jobId, { delivery_audit: merged, detail: merged.detail })
+    patchJob(jobId, auditBlocksDelivery(merged)
+      ? { delivery_audit: merged, detail: merged.detail }
+      : { delivery_audit: merged })
   } catch {
     /* 运行中探测失败时保留已经做出的磁盘结论 */
   }
 }
 
-function serviceBlocksDone(check: ServiceCheck | null): boolean {
-  return Boolean(check && check.required && !check.skipped && check.ok === false)
-}
-
-/** 落盘之后再确认服务，按探测结果写终态。确认抛错也不得写成可以看页面。 */
+/** 落盘之后再核对正在跑的服务。对不上只写进审计，不把已经同步的结果改成未完成。 */
 export async function sealWithServices(
   jobId: string,
   synced: string[],
   deleted: string[],
   detail: string,
 ): Promise<void> {
-  let check: ServiceCheck | null = null
   try {
-    check = await confirmSyncedServices(jobId, synced, deleted)
+    await confirmSyncedServices(jobId, synced, deleted)
   } catch (err) {
-    check = {
-      required: true,
-      ok: false,
-      detail: `代码已同步，Cursor 终端确认失败：${String(err).slice(0, 160)}`,
-      frontend: '',
-      backend: '',
-      api: '',
-    }
-    patchJob(jobId, { service_check: check, backend_restart: null, backend_restart_hint: null })
+    patchJob(jobId, {
+      service_check: {
+        required: true,
+        ok: false,
+        detail: `代码已同步，Cursor 终端确认失败：${String(err).slice(0, 160)}`,
+        frontend: '',
+        backend: '',
+        api: '',
+      },
+      backend_restart: null,
+      backend_restart_hint: null,
+    })
   }
-  let runtimeFailed = false
-  let runtimeDetail = ''
   if (process.env.CURSOR_CHAT_MOCK !== '1') {
     try {
       const current = loadJob(jobId)
@@ -467,29 +465,19 @@ export async function sealWithServices(
       })
       if (extra.length) {
         const merged = finishAudit([...(prior?.checks || []), ...extra])
-        runtimeFailed = !merged.ok
-        runtimeDetail = merged.detail
         patchJob(jobId, { delivery_audit: merged })
-        const frontUp = extra.some((c) => c.name === 'frontend_service' && c.ok)
-        detail = dropStaleFrontendDownNote(detail, frontUp)
       }
-    } catch (err) {
-      runtimeFailed = true
-      runtimeDetail = `完成度核对失败：${String(err).slice(0, 160)}`
+    } catch {
+      /* 运行中探测失败时保留已经做出的落盘结论 */
     }
   }
-  const blocked = serviceBlocksDone(check) || runtimeFailed
-  const note = check && check.required && !check.skipped && check.detail ? `；${check.detail}` : ''
-  const auditNote = runtimeDetail ? `；${runtimeDetail}` : ''
-  const full = `${detail}${note}${auditNote}`.replace(/\s+/g, ' ').trim()
-  const status = blocked ? 'failed' : 'succeeded'
-  const message = runtimeFailed
-    ? `代码已同步，这一轮还没有真正完成。${full}`
-    : blocked
-      ? `代码已同步，前后端服务未就绪。${full}`
-      : full
-  setStatus(loadJob(jobId)!, status, message)
-  appendEvent(loadJob(jobId)!, { type: 'done', status, message })
+  const parts = [
+    synced.length ? `已同步 ${synced.length} 个文件` : '',
+    deleted.length ? `已删除 ${deleted.length} 个` : '',
+  ].filter(Boolean)
+  const message = parts.join('，') || detail.trim() || '写码流程已结束'
+  setStatus(loadJob(jobId)!, 'succeeded', message)
+  appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message })
 }
 
 async function enterReviewFromDiff(
@@ -627,7 +615,7 @@ async function enterReviewFromDiff(
             deferred_files: [],
             assistant_text: job.assistant_text,
           })
-          if (!audit.ok) {
+          if (auditBlocksDelivery(audit)) {
             const detail =
               `${audit.detail}` +
               (compileNote ? `；${compileNote}` : '') +
@@ -648,9 +636,9 @@ async function enterReviewFromDiff(
             await foldLiveAudit(jobId)
             return
           }
-          const detail =
-            `空跑拦截后已按沙箱↔目标漂移补同步 ${synced.length} 个文件；交付审计通过；${compileNote}` +
-            '。'
+          const detail = audit.ok
+            ? `空跑拦截后已按沙箱↔目标漂移补同步 ${synced.length} 个文件；交付审计通过；${compileNote}。`
+            : `已同步 ${synced.length} 个文件。`
           patchJob(jobId, {
             review_gate: null,
             changed_files: [...new Set([...(diff.changed || []), ...synced])],
@@ -1503,7 +1491,7 @@ export function applyJobReview(opts: {
       syncedFiles: synced,
       deletedFiles: deleted,
     })
-    if (!audit.ok) {
+    if (auditBlocksDelivery(audit)) {
       const detail = audit.detail
       patchJob(job.id, {
         write_scope: effectiveScope,
@@ -1527,8 +1515,8 @@ export function applyJobReview(opts: {
     }
     const detail =
       `已同步 ${synced.length} 个文件` +
-      (deleted.length ? `，删除 ${deleted.length}` : '') +
-      '；交付审计通过'
+      (deleted.length ? `，删除 ${deleted.length} 个` : '') +
+      (audit.ok ? '；交付审计通过' : '')
     patchJob(job.id, {
       write_scope: effectiveScope,
       synced_files: synced,

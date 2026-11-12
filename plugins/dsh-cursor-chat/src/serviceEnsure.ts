@@ -130,6 +130,82 @@ export function collectRoutePaths(workspace: string, files: string[]): string[] 
   return paths
 }
 
+/** 热重载完成前，正在跑的文档仍是旧进程。等到本轮路径出现，或超过这段时间仍没有。 */
+export const ROUTE_RELOAD_WAIT_MS = 30_000
+
+const OPENAPI_BODY_CAP = 2_000_000
+
+/**
+ * 读正在跑的 openapi，直到本轮路径都出现。
+ * 端口开着只说明旧进程还在；`--reload` 换进程要几秒到几十秒，第一次读到的文档不能当结论。
+ */
+export async function openApiBodyWithRoutes(
+  port: number,
+  routePaths: string[],
+  options: {
+    timeoutMs?: number
+    intervalMs?: number
+    fetchImpl?: typeof fetch
+    sleep?: (ms: number) => Promise<void>
+    now?: () => number
+  } = {},
+): Promise<{ body: string; missing: string[] }> {
+  const timeoutMs = options.timeoutMs ?? ROUTE_RELOAD_WAIT_MS
+  const intervalMs = options.intervalMs ?? 1_000
+  const fetchImpl = options.fetchImpl ?? fetch
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const now = options.now ?? Date.now
+  const deadline = now() + Math.max(0, timeoutMs)
+  let body = ''
+  const missingOf = (text: string): string[] => routePaths.filter((p) => !text.includes(p))
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { body, missing: missingOf(body) }
+  }
+  for (;;) {
+    try {
+      const res = await fetchImpl(`http://127.0.0.1:${port}/openapi.json`, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(4_000),
+      })
+      if (res.status === 200) {
+        body = await readCappedText(res, OPENAPI_BODY_CAP)
+        const missing = missingOf(body)
+        if (missing.length === 0) return { body, missing }
+      }
+    } catch {
+      /* 热重载空窗：旧进程已停、新进程还没听上 */
+    }
+    if (now() >= deadline) return { body, missing: missingOf(body) }
+    await sleep(Math.max(0, intervalMs))
+  }
+}
+
+async function readCappedText(res: Response, cap: number): Promise<string> {
+  const reader = res.body?.getReader()
+  if (!reader) return (await res.text()).slice(0, cap)
+  const parts: Uint8Array[] = []
+  let size = 0
+  try {
+    while (size < cap) {
+      const { done, value } = await reader.read()
+      if (done || !value) break
+      const take = Math.min(value.byteLength, cap - size)
+      parts.push(take === value.byteLength ? value : value.subarray(0, take))
+      size += take
+      if (take < value.byteLength) break
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+  }
+  const merged = new Uint8Array(size)
+  let offset = 0
+  for (const part of parts) {
+    merged.set(part, offset)
+    offset += part.byteLength
+  }
+  return new TextDecoder().decode(merged)
+}
+
 async function fetchText(url: string): Promise<{ status: number; body: string }> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(4000) })
@@ -143,6 +219,7 @@ async function fetchText(url: string): Promise<{ status: number; body: string }>
 export async function assessBackend(
   port: number,
   routePaths: string[],
+  options: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<{ ok: boolean; backend: string; api: string }> {
   let openapi = { status: 0, body: '' }
   let docs = { status: 0, body: '' }
@@ -158,8 +235,9 @@ export async function assessBackend(
     : `端口 ${port} 上没有可用的后台（文档打不开）`
   if (!up) return { ok: false, backend, api: '后台没起来，接口无法确认' }
   if (!routePaths.length) return { ok: true, backend, api: '文档可打开（本轮没有抽出新路径）' }
-  const body = openapi.status === 200 ? openapi.body : ''
-  const missing = routePaths.filter((p) => !body.includes(p))
+  const settled = await openApiBodyWithRoutes(port, routePaths, options)
+  const body = settled.body
+  const missing = settled.missing
   if (!body) {
     return { ok: false, backend, api: '文档页开了，但没有拿到 openapi，不能确认新接口已加载' }
   }

@@ -39,9 +39,17 @@ export type DeliveryAuditInput = {
   assistant_text?: string
 }
 
+/** 只有落盘本身没对上时，结果才算未完成。其余核对留在审计行。 */
+const LANDING_CHECK = new Set(['synced_bytes', 'delete_target'])
+
+export function auditBlocksDelivery(audit: { ok: boolean; checks?: { name: string; ok: boolean }[] } | null | undefined): boolean {
+  if (!audit || audit.ok) return false
+  return (audit.checks || []).some((check) => LANDING_CHECK.has(check.name) && check.ok === false)
+}
+
 /**
  * 同步后交付审计。无同步且无删除时跳过（空跑闸门另管）。
- * 任一子检查失败 → ok=false，禁止报「已完成」。
+ * 任一子检查失败则审计 ok=false。只有落盘指纹或删除验尸失败才拦住结果。
  */
 export function runDeliveryAudit(input: DeliveryAuditInput): DeliveryAuditResult {
   const synced = Array.isArray(input.synced_files) ? input.synced_files : []

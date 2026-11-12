@@ -9,6 +9,7 @@ import { readBackendPortFromViteProxy, resolveBackendRoot } from './backendResta
 import {
   assessBackend,
   collectRoutePaths,
+  openApiBodyWithRoutes,
   readFrontendDevPort,
 } from './serviceEnsure.js'
 import { isDeleteIntent } from './deleteIntent.js'
@@ -295,16 +296,9 @@ export async function probeLiveAudit(opts: {
           detail: '同步文件里有接口路径，但后端文档没打开，不能确认接口已加载',
         })
       } else {
-        let body = ''
-        try {
-          const res = await fetch(`http://127.0.0.1:${backPort}/openapi.json`, {
-            signal: AbortSignal.timeout(4000),
-          })
-          body = res.status === 200 ? (await res.text()).slice(0, 200_000) : ''
-        } catch {
-          body = ''
-        }
-        const missing = routePaths.filter((p) => !body.includes(p))
+        const settled = await openApiBodyWithRoutes(backPort, routePaths)
+        const body = settled.body
+        const missing = settled.missing
         checks.push({
           name: 'requirement_api',
           ok: Boolean(body) && missing.length === 0,

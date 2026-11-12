@@ -401,18 +401,39 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   const audit = job.delivery_audit
   const auditFailed = Boolean(audit && audit.ok === false)
   const svc = job.service_check
-  const svcBad = Boolean(svc && svc.required && !svc.skipped && svc.ok === false)
-  // 交付审计失败或服务没就绪时，禁止采信 Cursor「已完成」话术
+  const landingMiss = (audit?.checks || []).find(
+    (check) => (check.name === 'synced_bytes' || check.name === 'delete_target') && check.ok === false,
+  )
+  const landed = delivered && !landingMiss && job.status !== 'cancelled'
+  const landingText = [
+    synced.length ? `已同步 ${synced.length} 个文件` : '',
+    deleted.length ? `已删除 ${deleted.length} 个文件` : '',
+  ].filter(Boolean).join('，')
+  // 结果只认落盘。审计对不上、服务未就绪，都不改这一行。模型「已完成」也不采信。
   const resultOne = (
-    auditFailed
-      ? String(audit?.detail || job.detail || '交付审计未通过，禁止假完成').trim()
-      : svcBad
-        ? `代码已同步，前后端服务未就绪。${String(svc?.detail || '').trim()}`
+    landed
+      ? `${landingText}。`
+      : landingMiss
+        ? String(landingMiss.detail || '落盘未完成').trim()
         : resultSec.replace(/^说明方案\s*/i, '').trim() || '写码流程已结束。'
   ).replace(/\s+/g, ' ')
   const didLines = didBullets.map((b) => b.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  const modelPoint = resultSec.replace(/^说明方案\s*/i, '').replace(/\s+/g, ' ').trim()
+  const changeLines = [...didLines]
+  if (
+    landed &&
+    modelPoint &&
+    !/^已完成[。.]?$/.test(modelPoint) &&
+    !changeLines.some((line) => line.includes(modelPoint))
+  ) {
+    changeLines.unshift(modelPoint)
+  }
   const verifyLines = verifyBullets.map((b) => b.replace(/\s+/g, ' ').trim()).filter(Boolean)
-  const status = statusHeadline(auditFailed || svcBad ? 'failed' : job.status || '')
+  const status = job.status === 'cancelled'
+    ? statusHeadline('cancelled')
+    : landed
+      ? '✅ 已完成'
+      : statusHeadline(landingMiss ? 'failed' : job.status || '')
   // synced / deleted / changed 仍参与上方 didBullets 兜底与「未同步」告警；路径清单本身由底座卡片展示
 
   const lines: string[] = []
@@ -437,10 +458,8 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     lines.push(``)
   }
   lines.push(`改动：`)
-  if (auditFailed) {
-    lines.push(`• 已同步 ${synced.length} 个文件，但交付审计未通过（不以 Cursor 结论文案为准）`)
-  } else if (didLines.length) {
-    for (const b of didLines) lines.push(`• ${b}`)
+  if (changeLines.length) {
+    for (const b of changeLines) lines.push(`• ${b}`)
   } else {
     lines.push(`• 见上方结果说明`)
   }

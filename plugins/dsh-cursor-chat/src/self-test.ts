@@ -105,7 +105,7 @@ import {
   listBackendRestartHits,
   settleBackendRestartAfterSync,
 } from './backendRestart.js'
-import { assessBackend, buildServicePrompt, collectRoutePaths, extractRoutePaths, shouldKeepRunningBackend } from './serviceEnsure.js'
+import { assessBackend, buildServicePrompt, collectRoutePaths, extractRoutePaths, openApiBodyWithRoutes, shouldKeepRunningBackend } from './serviceEnsure.js'
 import {
   expandWriteScopeWithCompanions,
   selectCompanionPromotions,
@@ -561,10 +561,51 @@ async function main() {
     try {
       const hit = await assessBackend(port, ['/api/materials/list'])
       assert(hit.ok, '文档里有新路径时应通过：' + hit.api)
-      const miss = await assessBackend(port, ['/api/missing'])
+      const miss = await assessBackend(port, ['/api/missing'], { timeoutMs: 0 })
       assert(miss.ok === false, '文档里没有的新路径不得通过')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+    let reads = 0
+    const reloading = await import('node:http').then((m) =>
+      m.createServer((req, res) => {
+        if (req.url === '/openapi.json') {
+          reads += 1
+          const paths =
+            reads < 3
+              ? { '/api/equipment-maintenance/plans': {} }
+              : {
+                  '/api/equipment-maintenance/plans': {},
+                  '/api/equipment-maintenance-records': {},
+                }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ paths }))
+          return
+        }
+        res.writeHead(200)
+        res.end('docs')
+      }),
+    )
+    await new Promise<void>((resolve) => reloading.listen(0, '127.0.0.1', () => resolve()))
+    const reloadAddr = reloading.address()
+    const reloadPort = typeof reloadAddr === 'object' && reloadAddr ? reloadAddr.port : 0
+    try {
+      const settled = await openApiBodyWithRoutes(reloadPort, ['/api/equipment-maintenance-records'], {
+        timeoutMs: 3_000,
+        intervalMs: 20,
+      })
+      assert(settled.missing.length === 0, '热重载后文档出现本轮接口就应通过')
+      assert(reads >= 3, '不能拿第一次旧文档下结论，实际读取 ' + reads)
+      const still = await openApiBodyWithRoutes(reloadPort, ['/api/not-loaded'], {
+        timeoutMs: 40,
+        intervalMs: 20,
+      })
+      assert(
+        still.missing.length === 1 && still.missing[0] === '/api/not-loaded',
+        '等到超时仍没有的接口才算没加载',
+      )
+    } finally {
+      await new Promise<void>((resolve) => reloading.close(() => resolve()))
     }
     console.log('ok: service ensure probe')
   }
@@ -1719,7 +1760,7 @@ async function main() {
       synced: ['backend/app/routers/work_hours.py'],
     })
     assert(skippedLive.length === 0, '自检模式不探测端口、不把没跑的检查写成通过')
-    // 结论：审计失败时正文不得「已完成」
+    // 结论：文件已落盘时结果算完成；挂载没对上只写在审计行
     const auditJob = createJob({ workspace: tg, requirement: '审计结论' })
     patchJob(auditJob.id, {
       synced_files: ['backend/app/routers/work_hours.py'],
@@ -1727,14 +1768,40 @@ async function main() {
       delivery_audit: bad,
       assistant_text: '## 说明方案\n**结论**\n已完成接口挂载\n',
     })
-    setStatus(loadJob(auditJob.id)!, 'failed', bad.detail)
+    setStatus(loadJob(auditJob.id)!, 'succeeded', '已同步 1 个文件')
     const body = formatChatConclusion(loadJob(auditJob.id)!)
-    assert(body.indexOf('交付审计未通过') >= 0 || body.indexOf('❌') >= 0, '结论须标未完成')
-    assert(body.indexOf('✅ 已完成') < 0, '审计失败禁止绿勾已完成')
+    const resultLine = body.split('\n').find((line) => line.startsWith('结果：')) || ''
+    assert(resultLine.indexOf('✅ 已完成') >= 0, '文件已落盘时结果须完成')
+    assert(resultLine.indexOf('已同步 1 个文件') >= 0, '结果只写落盘数量')
+    assert(resultLine.indexOf('交付审计未通过') < 0, '结果行不得搬审计失败')
     assert(body.indexOf('审计：❌ 未通过') >= 0, '审计失败须带未通过图标')
     assert(body.indexOf('完成度') >= 0, '失败也要写出完成度')
     assert(body.indexOf('结果：') < body.indexOf('审计：❌ 未通过'), '失败审计须紧挨在结果下方')
     assert(body.indexOf('审计：❌ 未通过') < body.indexOf('改动：'), '失败审计须在改动之前')
+    const missed = createJob({ workspace: tg, requirement: '指纹没对上' })
+    patchJob(missed.id, {
+      synced_files: ['backend/app/routers/work_hours.py'],
+      last_synced_files: ['backend/app/routers/work_hours.py'],
+      delivery_audit: {
+        ok: false,
+        detail: '落盘不一致',
+        checks: [{ name: 'synced_bytes', ok: false, detail: '落盘指纹与沙箱不一致' }],
+        completion: { passed: 0, total: 1, percent: 0 },
+      },
+    })
+    setStatus(loadJob(missed.id)!, 'failed', '落盘不一致')
+    const missedBody = formatChatConclusion(loadJob(missed.id)!)
+    assert(missedBody.indexOf('结果：❌ 未完成') >= 0, '指纹没对上时结果仍是未完成')
+    assert(missedBody.indexOf('✅ 已完成') < 0, '没落盘不得显示已完成')
+    const cancelled = createJob({ workspace: tg, requirement: '中途取消' })
+    patchJob(cancelled.id, {
+      synced_files: ['backend/app/routers/work_hours.py'],
+      last_synced_files: ['backend/app/routers/work_hours.py'],
+    })
+    setStatus(loadJob(cancelled.id)!, 'cancelled', '用户取消')
+    const cancelledBody = formatChatConclusion(loadJob(cancelled.id)!)
+    assert(cancelledBody.indexOf('结果：⏹ 已取消') >= 0, '取消后不得改写成已完成')
+    assert(cancelledBody.indexOf('✅ 已完成') < 0, '已取消的任务不得打绿勾')
     const passJob = createJob({ workspace: tg, requirement: '审计通过结论' })
     patchJob(passJob.id, {
       synced_files: ['backend/app/routers/work_hours.py'],
