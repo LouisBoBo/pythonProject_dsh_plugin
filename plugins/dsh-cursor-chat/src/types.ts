@@ -114,6 +114,17 @@ export type CursorCodingJob = {
     backend: string
     api: string
   } | null
+  /**
+   * Cursor 调用 ask_user_choice 时挂起的用户选择题。
+   * 进度卡据此弹选项；答完或取消后须清 null。
+   */
+  pending_user_choice?: {
+    job_id: string
+    call_id: string
+    question: string
+    options: { id: string; label: string }[]
+    created_at: string
+  } | null
 }
 
 export type StreamEvent = {
@@ -146,6 +157,7 @@ export type HitlAction =
   | 'cursor-chat.steer'
   | 'cursor-chat.cancel'
   | 'cursor-chat.restart-backend'
+  | 'cursor-chat.user-choice'
 
 export type HitlRecord = {
   action: HitlAction

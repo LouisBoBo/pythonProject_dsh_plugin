@@ -7,8 +7,13 @@
  * - 禁止：纯前端、测试/迁移、端口/命令未知时硬重启
  */
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import {
+  detectProjectLayout,
+  isBackendRuntimeRel,
+  type ProjectLayout,
+} from './projectLayout.js'
 
 export type BackendRestartOffer = {
   offered: true
@@ -41,31 +46,23 @@ function normRel(raw: string): string {
 /**
  * 会影响本机已启动后端进程的源码（含 routers / main / models / schemas / services 等）。
  * 不含测试与迁移，避免无谓打扰。
+ * 有 workspace 时按项目画像后端根判定；无画像时用路径段兜底（backend|server|根 app/）。
  */
-export function isBackendRuntimeFile(rel: string): boolean {
-  const r = normRel(rel)
-  if (!r || !/\.py$/i.test(r)) return false
-  // 常规 monorepo：backend/**；少数工程 API 就在仓库根 app/
-  const underBackend = /^backend\//i.test(r)
-  const underRootApp = /^app\//i.test(r)
-  if (!underBackend && !underRootApp) return false
-  if (/(^|\/)tests?\//i.test(r)) return false
-  if (/(^|\/)test_[^/]+\.py$/i.test(r)) return false
-  if (/_test\.py$/i.test(r)) return false
-  if (/(^|\/)conftest\.py$/i.test(r)) return false
-  if (/(^|\/)alembic\//i.test(r)) return false
-  if (/(^|\/)migrations?\//i.test(r)) return false
-  if (/(^|\/)__pycache__\//i.test(r)) return false
-  return true
+export function isBackendRuntimeFile(rel: string, layout?: ProjectLayout | null): boolean {
+  return isBackendRuntimeRel(rel, layout)
 }
 
 /** 本轮变更是否需要后端重启（仍须后续解析端口/命令才出按钮） */
-export function listBackendRestartHits(synced: string[], deleted: string[] = []): string[] {
+export function listBackendRestartHits(
+  synced: string[],
+  deleted: string[] = [],
+  layout?: ProjectLayout | null,
+): string[] {
   const out: string[] = []
   const seen = new Set<string>()
   for (const raw of [...(synced || []), ...(deleted || [])]) {
     const rel = normRel(raw)
-    if (!rel || !isBackendRuntimeFile(rel)) continue
+    if (!rel || !isBackendRuntimeFile(rel, layout)) continue
     if (seen.has(rel)) continue
     seen.add(rel)
     out.push(rel)
@@ -73,21 +70,23 @@ export function listBackendRestartHits(synced: string[], deleted: string[] = [])
   return out
 }
 
-export function resolveBackendRoot(workspace: string): string | null {
-  const root = resolve(String(workspace || '').trim())
-  if (!root || !existsSync(root)) return null
-  for (const cand of [join(root, 'backend'), root]) {
-    if (!existsSync(cand)) continue
-    try {
-      if (!statSync(cand).isDirectory()) continue
-    } catch {
-      continue
-    }
-    if (existsSync(join(cand, 'app', 'main.py')) || existsSync(join(cand, 'main.py'))) {
-      return cand
-    }
+export function resolveBackendRoot(workspace: string, hintRels: string[] = []): string | null {
+  const layout = detectProjectLayout(workspace, hintRels)
+  return layout.backendRoots[0] || null
+}
+
+/** 画像里的前端根 + 后端根 + workspace，供仍按「多根试探」的旧调用兼容。 */
+export function resolveAppRoots(workspace: string, hintRels: string[] = []): string[] {
+  const layout = detectProjectLayout(workspace, hintRels)
+  const out: string[] = [layout.workspace]
+  const seen = new Set(out.map((p) => resolve(p)))
+  for (const p of [...layout.frontendRoots, ...layout.backendRoots]) {
+    const key = resolve(p)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(p)
   }
-  return null
+  return out
 }
 
 function readText(path: string, limit = 120_000): string {
@@ -101,28 +100,10 @@ function readText(path: string, limit = 120_000): string {
 
 /**
  * 只认 Vite 代理到本机 loopback 的后端口；认不到就不出重启按钮（仍可文案提示）。
+ * 端口来自项目画像扫描到的任意深度 vite 配置。
  */
-export function readBackendPortFromViteProxy(workspace: string): number | null {
-  const root = resolve(String(workspace || '').trim())
-  const configs = [
-    join(root, 'frontend', 'vite.config.js'),
-    join(root, 'frontend', 'vite.config.ts'),
-    join(root, 'frontend', 'vite.config.mjs'),
-    join(root, 'vite.config.js'),
-    join(root, 'vite.config.ts'),
-  ]
-  for (const p of configs) {
-    const text = readText(p)
-    if (!text) continue
-    const m = text.match(
-      /target\s*:\s*['"]https?:\/\/(?:127\.0\.0\.1|localhost):(\d{2,5})['"]/i,
-    )
-    if (m) {
-      const port = Number(m[1])
-      if (port >= 1024 && port <= 65535) return port
-    }
-  }
-  return null
+export function readBackendPortFromViteProxy(workspace: string, hintRels: string[] = []): number | null {
+  return detectProjectLayout(workspace, hintRels).backendProxyPort
 }
 
 export function resolveUvicornStartCommand(
@@ -287,10 +268,12 @@ export function evaluateBackendRestartOffer(opts: {
   const workspace = resolve(String(opts.workspace || '').trim())
   if (!workspace || !existsSync(workspace)) return null
 
-  const hits = listBackendRestartHits(opts.syncedFiles || [], opts.deletedFiles || [])
+  const hints = [...(opts.syncedFiles || []), ...(opts.deletedFiles || [])]
+  const layout = detectProjectLayout(workspace, hints)
+  const hits = listBackendRestartHits(opts.syncedFiles || [], opts.deletedFiles || [], layout)
   if (!hits.length) return null
 
-  const backendRoot = resolveBackendRoot(workspace)
+  const backendRoot = resolveBackendRoot(workspace, hints)
   if (!backendRoot) return null
 
   const wsNorm = workspace.replace(/\\/g, '/').toLowerCase()
@@ -299,7 +282,7 @@ export function evaluateBackendRestartOffer(opts: {
     return null
   }
 
-  const port = readBackendPortFromViteProxy(workspace)
+  const port = readBackendPortFromViteProxy(workspace, hints)
   if (!port) return null
 
   const start = resolveUvicornStartCommand(backendRoot, port)
@@ -338,7 +321,10 @@ export function settleBackendRestartAfterSync(opts: {
   deletedFiles?: string[]
   platform?: NodeJS.Platform
 }): { offer: BackendRestartOffer | null; hint: string } {
-  const hits = listBackendRestartHits(opts.syncedFiles || [], opts.deletedFiles || [])
+  const workspace = resolve(String(opts.workspace || '').trim())
+  const hints = [...(opts.syncedFiles || []), ...(opts.deletedFiles || [])]
+  const layout = workspace ? detectProjectLayout(workspace, hints) : null
+  const hits = listBackendRestartHits(opts.syncedFiles || [], opts.deletedFiles || [], layout)
   if (!hits.length) return { offer: null, hint: '' }
   const offer = evaluateBackendRestartOffer(opts)
   if (offer) return { offer, hint: '' }

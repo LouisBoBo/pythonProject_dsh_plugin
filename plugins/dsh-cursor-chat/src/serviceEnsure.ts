@@ -15,6 +15,7 @@ import {
 } from './backendRestart.js'
 import { type CursorRunEvent } from './cursor/runner.js'
 import { normalizeRel } from './pathScope.js'
+import { detectProjectLayout, isFrontendTouchRel } from './projectLayout.js'
 
 export type ServiceCheck = {
   /** 本轮改了后端，或前端端口没人听且本轮动了前端 */
@@ -28,8 +29,6 @@ export type ServiceCheck = {
   api: string
 }
 
-const FRONT_MARKERS = ['frontend/', 'src/views/', 'src/router/', 'src/layouts/', 'src/api/']
-
 function normRel(raw: string): string {
   return String(raw || '')
     .replace(/\\/g, '/')
@@ -38,38 +37,23 @@ function normRel(raw: string): string {
     .trim()
 }
 
-export function listFrontendTouch(synced: string[], deleted: string[] = []): string[] {
+export function listFrontendTouch(
+  synced: string[],
+  deleted: string[] = [],
+  workspace?: string,
+): string[] {
+  const hints = [...synced, ...deleted].map(normRel).filter(Boolean)
+  const layout = workspace ? detectProjectLayout(workspace, hints) : null
   const out: string[] = []
-  for (const raw of [...synced, ...deleted]) {
-    const rel = normRel(raw)
-    if (!rel) continue
-    if (FRONT_MARKERS.some((m) => rel.startsWith(m))) out.push(rel)
-    else if (/\.(vue|jsx|tsx|css)$/.test(rel) && rel.includes('/src/')) out.push(rel)
+  for (const rel of hints) {
+    if (!isFrontendTouchRel(rel, layout)) continue
+    out.push(rel)
   }
   return out
 }
 
-export function readFrontendDevPort(workspace: string): number | null {
-  const configs = [
-    join(workspace, 'frontend', 'vite.config.js'),
-    join(workspace, 'frontend', 'vite.config.ts'),
-    join(workspace, 'frontend', 'vite.config.mjs'),
-    join(workspace, 'vite.config.js'),
-    join(workspace, 'vite.config.ts'),
-  ]
-  for (const p of configs) {
-    if (!existsSync(p)) continue
-    try {
-      const text = readFileSync(p, 'utf8').slice(0, 8000)
-      const m = text.match(/port\s*:\s*(\d{2,5})/)
-      if (!m) continue
-      const port = Number(m[1])
-      if (port >= 1 && port <= 65535) return port
-    } catch {
-      /* ignore */
-    }
-  }
-  return null
+export function readFrontendDevPort(workspace: string, hintRels: string[] = []): number | null {
+  return detectProjectLayout(workspace, hintRels).frontendDevPort
 }
 
 export function portOpen(port: number, host = '127.0.0.1'): Promise<boolean> {
@@ -331,8 +315,10 @@ export async function runServiceCheck(opts: {
 }): Promise<ServiceCheck> {
   const synced = opts.syncedFiles || []
   const deleted = opts.deletedFiles || []
-  const backendFiles = listBackendRestartHits(synced, deleted)
-  const frontendPort = readFrontendDevPort(opts.workspace)
+  const hints = [...synced, ...deleted]
+  const layout = detectProjectLayout(opts.workspace, hints)
+  const backendFiles = listBackendRestartHits(synced, deleted, layout)
+  const frontendPort = readFrontendDevPort(opts.workspace, hints)
   const frontendUp = frontendPort ? await portOpen(frontendPort) : false
   const needBackend = backendFiles.length > 0
   // 前端没开不再另开 Cursor 去 npm run dev。审计探测会写实测结果。
@@ -364,8 +350,8 @@ export async function runServiceCheck(opts: {
     }
   }
 
-  const backendPort = readBackendPortFromViteProxy(opts.workspace)
-  const backendRoot = resolveBackendRoot(opts.workspace)
+  const backendPort = readBackendPortFromViteProxy(opts.workspace, hints)
+  const backendRoot = resolveBackendRoot(opts.workspace, hints)
   const pythonExe = venvPython(backendRoot)
   const hinted = backendPort && backendRoot ? resolveUvicornStartCommand(backendRoot, backendPort) : null
   const frontendLine = !frontendPort

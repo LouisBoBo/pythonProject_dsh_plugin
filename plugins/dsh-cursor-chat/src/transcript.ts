@@ -226,6 +226,104 @@ export function toolResultPreview(
   return text
 }
 
+export function isShellToolName(name?: string): boolean {
+  const n = String(name || '').toLowerCase()
+  return n === 'shell' || n === 'bash' || n === 'terminal' || n === 'exec' || n.indexOf('shell') >= 0
+}
+
+export function isAskUserToolName(name?: string): boolean {
+  const n = String(name || '').toLowerCase()
+  return /ask_user_choice|ask_user_question|askquestion|ask_user/.test(n)
+}
+
+/** 只认权威字段（exitCode / status / success），禁止扫输出正文猜失败。 */
+function readExitCode(result: unknown, depth = 0): number | null {
+  if (result == null || depth > 4) return null
+  if (typeof result === 'number' && Number.isFinite(result)) return result
+  if (typeof result !== 'object') return null
+  const o = result as Record<string, unknown>
+  for (const k of ['exitCode', 'exit_code', 'code', 'statusCode', 'status_code']) {
+    const v = o[k]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string' && /^-?\d+$/.test(v.trim())) return Number(v.trim())
+  }
+  for (const k of ['result', 'output', 'data', 'payload']) {
+    const inner = readExitCode(o[k], depth + 1)
+    if (inner != null) return inner
+  }
+  return null
+}
+
+function resultExplicitFailed(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false
+  const o = result as Record<string, unknown>
+  if (o.success === false || o.ok === false) return true
+  if (o.is_error === true || o.isError === true) return true
+  return false
+}
+
+/** 失败根因短句：优先 stderr / message / 退出码，仍不扫整段正文做控制判断。 */
+export function shellFailureReasonFromResult(result: unknown): string | undefined {
+  if (result == null) return undefined
+  if (typeof result === 'object') {
+    const o = result as Record<string, unknown>
+    const stderr = textFromUnknown(o.stderr)
+    if (stderr.trim()) return clampResultPreview(stderr)
+    const msg = textFromUnknown(o.message || o.error || o.detail)
+    if (msg.trim()) return clampResultPreview(msg)
+  }
+  const exit = readExitCode(result)
+  if (exit != null && exit !== 0) return `exit ${exit}`
+  const text = clampResultPreview(textFromUnknown(result))
+  return text || undefined
+}
+
+/**
+ * Shell/终端工具的展示态。
+ * - status=error → failed
+ * - 有 exitCode≠0 → failed（即便 SDK 标 completed）
+ * - 其它保持 running / completed
+ */
+export function inferShellToolOutcome(opts: {
+  toolName?: string
+  status?: string
+  result?: unknown
+  hasCommand?: boolean
+}): { status: string; failureReason?: string } {
+  const raw = String(opts.status || '').trim().toLowerCase()
+  const shellish = isShellToolName(opts.toolName) || Boolean(opts.hasCommand)
+  if (raw === 'error' || raw === 'failed' || raw === 'cancelled' || raw === 'canceled') {
+    return {
+      status: 'failed',
+      failureReason: shellFailureReasonFromResult(opts.result) || '执行失败',
+    }
+  }
+  if (raw === 'running' || raw === 'in_progress') {
+    return { status: 'running' }
+  }
+  if (!shellish) {
+    if (raw === 'completed' || raw === 'done' || raw === 'success') return { status: 'completed' }
+    return { status: raw || 'running' }
+  }
+  const exit = readExitCode(opts.result)
+  if (exit != null && exit !== 0) {
+    return {
+      status: 'failed',
+      failureReason: shellFailureReasonFromResult(opts.result) || `exit ${exit}`,
+    }
+  }
+  if (resultExplicitFailed(opts.result)) {
+    return {
+      status: 'failed',
+      failureReason: shellFailureReasonFromResult(opts.result) || '执行失败',
+    }
+  }
+  if (raw === 'completed' || raw === 'done' || raw === 'success' || exit === 0) {
+    return { status: 'completed' }
+  }
+  return { status: raw || 'running' }
+}
+
 /** 简易行级 diff 片断（进度卡用；非完整 unified diff） */
 export function snippetFromTextDiff(before: string, after: string): string | undefined {
   const a = String(before || '').replace(/\r\n/g, '\n').split('\n')

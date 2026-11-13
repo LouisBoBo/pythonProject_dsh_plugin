@@ -9,10 +9,13 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { extractDeleteFeatures, isDeleteIntent } from './deleteIntent.js'
 import { FEATURE_ORPHAN_FILES } from './deleteVerify.js'
+import {
+  resolveBackendConventionRels,
+  resolveFrontendConventionRels,
+  resolveMenuProbeRels,
+} from './projectLayout.js'
 
-const DEFAULT_PROBE_FILES = [
-  'frontend/src/layouts/AppLayout.vue',
-  'frontend/src/router/index.js',
+const DEFAULT_PROBE_CONVENTIONS = [
   'frontend/src/api/quality.js',
   'frontend/src/api/qualityInspectionPlans.js',
   'backend/app/routers/quality.py',
@@ -31,7 +34,7 @@ function readRel(root: string, rel: string, limit = 400_000): string | null {
   try { return readFileSync(p, 'utf8').slice(0, limit) } catch { return null }
 }
 
-function probePaths(requirement: string): string[] {
+function probePaths(workspace: string, requirement: string): string[] {
   const paths: string[] = []
   const seen = new Set<string>()
   const add = (rel: string) => {
@@ -40,11 +43,16 @@ function probePaths(requirement: string): string[] {
     seen.add(r)
     paths.push(r)
   }
-  // 目标推断简化版（插件不再依赖 infer_target_from_text）
-  for (const p of DEFAULT_PROBE_FILES) add(p)
-  for (const p of OVERVIEW_VIEW_CANDIDATES) add(p)
+  for (const p of resolveMenuProbeRels(workspace)) add(p)
+  const feConventions = DEFAULT_PROBE_CONVENTIONS.filter((p) => /^(frontend|web)\//i.test(p))
+  const beConventions = DEFAULT_PROBE_CONVENTIONS.filter((p) => /^(backend|server)\//i.test(p))
+  for (const p of resolveFrontendConventionRels(workspace, [...feConventions])) add(p)
+  for (const p of resolveBackendConventionRels(workspace, [...beConventions])) add(p)
+  for (const p of resolveFrontendConventionRels(workspace, [...OVERVIEW_VIEW_CANDIDATES])) add(p)
   for (const feat of extractDeleteFeatures(requirement)) {
-    for (const p of FEATURE_ORPHAN_FILES[feat] || []) add(p)
+    for (const p of resolveFrontendConventionRels(workspace, [...(FEATURE_ORPHAN_FILES[feat] || [])])) {
+      add(p)
+    }
   }
   return paths.slice(0, 40)
 }
@@ -91,21 +99,17 @@ export function auditDeleteTarget(
   let probesRead = 0
 
   for (const feat of features) {
-    for (const rel of FEATURE_ORPHAN_FILES[feat] || []) {
-      if (existsSync(join(root, rel))) {
-        checks.push({ kind: 'orphan_file', path: rel, detail: `「${feat}」页面/API 仍存在` })
-      }
+    for (const rel of resolveFrontendConventionRels(root, [...(FEATURE_ORPHAN_FILES[feat] || [])])) {
+      checks.push({ kind: 'orphan_file', path: rel, detail: `「${feat}」页面/API 仍存在` })
     }
     if (feat === '品质概览' || feat.includes('概览')) {
-      for (const rel of OVERVIEW_VIEW_CANDIDATES) {
-        if (existsSync(join(root, rel))) {
-          checks.push({ kind: 'orphan_file', path: rel, detail: '页面/占位文件仍存在' })
-        }
+      for (const rel of resolveFrontendConventionRels(root, [...OVERVIEW_VIEW_CANDIDATES])) {
+        checks.push({ kind: 'orphan_file', path: rel, detail: '页面/占位文件仍存在' })
       }
     }
   }
 
-  for (const rel of probePaths(requirement)) {
+  for (const rel of probePaths(root, requirement)) {
     const text = readRel(root, rel)
     if (text === null) continue
     probesRead++
@@ -127,8 +131,8 @@ export function auditDeleteTarget(
     }
   }
 
-  // 探针文件一个都没读到 → 无法证明已删干净
-  if (probesRead < 2) {
+  // 菜单/路由探针一个都读不到 → 无法证明已删干净（画像后至少应能读到 1 个）
+  if (probesRead < 1) {
     return { skip_cursor: false, delivery: '', checks: [], feature, reason: 'probe_insufficient' }
   }
 

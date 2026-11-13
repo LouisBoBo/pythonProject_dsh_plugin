@@ -14,7 +14,12 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve, join } from 'node:path'
+import {
+  isUiShellWiringRel,
+  resolveFrontendConventionRels,
+} from './projectLayout.js'
 
+/** 约定路径；实际落盘位置由项目画像解析 */
 const CATALOG_RELS = [
   'frontend/src/config/reportFeatures.js',
   'frontend/src/config/reportFeatures.ts',
@@ -48,28 +53,7 @@ function isShellPageRel(rel: string): boolean {
 
 /** 判断一个 rel 是否属于"接线文件"（不同步则写完了但刷新看不到） */
 export function isUiShellWiring(rel: string): boolean {
-  const r = normRel(rel)
-  if (!r) return false
-  if (
-    r === 'frontend/src/layouts/AppLayout.vue' ||
-    r.endsWith('/layouts/AppLayout.vue') ||
-    r.includes('/layouts/')
-  ) return true
-  if (
-    r === 'frontend/src/router/index.js' ||
-    r === 'frontend/src/router/index.ts' ||
-    r.includes('/router/')
-  ) return true
-  if (
-    r.startsWith('frontend/src/config/')
-  ) return true
-  if (
-    r === 'backend/app/main.py' ||
-    r === 'backend/main.py' ||
-    r.includes('/backend/app/api/') ||
-    r.includes('/backend/app/routers/')
-  ) return true
-  return false
+  return isUiShellWiringRel(rel)
 }
 
 function syncedRels(syncedFiles?: string[]): string[] {
@@ -88,7 +72,7 @@ export function deferredWiringBlockers(deferredFiles?: string[]): string[] {
   for (const raw of deferredFiles || []) {
     const rel = normRel(raw)
     if (!rel) continue
-    if (isUiShellWiring(rel) || rel.startsWith('frontend/src/config/')) bad.push(rel)
+    if (isUiShellWiring(rel)) bad.push(rel)
   }
   return bad
 }
@@ -144,16 +128,26 @@ function parseCatalogBlocks(text: string): CatalogEntry[] {
   return entries
 }
 
-function readCatalog(target: string): { path: string | null; text: string; entries: CatalogEntry[] } {
-  for (const rel of CATALOG_RELS) {
+function readCatalog(
+  target: string,
+  hintRels: string[] = [],
+): { path: string | null; text: string; entries: CatalogEntry[] } {
+  const resolved = [
+    ...resolveFrontendConventionRels(target, [...CATALOG_RELS], hintRels),
+  ]
+  // 本轮同步的 reportFeatures.* 也认（任意深度）
+  for (const rel of hintRels) {
+    const r = normRel(rel)
+    if (/reportFeatures\.(js|ts|mjs|cjs)$/i.test(r) && !resolved.includes(r)) resolved.push(r)
+  }
+  for (const rel of resolved) {
     const path = join(target, rel)
-    if (existsSync(path)) {
-      try {
-        const text = readFileSync(path, 'utf8')
-        return { path, text, entries: parseCatalogBlocks(text) }
-      } catch {
-        return { path, text: '', entries: [] }
-      }
+    if (!existsSync(path)) continue
+    try {
+      const text = readFileSync(path, 'utf8')
+      return { path: rel, text, entries: parseCatalogBlocks(text) }
+    } catch {
+      return { path: rel, text: '', entries: [] }
     }
   }
   return { path: null, text: '', entries: [] }
@@ -370,8 +364,10 @@ export function verifyAddMenuOnTarget(
   const synced = syncedRels(opts?.synced_files)
   const reportViews = synced.filter(isReportViewRel)
   const shellViews = synced.filter(isShellPageRel)
-  const catalogTouched = synced.some((r) =>
-    (CATALOG_RELS as readonly string[]).includes(r) || fileBase(r).startsWith('reportFeatures.'),
+  const catalogTouched = synced.some(
+    (r) =>
+      /reportFeatures\.(js|ts|mjs|cjs)$/i.test(r) ||
+      /(^|\/)src\/config\//i.test(r),
   )
 
   if (!reportViews.length && !shellViews.length && !catalogTouched) {
@@ -379,17 +375,23 @@ export function verifyAddMenuOnTarget(
   }
 
   const pageViews = [...reportViews, ...shellViews]
-  const registration = synced.some((r) =>
-    r.includes('/router/') || r.includes('/layouts/') || catalogTouched && (
-      (CATALOG_RELS as readonly string[]).includes(r) || fileBase(r).startsWith('reportFeatures.')
-    ),
+  const registration = synced.some(
+    (r) =>
+      r.includes('/router/') ||
+      r.includes('/layouts/') ||
+      (catalogTouched &&
+        (/reportFeatures\.(js|ts|mjs|cjs)$/i.test(r) || /(^|\/)src\/config\//i.test(r))),
   )
   if (!pageViews.length || !registration) return { ok: true, detail: '' }
 
   const catalog = catalogTouched
-    ? readCatalog(target)
+    ? readCatalog(target, synced)
     : { path: null, text: '', entries: [] as CatalogEntry[] }
-  if (catalogTouched && catalog.path === null && !synced.some((r) => r.includes('/router/') || r.includes('/layouts/'))) {
+  if (
+    catalogTouched &&
+    catalog.path === null &&
+    !synced.some((r) => r.includes('/router/') || r.includes('/layouts/'))
+  ) {
     return { ok: true, detail: '未找到菜单注册文件，已跳过 catalog 可见性检查' }
   }
 

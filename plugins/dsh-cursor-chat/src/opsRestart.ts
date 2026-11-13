@@ -236,6 +236,59 @@ function planApp(workspace: string): ServicePlan | null {
   }
 }
 
+/**
+ * 单仓 Python 应用（如 Gradio main.py）。无 vite/uvicorn 时也能按项目入口后台拉起，
+ * 避免「重启」落到 Cursor 后先盲装一整包依赖卡住。
+ */
+function planPythonApp(workspace: string): ServicePlan | null {
+  const python = resolvePython(workspace, workspace)
+  if (!python) return null
+  const names = ['main.py', 'app.py', 'server.py', 'run.py', 'webui.py']
+  for (const name of names) {
+    const file = join(workspace, name)
+    if (!existsSync(file)) continue
+    let text = ''
+    try {
+      text = readFileSync(file, 'utf8').slice(0, 16_000)
+    } catch {
+      continue
+    }
+    const hasMain = /if\s+__name__\s*==\s*['"]__main__['"]/.test(text)
+    const isGradio = /(?:import\s+gradio|from\s+gradio|\.launch\s*\()/.test(text)
+    const isFlask = /(?:Flask\s*\(|app\.run\s*\()/.test(text)
+    const isStreamlit = /streamlit/i.test(text)
+    if (!hasMain && !isGradio && !isFlask) continue
+    if (isStreamlit) continue
+    const portFromLaunch = text.match(/server_port\s*=\s*(\d{2,5})/)
+    const portFromRun = text.match(/\.run\s*\([^)]*port\s*=\s*(\d{2,5})/)
+    const portNum = Number((portFromLaunch || portFromRun)?.[1] || (isGradio ? 7860 : 0))
+    const port = portNum >= 1 && portNum <= 65535 ? portNum : isGradio ? 7860 : null
+    return {
+      side: 'app',
+      cwd: workspace,
+      port,
+      label: `Python ${name}${port ? ` :${port}` : ''}`,
+      bin: python,
+      args: [name],
+      markers: [workspace, name, ...(isGradio ? ['gradio'] : [])],
+    }
+  }
+  return null
+}
+
+function planFallbackApp(workspace: string): { plan: ServicePlan | null; note: string } {
+  const npmApp = planApp(workspace)
+  if (npmApp) {
+    const pkg = readJson(join(workspace, 'package.json')) || {}
+    if (!isUiPackage(workspace, pkg)) {
+      return { plan: npmApp, note: '没有分开的前后端目录，改用仓库根目录的启动脚本' }
+    }
+  }
+  const py = planPythonApp(workspace)
+  if (py) return { plan: py, note: '没有前后端分仓命令，改用仓库根目录的 Python 入口' }
+  return { plan: null, note: '' }
+}
+
 export function planProjectServices(
   workspace: string,
   expect: { frontend: boolean; backend: boolean },
@@ -257,14 +310,14 @@ export function planProjectServices(
     else notes.push('项目里没有找到前端启动命令')
   }
   if (!plans.length && !expect.frontend && !expect.backend) {
-    const app = planApp(root)
+    const app = planApp(root) || planPythonApp(root)
     if (app) plans.push(app)
   }
   if (!plans.length && expect.frontend && expect.backend) {
-    const app = planApp(root)
-    if (app && app.side === 'app' && !isUiPackage(root, readJson(join(root, 'package.json')) || {})) {
-      plans.push(app)
-      notes.push('没有分开的前后端目录，改用仓库根目录的启动脚本')
+    const fb = planFallbackApp(root)
+    if (fb.plan) {
+      plans.push(fb.plan)
+      if (fb.note) notes.push(fb.note)
     }
   }
   return { plans, notes }
@@ -447,6 +500,23 @@ export type StartServicesResult = {
   detail: string
   /** 插件一张启动计划都认不出：可降级 Cursor IDE 式终端处理，禁止就此空手失败 */
   no_commands?: boolean
+  /** 已认出命令但未全部起来：可降级 Cursor 灵活排障后再启 */
+  start_failed?: boolean
+}
+
+/** 进度卡用：status 短文案；command 走 Shell 工具块展示命令与输出摘要 */
+export type RestartProgressEvent = {
+  type: 'status' | 'command'
+  message?: string
+  command?: string
+  snippet?: string
+  tool_status?: string
+  call_id?: string
+}
+
+function planCommandLine(plan: ServicePlan): string {
+  const args = plan.args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')
+  return `${plan.bin}${args ? ` ${args}` : ''}`.trim()
 }
 
 export async function startRequestedServices(
@@ -454,9 +524,15 @@ export async function startRequestedServices(
   expect: { frontend: boolean; backend: boolean },
   isCancel?: () => boolean,
   onStatus?: (message: string) => void,
+  onProgress?: (ev: RestartProgressEvent) => void,
 ): Promise<StartServicesResult> {
+  const say = (message: string) => {
+    // 有 onProgress 时只走它，避免与 onStatus 各推一次造成进度卡双份
+    if (onProgress) onProgress({ type: 'status', message })
+    else onStatus?.(message)
+  }
   const root = resolve(String(workspace || '').trim())
-  onStatus?.('正在读取项目里的启动命令，不改代码…')
+  say('正在读取项目里的启动命令，不改代码…')
   const planned = planProjectServices(root, expect)
   if (!planned.plans.length) {
     const note = planned.notes.filter(Boolean).join('；')
@@ -466,20 +542,59 @@ export async function startRequestedServices(
       detail: `项目里没有找到启动命令，未改代码。${note || '请改由 Cursor 按项目现有方式处理。'}`,
     }
   }
+  say(
+    `已认出 ${planned.plans.length} 条启动命令：` +
+      planned.plans.map((p) => `${p.label}${p.port ? ` :${p.port}` : ''}`).join('；'),
+  )
   const lines: string[] = []
   for (const plan of planned.plans) {
     if (isCancel?.()) {
       return { ok: false, detail: '用户取消' }
     }
-    onStatus?.(`正在拉起${plan.label}，请稍候`)
-    const started =
+    const callId = `restart-${plan.side}-${Date.now()}`
+    const cmdline = planCommandLine(plan)
+    say(`正在拉起${plan.label}，请稍候`)
+    onProgress?.({
+      type: 'command',
+      call_id: callId,
+      command: `cd ${plan.cwd}\n${cmdline}`,
+      tool_status: 'running',
+      snippet: `工作目录 ${plan.cwd}${plan.port ? `\n端口 ${plan.port}` : ''}`,
+    })
+    let started =
       process.platform === 'win32'
         ? launchWindows(root, plan)
         : spawnDetached(plan, logFile(root, plan.side))
+    // Windows 偶发 Start-Process 对 npm 失败：改用 npm.cmd 再试一次（不改其它计划）
+    if (
+      !started.ok &&
+      process.platform === 'win32' &&
+      plan.side === 'frontend' &&
+      /(?:^|[\\/])npm(?:\.exe)?$/i.test(plan.bin) &&
+      !/\.cmd$/i.test(plan.bin)
+    ) {
+      const retryPlan = { ...plan, bin: `${plan.bin.replace(/\.exe$/i, '')}.cmd` }
+      say(`前端启动失败，改用 npm.cmd 再启一次`)
+      onProgress?.({
+        type: 'command',
+        call_id: callId,
+        command: `cd ${retryPlan.cwd}\n${planCommandLine(retryPlan)}`,
+        tool_status: 'running',
+        snippet: `上次失败：${started.detail}\n改用 npm.cmd 重试`,
+      })
+      started = launchWindows(root, retryPlan)
+    }
     if (!started.ok) {
       const failedLine = `${plan.label}：${started.detail}`
       lines.push(failedLine)
-      onStatus?.(failedLine)
+      say(failedLine)
+      onProgress?.({
+        type: 'command',
+        call_id: callId,
+        command: `cd ${plan.cwd}\n${cmdline}`,
+        tool_status: 'failed',
+        snippet: started.detail.slice(0, 1200),
+      })
       continue
     }
     const ready = await waitReady(root, plan, isCancel)
@@ -487,10 +602,24 @@ export async function startRequestedServices(
       return { ok: false, detail: '用户取消' }
     }
     lines.push(ready.detail)
-    onStatus?.(ready.detail)
+    say(ready.detail)
+    const errTail = ready.ok ? '' : tailFile(join(root, '.dev-logs', `${plan.side}.err.log`))
+    onProgress?.({
+      type: 'command',
+      call_id: callId,
+      command: `cd ${plan.cwd}\n${cmdline}`,
+      tool_status: ready.ok ? 'completed' : 'failed',
+      snippet: (ready.ok
+        ? `${ready.detail}${started.ok && 'pid' in started && started.pid ? `\nPID ${started.pid}` : ''}`
+        : `${ready.detail}${errTail ? `\n${errTail}` : ''}`
+      ).slice(0, 2000),
+    })
   }
   const failed = lines.filter((line) => !line.includes('已在听') && !line.includes('已在后台执行'))
   const note = planned.notes.filter(Boolean).join('；')
   const detail = [`已按项目命令处理，未改代码。`, ...lines, note].filter(Boolean).join(' ')
-  return { ok: failed.length === 0, detail }
+  if (failed.length) {
+    return { ok: false, start_failed: true, detail }
+  }
+  return { ok: true, detail }
 }

@@ -12,6 +12,12 @@ import {
   extractClaimedDeletedPaths,
   isDeleteIntent,
 } from './deleteIntent.js'
+import {
+  isBackendRuntimeRel,
+  isFrontendTouchRel,
+  resolveFrontendConventionRels,
+  resolveMenuProbeRels,
+} from './projectLayout.js'
 
 /** 各功能的页面/API 孤立文件（删功能必须清掉这些） */
 export const FEATURE_ORPHAN_FILES: Record<string, readonly string[]> = {
@@ -82,11 +88,6 @@ export const FEATURE_ROUTE_MARKERS: Record<string, readonly string[]> = {
   '综合看板': ['kanban/general', 'GeneralDashboard', 'ComprehensiveKanban'],
 } as const
 
-const MENU_PROBE_FILES = [
-  'frontend/src/layouts/AppLayout.vue',
-  'frontend/src/router/index.js',
-] as const
-
 const RUNTIME_HINT =
   '【界面刷新】本机源码已写入；若本机 Vite 在跑，已触碰文件触发 HMR（不再默认杀进程/npm run dev）。' +
   '请硬刷新浏览器（Cmd+Shift+R）即可看到菜单/路由变化。'
@@ -147,9 +148,14 @@ export function verifyDeleteOnTarget(
     }
   }
 
+  const hintRels = [
+    ...(opts?.synced_files || []),
+    ...(opts?.deleted_files || []),
+  ]
+  const probeRels = resolveMenuProbeRels(root, hintRels)
   const errors: string[] = []
   let probesOk = 0
-  for (const rel of MENU_PROBE_FILES) {
+  for (const rel of probeRels) {
     const body = readRel(root, rel)
     if (!body) continue
     probesOk++
@@ -169,10 +175,13 @@ export function verifyDeleteOnTarget(
   }
 
   for (const feat of features) {
-    for (const rel of FEATURE_ORPHAN_FILES[feat] || []) {
-      if (existsSync(join(root, rel.replace(/\\/g, '/')))) {
-        errors.push(`页面/API 文件仍存在：${rel}`)
-      }
+    const orphans = resolveFrontendConventionRels(
+      root,
+      [...(FEATURE_ORPHAN_FILES[feat] || [])],
+      hintRels,
+    )
+    for (const rel of orphans) {
+      errors.push(`页面/API 文件仍存在：${rel}`)
     }
   }
 
@@ -195,13 +204,13 @@ export function maybeRuntimeHint(
   syncedFiles?: string[],
   deletedFiles?: string[],
 ): string {
-  const feMarkers = ['frontend/src/layouts/', 'frontend/src/router/', 'frontend/src/views/']
-  const beMarkers = ['backend/app/main.py', 'backend/main.py', 'backend/app/api/', 'backend/app/routers/']
-  let fe = false, be = false
+  let fe = false
+  let be = false
   for (const raw of [...(syncedFiles || []), ...(deletedFiles || [])]) {
     const rel = String(raw || '').replace(/删除 /g, '').replace(/\\/g, '/').trim()
-    if (feMarkers.some(m => rel.startsWith(m))) fe = true
-    if (beMarkers.some(m => rel.startsWith(m) || rel === m.replace(/\/$/, ''))) be = true
+    if (!rel) continue
+    if (isFrontendTouchRel(rel)) fe = true
+    if (isBackendRuntimeRel(rel)) be = true
   }
   return (fe ? RUNTIME_HINT : '') + (be ? BACKEND_HINT : '')
 }

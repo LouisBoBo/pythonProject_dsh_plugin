@@ -15,11 +15,13 @@ import {
   loadConfig,
   publicConfigView,
   SERVICE_NAME,
+  stripAccidentalMockEnv,
 } from './config.js'
 import { checkCompat, readPluginVersion } from './compat.js'
 import { redactJobPublic, redactSseEvent } from './redact.js'
 import { consume, issue } from './hitl.js'
 import {
+  appendEvent,
   createJob,
   findLatestJobByCallId,
   findLatestJobForSession,
@@ -389,14 +391,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       action !== 'cursor-chat.apply' &&
       action !== 'cursor-chat.steer' &&
       action !== 'cursor-chat.cancel' &&
-      action !== 'cursor-chat.restart-backend'
+      action !== 'cursor-chat.restart-backend' &&
+      action !== 'cursor-chat.user-choice'
     ) {
       send(
         res,
         400,
         {
           ok: false,
-          detail: 'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend',
+          detail:
+            'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend / user-choice',
         },
         req,
       )
@@ -882,8 +886,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return
     }
     const items = jobs.map((job) => {
-      const synced = job.synced_files || job.last_synced_files || job.review_in_scope || []
-      const deleted = job.deleted_files || job.review_deleted || []
+      // 改动卡数据源：同步结果优先；空时退回审阅范围/变更清单，避免结论下空白
+      const synced = [
+        ...(job.synced_files || []),
+        ...(job.last_synced_files || []),
+        ...(job.review_in_scope || []),
+        ...(job.changed_files || []),
+      ].filter((p, i, arr) => {
+        const s = String(p || '').trim()
+        if (!s) return false
+        return arr.findIndex((x) => String(x || '').replace(/\\/g, '/') === s.replace(/\\/g, '/')) === i
+      })
+      const deleted = [...(job.deleted_files || []), ...(job.review_deleted || [])].filter((p, i, arr) => {
+        const s = String(p || '').trim()
+        if (!s) return false
+        return arr.findIndex((x) => String(x || '').replace(/\\/g, '/') === s.replace(/\\/g, '/')) === i
+      })
       return {
         id: job.id,
         status: job.status,
@@ -1034,6 +1052,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             ':' +
             (it?.streaming ? '1' : '0')
         }
+        const choice = job.pending_user_choice
         return [
           job.status,
           job.detail || '',
@@ -1043,6 +1062,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           (job.review_in_scope || []).length,
           trHash,
           job.updated_at || '',
+          choice ? `${choice.call_id}:${choice.options?.length || 0}` : '',
         ].join('#')
       }
       const writeSnapshot = (job: NonNullable<ReturnType<typeof loadJob>>) => {
@@ -1058,6 +1078,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           review_deferred: job.review_deferred || [],
           review_gate: job.review_gate ?? null,
           synced_files: job.synced_files || [],
+          pending_user_choice: job.pending_user_choice || null,
           assistant_text: job.assistant_text || '',
           assistant_chars: (job.assistant_text || '').length,
           thinking_text: job.thinking_text || '',
@@ -1142,6 +1163,53 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
     const view = new URL(req.url || '/', 'http://127.0.0.1').searchParams.get('view')
     send(res, 200, { ok: true, job: view === 'card' ? jobCardView(job) : job }, req)
+    return
+  }
+
+  if (method === 'POST' && path.match(/^\/api\/cursor-chat\/jobs\/[^/]+\/user-choice$/)) {
+    if (rejectBadOrigin(req, res)) return
+    const id = decodeURIComponent(path.split('/')[4] || '')
+    let body: Record<string, unknown> = {}
+    try {
+      const raw = await readBody(req)
+      if (raw && String(raw).trim()) body = parseJson(raw)
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const nonce = String(body.nonce || body.hitl_nonce || '').trim()
+    const hitl = consume({
+      nonce,
+      action: 'cursor-chat.user-choice',
+      job_id: id,
+    })
+    if (!hitl.ok) {
+      send(res, 401, { ok: false, detail: hitl.detail, code: hitl.code }, req)
+      return
+    }
+    const job = loadJob(id)
+    if (!job) {
+      send(res, 404, { ok: false, detail: '任务不存在' }, req)
+      return
+    }
+    if (job.cancelled || ['succeeded', 'failed', 'cancelled'].includes(job.status)) {
+      send(res, 409, { ok: false, detail: '任务已结束，无法再确认' }, req)
+      return
+    }
+    const { answerUserChoice } = await import('./userChoice.js')
+    const choice = String(body.choice || body.answer || body.option || '').trim()
+    const answered = answerUserChoice(id, choice)
+    if (!answered.ok) {
+      send(res, 400, { ok: false, detail: answered.detail }, req)
+      return
+    }
+    patchJob(id, { pending_user_choice: null })
+    const fresh = loadJob(id)!
+    appendEvent(fresh, {
+      type: 'status',
+      message: `用户已选：${answered.answer}`.slice(0, 300),
+    })
+    send(res, 200, { ok: true, answer: answered.answer, job: loadJob(id) }, req)
     return
   }
 
@@ -1405,6 +1473,11 @@ export async function startServerInProcess(): Promise<{
   detail: string
   already?: boolean
 }> {
+  if (stripAccidentalMockEnv()) {
+    console.warn(
+      '[cursor-chat] 已忽略误继承的 CURSOR_CHAT_MOCK（正式写码禁止 Mock；自检请设 CURSOR_CHAT_SELFTEST=1）',
+    )
+  }
   const cfg = loadConfig()
   if (server?.listening) {
     return { ok: true, addr: listenAddr, detail: 'Cursor 对话写码服务已在运行', already: true }
@@ -1521,13 +1594,18 @@ async function startServerChild(): Promise<{
     return { ok: false, addr: '', detail: `找不到子进程入口 ${entry}（请先 pnpm build）` }
   }
 
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    CURSOR_CHAT_SERVER_ROLE: 'child',
+    CURSOR_CHAT_SERVER_MODE: 'inplace',
+    CURSOR_CHAT_PARENT_PID: String(process.pid),
+  }
+  // 正式子进程不得继承宿主 shell 的 MOCK；自检保留 CURSOR_CHAT_SELFTEST=1 + MOCK
+  if (process.env.CURSOR_CHAT_SELFTEST !== '1') {
+    delete childEnv.CURSOR_CHAT_MOCK
+  }
   const child = spawn(process.execPath, [entry], {
-    env: {
-      ...process.env,
-      CURSOR_CHAT_SERVER_ROLE: 'child',
-      CURSOR_CHAT_SERVER_MODE: 'inplace',
-      CURSOR_CHAT_PARENT_PID: String(process.pid),
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
   })

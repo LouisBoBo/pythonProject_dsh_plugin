@@ -45,11 +45,40 @@ export function looksLikeDevOps(message: string): boolean {
   }
   if (/把(项目|服务|前后端|前端|后端)跑起来/.test(t)) return true
   if (/(跑|执行|运行).{0,4}(测试|单测)/.test(t)) return true
-  if (/(安装|装).{0,4}依赖/.test(t)) return true
-  if (/npminstall|pnpminstall|yarninstall|pipinstall/i.test(t)) return true
+  if (opsLooksLikeInstall(t)) return true
   if (/(看|查|查看|读).{0,6}日志/.test(t)) return true
   if (/(查|看|检查).{0,4}环境/.test(t)) return true
-  if (/排障|排查(一下|下)?(问题|报错|服务|启动|原因)/.test(t)) return true
+  if (opsLooksLikeTroubleshoot(t)) return true
+  return false
+}
+
+/** 装依赖口令（已 compact）。勿把「安装一个报表」等写码句收进来。 */
+function opsLooksLikeInstall(t: string): boolean {
+  if (/(安装|装).{0,6}(依赖|deps|packages?|包)/i.test(t)) return true
+  if (/依赖.{0,6}(安装|装上|装一下|没装|缺失|不全)/.test(t)) return true
+  if (/npminstall|npmi|pnpminstall|pnpmi|yarninstall|yarnadd|pipinstall|uvsync|poetryinstall/i.test(t)) {
+    return true
+  }
+  if (
+    /(requirements\.txt|pyproject\.toml|package-lock|pnpm-lock|yarn\.lock)/i.test(t) &&
+    /(安装|装|install)/i.test(t)
+  ) {
+    return true
+  }
+  return false
+}
+
+/**
+ * 排障/诊断口令（已 compact）。
+ * 「排查并修复」仍由 looksLikeCodeChange 先拦；此处只收不改代码的定位。
+ */
+function opsLooksLikeTroubleshoot(t: string): boolean {
+  if (/排障/.test(t)) return true
+  if (/排查/.test(t)) return true
+  if (/(定位|诊断).{0,6}(问题|报错|错误|异常|原因)/.test(t)) return true
+  if (/为什么.{0,10}(报错|失败|起不来|挂了|不行)/.test(t)) return true
+  if (/(启动|重启).{0,8}(失败|报错|错误|异常|不了)/.test(t)) return true
+  if (/起不来/.test(t)) return true
   return false
 }
 
@@ -106,38 +135,256 @@ export function opsPortExpectation(message: string): { frontend: boolean; backen
   return { frontend, backend }
 }
 
+/**
+ * 用户要「把服务拉起来」时走项目命令重启。
+ * 诊断口令（启动失败 / 排查 / 起不来）不得进这里，否则会误杀排障。
+ */
 export function opsWantsRunningService(message: string): boolean {
   const t = compact(message)
-  if (/(重启|重新启动|重开|拉起|启动)/.test(t)) return true
+  if (!t) return false
+  if (/(排障|排查|为什么|根因)/.test(t)) return false
+  if (/(启动|重启).{0,8}(失败|报错|错误|异常|不了)/.test(t)) return false
+  if (/起不来/.test(t) && !/(重启|重新启动|重开|拉起|跑起来)/.test(t)) return false
+  if (/(重启|重新启动|重开|拉起)/.test(t)) return true
   // 「把项目/服务跑起来」与启动同义，须走项目命令拉起，不能再交给 Cursor 搜仓库
   if (/(把|让)?(项目|服务|前后端|前端|后端)?跑起来/.test(t)) return true
+  if (
+    /^(请|帮我|帮忙|麻烦)?(把)?(前端|后端|前后端|服务|项目)?(重启|重新启动|重开|启动|拉起)(一下|下|前后端|前端|后端|服务|项目)?$/.test(
+      t,
+    )
+  ) {
+    return true
+  }
+  // 「启动」须带服务对象；失败诊断已在上方排除
+  if (/(启动).{0,8}(前端|后端|服务|前后端|项目|dev)/i.test(t)) return true
+  if (/(前端|后端|前后端|服务|项目).{0,6}启动/.test(t)) return true
   return false
+}
+
+/**
+ * 已判定为 ops 后的细类。只影响提示词、进度文案和验收兜底。
+ * 不改变 code/ops 分流；带改码的句子仍由 looksLikeCodeChange 先拦住。
+ */
+export type OpsTerminalKind = 'restart' | 'test' | 'install' | 'logs' | 'env' | 'troubleshoot' | 'generic'
+
+export function classifyOpsTerminal(message: string): OpsTerminalKind {
+  const t = compact(message)
+  if (!t) return 'generic'
+  if (opsWantsRunningService(t)) return 'restart'
+  if (/(跑|执行|运行).{0,4}(测试|单测)/.test(t) || /pytest|vitest|jest|unittest/i.test(t)) return 'test'
+  if (opsLooksLikeInstall(t)) return 'install'
+  if (/(看|查|查看|读).{0,6}日志/.test(t)) return 'logs'
+  if (/(查|看|检查).{0,4}环境/.test(t)) return 'env'
+  if (opsLooksLikeTroubleshoot(t)) return 'troubleshoot'
+  return 'generic'
+}
+
+export function opsRunningStatus(kind: OpsTerminalKind): string {
+  switch (kind) {
+    case 'restart':
+      return '正在按项目命令重启，不改代码…'
+    case 'test':
+      return '正在项目终端跑测试，不改代码…'
+    case 'install':
+      return '正在项目终端安装依赖，不改代码…'
+    case 'logs':
+      return '正在项目终端查看日志，不改代码…'
+    case 'env':
+      return '正在项目终端检查环境，不改代码…'
+    case 'troubleshoot':
+      return '正在项目终端排障，不改代码…'
+    default:
+      return '正在项目终端处理，不改代码…'
+  }
+}
+
+/** 从进度/详情里抠已在听的端口；只认 1～65535。 */
+export function parseOpsListenPorts(text: string): { frontend?: number; backend?: number } {
+  const t = String(text || '')
+  const out: { frontend?: number; backend?: number } = {}
+  const take = (side: 'frontend' | 'backend', re: RegExp) => {
+    if (out[side]) return
+    const m = t.match(re)
+    if (!m) return
+    const n = Number(m[1])
+    if (Number.isInteger(n) && n >= 1 && n <= 65535) out[side] = n
+  }
+  // 允许 app.main:app 一类模块名里的点号；只在同一行内找「:端口」
+  take('frontend', /前端[^\n]{0,80}?:(\d{2,5})/)
+  take('frontend', /前端\s+(\d{2,5})\s*(?:已在听|在听|未监听)/)
+  take('backend', /后端[^\n]{0,80}?:(\d{2,5})/)
+  take('backend', /后端\s+(\d{2,5})\s*(?:已在听|在听|未监听)/)
+  return out
+}
+
+/**
+ * 重启验收：有端口就写成「标签 + 本机 URL」行，结论壳会收成可点击链接（非纯文本）。
+ * 没有端口才退回笼统文案。
+ */
+export function opsRestartVerifySteps(ports: { frontend?: number; backend?: number }): string[] {
+  const steps: string[] = []
+  if (ports.frontend || ports.backend) {
+    if (ports.frontend) steps.push(`前端：http://127.0.0.1:${ports.frontend}/`)
+    if (ports.backend) {
+      steps.push(`后端：http://127.0.0.1:${ports.backend}/docs`)
+      steps.push(`健康检查：http://127.0.0.1:${ports.backend}/api/health`)
+    }
+  } else {
+    steps.push('打开原来的前端地址，确认页面能打开')
+    steps.push('打开后端健康检查或接口文档，确认仍在原端口')
+  }
+  steps.push('若没起来，把项目 .dev-logs 里的报错发回本对话')
+  return steps
+}
+
+export function opsVerifyDefaults(kind: OpsTerminalKind): string[] {
+  switch (kind) {
+    case 'restart':
+      return opsRestartVerifySteps({})
+    case 'test':
+      return [
+        '对照进度卡里的测试命令与退出码',
+        '失败时把失败用例名和报错贴回本对话',
+        '需要修代码时另说具体要改什么',
+      ]
+    case 'install':
+      return [
+        '对照结论里的安装目录、包管理器命令与退出结果',
+        '需要时再单独说启动或重启服务验证',
+        '若 lock 有变动或不该改的文件被碰了，把现象发回本对话',
+      ]
+    case 'logs':
+      return [
+        '对照结论里摘出的关键日志行',
+        '若日志路径不对，说明实际日志位置后续再查',
+        '需要继续排障或改代码时直接说下一步',
+      ]
+    case 'env':
+      return [
+        '对照结论里的 Node/Python/端口/虚拟环境结果',
+        '缺项再说明要装什么或要查哪一侧',
+        '不要在本轮结论里默认已经改过配置',
+      ]
+    case 'troubleshoot':
+      return [
+        '对照结论里的现象、证据与根因是否说得通',
+        '若同意改代码，另发具体修改诉求（本轮应未改文件）',
+        '若还要查日志、环境或再装依赖，直接说下一步',
+      ]
+    default:
+      return [
+        '看进度卡里的终端命令是否已经执行',
+        '确认结果是否符合这句诉求',
+        '若要改代码，另说具体要改什么',
+      ]
+  }
+}
+
+/** 写码与运维共用：终端必须有成败态，失败要根因并纠错；需确认则 ask_user_choice。 */
+export function terminalProblemHandlingInstructions(): string {
+  return (
+    `【终端与问题处理】\n` +
+    `- 凡执行 Shell/终端命令：必须留下明确成功或失败结果（认退出码与工具状态）；失败不得当成功。\n` +
+    `- 失败后立刻根据 stderr/日志提炼根因，针对性纠错并继续处理，直到目标达成，或确认必须由用户拍板。\n` +
+    `- 需要用户确认/选择时：调用 ask_user_choice，给出 2～4 个具体选项；用户选定后继续，禁止干等、禁止只抛原始报错。\n` +
+    `- 禁止空等挂死；同一失败命令不得原样连打；长驻进程须后台启动并立刻还回终端。\n`
+  )
+}
+
+function opsKindInstructions(
+  kind: OpsTerminalKind,
+  restartFallback: boolean,
+  restartAttemptDetail?: string,
+): string {
+  if (restartFallback || kind === 'restart') {
+    const prior = String(restartAttemptDetail || '').trim()
+    const fallback = restartFallback
+      ? prior
+        ? `插件已按固定模板试过，未全部成功。已尝试结果：\n${prior.slice(0, 1200)}\n` +
+          `从现在起完全按 Cursor IDE 方式接手：自己读仓库、终端与日志，灵活解决直到服务在听。\n`
+        : `插件没有匹配到固定启动模板。从现在起完全按 Cursor IDE 方式处理这个启动/重启诉求。\n`
+      : ''
+    return (
+      fallback +
+      `目标：把本项目服务启动/重启到可访问。遇到问题很正常——要及时定位根因并针对性处理，想尽办法推进；禁止一遇错就卡死、空等或只把报错甩给用户。\n` +
+      `正确节奏（对照 Cursor IDE / 专业排障）：\n` +
+      `1) 先诊断：看 .dev-logs / 项目日志、端口是否在听、相关进程、上次启动命令与 ModuleNotFoundError / 权限 / 缺 .env 等；把「当前状态 + 根因」写进可见过程。\n` +
+      `2) 能自解则自解：缺哪个包就装哪个（优先最小集，禁止无目标地整包盲装 torch 等大依赖）；可建项目内 .venv、写/改启动脚本、修挡启动的明显错误，再后台拉起。\n` +
+      `3) 需要用户拍板时立刻互动：调用 ask_user_choice 给出 2～4 个具体选项，例如「项目内建 .venv（推荐）」「pip install --user 到用户目录」「只写启动命令由我自己装」「其它（用户自填）」。答完再执行，禁止干等、禁止用长文代替选择题。\n` +
+      `4) 典型坑要换路：WinError 5 / Access is denied、全局 site-packages 污染、缺 API Key 导致 import 失败——不要重复同一条失败命令；换 venv/--user、或问用户补密钥/选方案。\n` +
+      terminalProblemHandlingInstructions() +
+      `长驻进程必须后台启动并立刻把终端还回来。装依赖要有输出；若长时间无进展，缩小依赖集、换源或改方案，不要空等挂死。\n` +
+      `外部服务（远程库/Docker/云）本机实在起不来：结论写清根因 + 已尝试 + 用户可选下一步后收口，仍禁止只抛原始报错。\n` +
+      `禁止 git commit / push；禁止与启动无关的大重构；尽量不换用户已在用的端口，禁止无必要地再起第二套同名服务。\n`
+    )
+  }
+  if (kind === 'test') {
+    return (
+      `本轮只跑测试。先找项目已有的测试脚本（package.json scripts、pytest、unittest 等），用项目自己的命令执行，汇报通过/失败与关键输出。\n` +
+      `不要为了跑测试去改源代码或测试文件。不要顺手重启前后端，除非测试命令本身会短时拉起再退出。\n`
+    )
+  }
+  if (kind === 'install') {
+    return (
+      `本轮只安装依赖。先确认该装哪一侧（frontend / backend / 仓库根），再用目录里已有的包管理器与锁文件执行安装（npm/pnpm/yarn/pip/poetry/uv 等）。\n` +
+      `结论须写清：安装目录、实际命令、退出是否成功；若 lock/venv 有变化，只如实记录，不要顺手提交。\n` +
+      `不要升级无关大版本，不要改业务源代码，不要改启动端口或重写配置，不要顺手重启服务（除非用户本句明确要求重启）。\n`
+    )
+  }
+  if (kind === 'logs') {
+    return (
+      `本轮只看日志。定位项目已有的日志文件或正在跑的终端输出，摘出与诉求相关的关键行并说明含义。\n` +
+      `不要清空、轮转或删除日志，不要改配置，不要重启服务。\n`
+    )
+  }
+  if (kind === 'env') {
+    return (
+      `本轮只查环境。核对本机/项目里的运行时、虚拟环境、关键端口和配置是否齐，把结果写清楚。\n` +
+      `不要安装依赖（除非用户明确要求安装），不要改文件，不要重启服务。\n`
+    )
+  }
+  if (kind === 'troubleshoot') {
+    return (
+      `本轮只排障定位，不修代码。按现象→证据→根因→下一步建议来写结论；证据优先来自项目日志、现有终端输出、配置与端口现状。\n` +
+      `若根因是依赖缺失，只说明该装什么，不要本轮擅自安装（除非用户本句明确要求安装）。若必须改代码才能修好，只写建议改什么，本轮不要改文件。\n` +
+      `不要为了验证去改端口、清日志、另起第二套服务，也不要在未确认前强行重启。\n`
+    )
+  }
+  return (
+    `只做这句诉求里的那一件，做完就停。用项目现有脚本、日志和终端，不要为了看结果去改文件。\n` +
+    `排障时写清根因；若必须改代码，只在结论里说明该改什么，本轮不要改。\n` +
+    `若诉求是启动/重启：长驻进程必须后台启动并立刻把终端还回来；禁止换端口，禁止再起第二套服务。\n`
+  )
 }
 
 export function buildOpsPrompt(opts: {
   requirement: string
   workspace: string
-  /** 插件未认出启动命令后的降级：更贴近 Cursor IDE 自己翻仓库找启动方式 */
+  /** 插件未认出启动命令 / 或已试但未起来后的降级：更贴近 Cursor IDE */
   restartFallback?: boolean
+  /** 插件侧已尝试的结果摘要，写入降级提示供 Cursor 接着排障 */
+  restartAttemptDetail?: string
+  /** 已判定 ops 后的细类；缺省按诉求再判 */
+  terminalKind?: OpsTerminalKind
 }): string {
   const req = String(opts.requirement || '').trim()
-  const fallbackNote = opts.restartFallback
-    ? `插件已经扫过常见的 package.json / Vite / uvicorn / Django 启动方式，没有直接认出命令。` +
-      `请像 Cursor IDE 一样继续处理这个启动/重启诉求：读 README、脚本、compose、Makefile、现有终端和配置，找出项目自己的启动方式再后台拉起。` +
-      `仍然禁止编造与本项目无关的命令，禁止为了启动去改代码。\n`
-    : ''
+  const kind = opts.terminalKind || classifyOpsTerminal(req)
+  const restartMode = Boolean(opts.restartFallback) || kind === 'restart'
+  const noEditLine = opts.restartFallback
+    ? `本轮为启动/重启降级：允许为启动安装依赖、创建项目内 venv、编写/修改启动脚本，以及修复挡启动的明显错误；禁止 git commit / push；禁止与启动无关的大范围改动。\n\n`
+    : `禁止修改、创建、删除任何源代码或配置。禁止 git commit / push。\n\n`
+  const conclusionLine = restartMode
+    ? `说明方案须含：**结论**（起来了 / 卡在哪）、**根因**（若未起来：缺包/权限/配置等一句话）、**做了什么**（诊断与处理步骤，含是否已 AskQuestion）、**验收或下一步**（已起来则给地址；未起来且需用户参与则写清已给出的选项或待用户补的信息——禁止只贴原始 traceback）。\n`
+    : `说明方案须含：**结论**（结果一句话）、**做了什么**（实际执行了什么，含装依赖/写脚本若有）、**验收**（用户怎么确认，含可访问地址若已起来）。\n`
   return (
     `你是 Cursor IDE 里的 Agent，工作目录就是用户正在用的真实项目：${opts.workspace}\n` +
-    `本轮没有要求改代码。按 Cursor IDE 处理这类开发任务：先看仓库已有的脚本、配置和正在跑的终端，沿用项目自己的命令，不要另起一套工具链。\n` +
-    fallbackNote +
-    `可以做的事包括：启动或重启前后端、把项目跑起来、跑测试、安装依赖、看日志、查环境、排障。只做这句诉求里的那一件，做完就停。\n` +
-    `启动或重启时：读配置确认现有端口和启动命令；停掉占用该端口、且工作目录在本项目里的进程；用原来的命令和端口在后台拉起。要前后端就两边都处理。\n` +
-    `跑测试、装依赖、看日志、查环境、排障：用项目现有脚本和日志，不要为了看结果去改文件。排障时写清根因；若必须改代码，只在结论里说明该改什么，本轮不要改。\n` +
-    `禁止修改、创建、删除任何源代码或配置。禁止 git commit / push。\n` +
-    `长驻进程必须后台启动并立刻把终端还回来。禁止前台挂住 uvicorn 或 npm run dev。禁止换端口，禁止再起第二套服务。\n\n` +
+    `按 Cursor IDE 处理这类开发任务：先看仓库已有的脚本、配置和正在跑的终端，用项目自己的方式推进，不要死守某一种固定模板。\n` +
+    opsKindInstructions(kind, Boolean(opts.restartFallback), opts.restartAttemptDetail) +
+    (restartMode ? '' : terminalProblemHandlingInstructions()) +
+    noEditLine +
     `【用户诉求】\n` +
     `<USER_REQUEST>\n${req}\n</USER_REQUEST>\n\n` +
     `终稿第一行恰好是：## 说明方案\n` +
-    `说明方案须含：**结论**（结果一句话）、**做了什么**（按 Cursor 实际执行了什么，未改代码）、**验收**（用户怎么确认，2～4 步）。不要列改动文件。\n`
+    conclusionLine
   )
 }

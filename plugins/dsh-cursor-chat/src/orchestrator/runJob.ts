@@ -1,18 +1,20 @@
 import { createHash } from 'node:crypto'
-import { loadConfig } from '../config.js'
+import { allowMockDelivery, loadConfig } from '../config.js'
 import { clampAssistantText, mergeAssistantDelta } from '../assistantText.js'
 import { buildPrompt, runCursorLocal, type CursorRunEvent } from '../cursor/runner.js'
 import { buildLiveEditSnippet, shouldAttachEditSnippet } from '../editSnippet.js'
 import { nudgeAfterSync } from '../viteNudge.js'
 import { readBackendPortFromViteProxy, settleBackendRestartAfterSync } from '../backendRestart.js'
 import { portOpen, readFrontendDevPort, runServiceCheck, type ServiceCheck } from '../serviceEnsure.js'
-import { startRequestedServices } from '../opsRestart.js'
+import { planProjectServices, startRequestedServices } from '../opsRestart.js'
 import {
   buildOpsPrompt,
+  classifyOpsTerminal,
   classifyWork,
   codingParentLink,
   isInventoryOnlyRequirement,
   opsPortExpectation,
+  opsRunningStatus,
   opsWantsRunningService,
 } from '../workKind.js'
 import { appendEvent, forceCancelJob, listJobs, loadJob, patchJob, setStatus } from '../jobs.js'
@@ -53,7 +55,17 @@ import {
   recordFailures,
 } from '../preferences.js'
 import { finishAudit, probeLiveAudit } from '../completionAudit.js'
-import { auditBlocksDelivery, runDeliveryAudit } from '../deliveryAudit.js'
+import {
+  auditBlocksDelivery,
+  auditNeedsRepair,
+  buildAuditRepairPrompt,
+  fixableAuditFailures,
+  runDeliveryAudit,
+  type DeliveryAuditResult,
+} from '../deliveryAudit.js'
+import { verifyPageSizeContractOnTarget } from '../paramContractVerify.js'
+import { verifySchemaDriftOnTarget } from '../schemaDriftVerify.js'
+import { verifyApiMountedOnTarget } from '../apiVerify.js'
 import {
   applyDeletesToTarget,
   diffSnapshots,
@@ -492,6 +504,8 @@ async function enterReviewFromDiff(
     mocked?: boolean
     error?: string
     idle_timed_out?: boolean
+    agent_id?: string
+    run_id?: string
   },
 ): Promise<void> {
   patchJob(jobId, {
@@ -530,6 +544,20 @@ async function enterReviewFromDiff(
       forceCancelJob(jobId)
       return
     }
+  }
+
+  if (cre.mocked && !allowMockDelivery()) {
+    const detail =
+      '写码进入了 Mock 模式，已中止同步以免污染工程。请完全退出客户端后重开，确认未设置 CURSOR_CHAT_MOCK 后再试。'
+    setStatus(loadJob(jobId)!, 'failed', detail)
+    patchJob(jobId, {
+      assistant_text: cre.text || loadJob(jobId)?.assistant_text || '',
+      review_gate: null,
+      last_synced_files: [],
+      synced_files: [],
+    })
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+    return
   }
 
   const after = snapshotSandbox(meta.sandbox)
@@ -616,11 +644,13 @@ async function enterReviewFromDiff(
             deferred_files: [],
             assistant_text: job.assistant_text,
           })
-          if (auditBlocksDelivery(audit)) {
+          if (auditBlocksDelivery(audit) || auditNeedsRepair(audit)) {
             const detail =
               `${audit.detail}` +
               (compileNote ? `；${compileNote}` : '') +
-              '。已拦截假完成，请按审计项续改。'
+              (auditNeedsRepair(audit) && !auditBlocksDelivery(audit)
+                ? '。审计未过且空跑补同步路径无法自动续修，已标未完成。'
+                : '。已拦截假完成，请按审计项续改。')
             patchJob(jobId, {
               review_gate: null,
               changed_files: [...new Set([...(diff.changed || []), ...synced])],
@@ -761,7 +791,7 @@ async function enterReviewFromDiff(
     }),
   })
 
-  const applied = applyJobReview({
+  let applied = applyJobReview({
     job_id: jobId,
     accept,
     expand_scope: promoted,
@@ -773,9 +803,29 @@ async function enterReviewFromDiff(
       await foldLiveAudit(jobId)
       return
     }
-    patchJob(jobId, { review_gate: 'auto_failed' })
-    setStatus(loadJob(jobId)!, 'pending_review', applied.detail || '自动同步失败，请手动同步')
-    return
+    // 可修审计：Cursor 续修沙箱 → 再同步 → 再验；不得把审计问题留给用户
+    if (applied.code === 'audit_repair') {
+      const emit = bindEmit(jobId)
+      const repaired = await repairAuditAndReapply({
+        jobId,
+        meta,
+        before,
+        cre,
+        emit,
+        firstAccept: accept,
+        promoted,
+        audit: applied.audit,
+      })
+      if (!repaired.ok) {
+        await foldLiveAudit(jobId)
+        return
+      }
+      applied = repaired.applied
+    } else {
+      patchJob(jobId, { review_gate: 'auto_failed' })
+      setStatus(loadJob(jobId)!, 'pending_review', applied.detail || '自动同步失败，请手动同步')
+      return
+    }
   }
 
   let compileNote = ''
@@ -814,6 +864,124 @@ async function enterReviewFromDiff(
   )
 }
 
+/**
+ * 审计可修失败 → Cursor 续修一轮 → 按新 diff 再同步。
+ * 仍失败则标 failed（不甩「已完成+审计❌」给用户）。
+ */
+async function repairAuditAndReapply(opts: {
+  jobId: string
+  meta: PrepareResult
+  before: ReturnType<typeof snapshotSandbox>
+  cre: {
+    ok: boolean
+    text: string
+    thinking: string
+    agent_id?: string
+    run_id?: string
+    error?: string
+    mocked?: boolean
+  }
+  emit: (ev: CursorRunEvent) => void
+  firstAccept: string[]
+  promoted: string[]
+  audit?: DeliveryAuditResult
+}): Promise<
+  | { ok: true; applied: Extract<ApplyResult, { ok: true }> }
+  | { ok: false }
+> {
+  const { jobId, meta, before, cre, emit, promoted, audit } = opts
+  const cfg = loadConfig()
+  const job = loadJob(jobId)
+  if (!job?.sandbox_path) return { ok: false }
+  const failures = fixableAuditFailures(audit)
+  if (!failures.length || process.env.CURSOR_CHAT_MOCK === '1') {
+    const detail = audit?.detail || '交付审计未通过'
+    setStatus(loadJob(jobId)!, 'failed', detail)
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+    return { ok: false }
+  }
+  if (!cre.agent_id && !cfg.cursorApiKey) {
+    const detail = `${audit?.detail || '交付审计未通过'}（无法续修：无 Agent）`
+    setStatus(loadJob(jobId)!, 'failed', detail)
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+    return { ok: false }
+  }
+
+  emit({ type: 'status', message: '交付审计未过，自动续修…' })
+  setStatus(loadJob(jobId)!, 'running', '审计续修中…')
+  const repairCre = await runCursorLocal({
+    sandbox: meta.sandbox,
+    apiKey: cfg.cursorApiKey,
+    prompt: buildAuditRepairPrompt(job.requirement, failures),
+    resumeAgentId: cre.agent_id,
+    model: cfg.model,
+    userPreface: job.requirement,
+    ledgerJobId: `${jobId}-audit-repair`,
+    onEvent: emit,
+    isCancel: () => Boolean(loadJob(jobId)?.cancelled),
+  })
+  if (loadJob(jobId)?.cancelled || repairCre.error === '已取消') {
+    forceCancelJob(jobId)
+    return { ok: false }
+  }
+  if (repairCre.text) {
+    patchJob(jobId, {
+      assistant_text: clampAssistantText(repairCre.text),
+      agent_id: repairCre.agent_id || cre.agent_id || null,
+    })
+  }
+
+  const after = snapshotSandbox(meta.sandbox)
+  const diff = diffSnapshots(before, after)
+  const writeScope = expandWriteScopeWithCompanions(loadJob(jobId)!.write_scope || [])
+  const { inScope: inScope0, deferred: deferred0 } = partitionChangedPaths(diff.changed, writeScope)
+  const deletedPart = partitionChangedPaths(diff.deleted, writeScope)
+  const morePromoted = selectCompanionPromotions(inScope0, deferred0, writeScope)
+  const promoteSet = new Set([...promoted, ...morePromoted])
+  const inScope = [...inScope0, ...morePromoted.filter((p) => !inScope0.includes(p))]
+  const deferred = deferred0.filter((p) => !promoteSet.has(normalizeRel(p)))
+  patchJob(jobId, {
+    changed_files: diff.changed,
+    deleted_files: diff.deleted,
+    deferred_files: deferred,
+    review_in_scope: inScope,
+    review_deleted: deletedPart.inScope,
+    review_deferred: [...deferred, ...deletedPart.deferred],
+    write_scope: normalizeWriteScope([...writeScope, ...morePromoted]),
+  })
+
+  // 回到 pending_review 才能再 apply
+  setStatus(loadJob(jobId)!, 'pending_review', '审计续修后重新同步…')
+  patchJob(jobId, { review_gate: 'auto_applying' })
+  const accept = [...new Set([...inScope, ...deletedPart.inScope])]
+  if (!accept.length) {
+    const detail = '审计续修后无可同步变更，交付仍未通过'
+    setStatus(loadJob(jobId)!, 'failed', detail)
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+    return { ok: false }
+  }
+  const applied2 = applyJobReview({
+    job_id: jobId,
+    accept,
+    expand_scope: [...promoted, ...morePromoted],
+    seal: false,
+  })
+  if (applied2.ok) {
+    emit({ type: 'status', message: '审计续修后已通过 ✅' })
+    return { ok: true, applied: applied2 }
+  }
+  // 续修后仍要修 / 硬失败 → 收口为未完成，不留给用户当已完成
+  const detail = applied2.detail || audit?.detail || '交付审计续修后仍未通过'
+  if (applied2.code === 'audit_repair' || applied2.code === 'delivery_audit') {
+    setStatus(loadJob(jobId)!, 'failed', detail)
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+    return { ok: false }
+  }
+  setStatus(loadJob(jobId)!, 'failed', detail)
+  appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+  return { ok: false }
+}
+
 
 async function probeDevPorts(
   workspace: string,
@@ -821,12 +989,27 @@ async function probeDevPorts(
 ): Promise<{ missing: string[]; line: string }> {
   const fe = expect.frontend ? readFrontendDevPort(workspace) : null
   const be = expect.backend ? readBackendPortFromViteProxy(workspace) : null
-  const read = async () => ({
-    feUp: fe ? await portOpen(fe) : false,
-    beUp: be ? await portOpen(be) : false,
-  })
+  // 无 vite 前后端端口时（如 Gradio 单仓），用项目启动计划里的端口探测
+  const appPorts =
+    !fe && !be
+      ? planProjectServices(workspace, expect)
+          .plans.map((p) => ({ label: p.label, port: p.port }))
+          .filter((p): p is { label: string; port: number } => typeof p.port === 'number' && p.port > 0)
+      : []
+  const read = async () => {
+    const base = {
+      feUp: fe ? await portOpen(fe) : false,
+      beUp: be ? await portOpen(be) : false,
+      app: [] as boolean[],
+    }
+    for (const ap of appPorts) {
+      base.app.push(await portOpen(ap.port))
+    }
+    return base
+  }
   let snap = await read()
-  const down = (fe && !snap.feUp) || (be && !snap.beUp)
+  const down =
+    (fe && !snap.feUp) || (be && !snap.beUp) || appPorts.some((_, i) => !snap.app[i])
   if (down) {
     await new Promise((r) => setTimeout(r, 8000))
     snap = await read()
@@ -840,6 +1023,12 @@ async function probeDevPorts(
   if (be) {
     parts.push(`后端 ${be}${snap.beUp ? ' 在听' : ' 未监听'}`)
     if (!snap.beUp) missing.push('后端')
+  }
+  for (let i = 0; i < appPorts.length; i++) {
+    const ap = appPorts[i]!
+    const up = Boolean(snap.app[i])
+    parts.push(`${ap.label}${up ? ' 在听' : ' 未监听'}`)
+    if (!up) missing.push(ap.label)
   }
   return { missing, line: parts.join('；') }
 }
@@ -859,6 +1048,7 @@ async function executeOpsJob(jobId: string): Promise<void> {
       return
     }
     let restartFallback = false
+    let restartAttemptDetail = ''
     if (opsWantsRunningService(job.requirement)) {
       setStatus(job, 'running', '正在按项目命令重启，不改代码…')
       emit({ type: 'status', message: '本轮是开发操作，不准备写码沙箱' })
@@ -866,7 +1056,23 @@ async function executeOpsJob(jobId: string): Promise<void> {
         job.workspace,
         opsPortExpectation(job.requirement),
         () => Boolean(loadJob(jobId)?.cancelled),
-        (message) => emit({ type: 'status', message }),
+        undefined,
+        (ev) => {
+          if (ev.type === 'status' && ev.message) {
+            emit({ type: 'status', message: ev.message })
+            return
+          }
+          if (ev.type === 'command' && ev.command) {
+            emit({
+              type: 'tool_event',
+              name: 'Shell',
+              command: ev.command,
+              snippet: ev.snippet,
+              tool_status: ev.tool_status || 'running',
+              call_id: ev.call_id,
+            })
+          }
+        },
       )
       const fresh = loadJob(jobId)
       if (fresh?.cancelled || started.detail === '用户取消') {
@@ -876,57 +1082,77 @@ async function executeOpsJob(jobId: string): Promise<void> {
       if (started.ok) {
         const probe = await probeDevPorts(job.workspace, opsPortExpectation(job.requirement))
         if (probe.missing.length) {
-          const detail = `${started.detail} ${probe.line}`.trim()
-          setStatus(loadJob(jobId)!, 'failed', detail)
-          appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+          // 插件以为起来了但探测仍缺：降级 Cursor 灵活处理，不直接判死
+          restartFallback = true
+          restartAttemptDetail = `${started.detail} ${probe.line}`.trim()
+          setStatus(loadJob(jobId)!, 'running', '端口探测未齐，改由 Cursor 继续处理…')
+          emit({
+            type: 'status',
+            message: '插件已拉起，但端口探测未齐，改由 Cursor 按 IDE 方式继续排查并重启…',
+          })
+        } else {
+          const detail = started.detail.includes('已在听')
+            ? started.detail
+            : probe.line
+              ? `${started.detail} ${probe.line}`
+              : started.detail
+          setStatus(loadJob(jobId)!, 'succeeded', detail)
+          appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
           return
         }
-        const detail = started.detail.includes('已在听')
-          ? started.detail
-          : probe.line
-            ? `${started.detail} ${probe.line}`
-            : started.detail
-        setStatus(loadJob(jobId)!, 'succeeded', detail)
-        appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
-        return
-      }
-      // 一张计划都认不出：降级 Cursor IDE 式处理，禁止需求落空
-      if (started.no_commands) {
+      } else if (started.no_commands || started.start_failed) {
+        // 认不出命令，或认出命令但没起来：都降级 Cursor（可见过程 + 灵活排障）
         restartFallback = true
-        setStatus(loadJob(jobId)!, 'running', '未认出项目启动命令，改由 Cursor 在项目终端处理…')
+        restartAttemptDetail = started.detail
+        const why = started.no_commands ? '未认出项目启动命令' : '按项目命令重启未全部起来'
+        setStatus(loadJob(jobId)!, 'running', `${why}，改由 Cursor 在项目终端处理…`)
         emit({
           type: 'status',
-          message: '项目里没有现成启动命令，改由 Cursor 按 IDE 方式在项目终端处理…',
+          message: `${why}，改由 Cursor 按 IDE 方式在项目终端继续处理…`,
         })
       } else {
-        // 已认出命令但没拉起来：带日志失败，不再降级瞎搜
         setStatus(loadJob(jobId)!, 'failed', started.detail)
         appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: started.detail })
         return
       }
     } else {
-      setStatus(job, 'running', '正在项目终端处理，不改代码…')
+      const terminalKind = classifyOpsTerminal(job.requirement)
+      setStatus(job, 'running', opsRunningStatus(terminalKind))
       emit({ type: 'status', message: '本轮是开发操作，不准备写码沙箱' })
     }
+    job = loadJob(jobId)
+    if (!job) return
+    const terminalKind = restartFallback
+      ? ('restart' as const)
+      : classifyOpsTerminal(job.requirement)
+    const restartWanted = opsWantsRunningService(job.requirement)
+    const opsWorkspace = job.workspace
+    const opsRequirement = job.requirement
+    const opsImages = job.images
     const { toSdkImages } = await import('../images.js')
-    const cre = await runCursorLocal({
-      sandbox: job.workspace,
-      apiKey: cfg.cursorApiKey,
-      prompt: buildOpsPrompt({
-        requirement: job.requirement,
-        workspace: job.workspace,
-        restartFallback,
-      }),
-      model: cfg.model,
-      userPreface: job.requirement,
-      images: toSdkImages(job.images),
-      ledgerJobId: jobId,
-      phase: 'ops',
-      idleMs: 3 * 60_000,
-      absoluteMaxMs: 6 * 60_000,
-      onEvent: emit,
-      isCancel: () => Boolean(loadJob(jobId)?.cancelled),
-    })
+    const runOpsCursor = async (attemptDetail: string) =>
+      runCursorLocal({
+        sandbox: opsWorkspace,
+        apiKey: cfg.cursorApiKey,
+        prompt: buildOpsPrompt({
+          requirement: opsRequirement,
+          workspace: opsWorkspace,
+          restartFallback: restartFallback || restartWanted,
+          restartAttemptDetail: attemptDetail,
+          terminalKind,
+        }),
+        model: cfg.model,
+        userPreface: opsRequirement,
+        images: toSdkImages(opsImages),
+        ledgerJobId: jobId,
+        phase: 'ops',
+        // 重启走 Cursor IDE：允许装依赖/写脚本，心跳续命；绝对上限防永久挂死
+        idleMs: restartWanted ? 90_000 : 3 * 60_000,
+        absoluteMaxMs: restartWanted ? 12 * 60_000 : 6 * 60_000,
+        onEvent: emit,
+        isCancel: () => Boolean(loadJob(jobId)?.cancelled),
+      })
+    let cre = await runOpsCursor(restartAttemptDetail)
     patchJob(jobId, {
       agent_id: cre.agent_id || null,
       run_id: cre.run_id || null,
@@ -941,39 +1167,83 @@ async function executeOpsJob(jobId: string): Promise<void> {
       forceCancelJob(jobId)
       return
     }
-    if (transcriptMutatedProject(cre.transcript || [])) {
-      const detail = '这次是开发操作，Cursor 已经改到真实项目上的文件，这些改动还在磁盘上，本轮结果不采用。改代码请另说具体要改什么。'
-      setStatus(loadJob(jobId)!, 'failed', detail)
-      appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
-      return
+    let probe = restartWanted
+      ? await probeDevPorts(opsWorkspace, opsPortExpectation(opsRequirement))
+      : { missing: [] as string[], line: '' }
+    // 重启仍未起来：再给 Cursor 一次完整 IDE 式机会（可装依赖、可写启动脚本）
+    const needRestartRetry =
+      restartWanted &&
+      restartFallback &&
+      !Boolean(loadJob(jobId)?.cancelled) &&
+      (cre.idle_timed_out || (cre.ok && probe.missing.length > 0) || !cre.ok)
+    if (needRestartRetry) {
+      const why = cre.idle_timed_out
+        ? '上一轮等待超时或依赖安装疑似网络挂死，尚未确认服务在听'
+        : probe.missing.length
+          ? `上一轮后仍未在听：${probe.line || probe.missing.join('、')}`
+          : `上一轮未完成：${cre.error || '无结果'}`
+      emit({
+        type: 'status',
+        message: `${why}。继续按 Cursor IDE 方式处理：可装依赖、可写启动脚本，直到服务起来…`,
+      })
+      setStatus(loadJob(jobId)!, 'running', '重启未成功，继续由 Cursor 灵活处理…')
+      cre = await runOpsCursor(
+        `${why}\n请像 Cursor IDE 一样继续排查并处理：先读日志/报错定根因，再针对性装最小依赖、建 venv 或写启动脚本，后台拉起。` +
+          `若刚才整包安装挂死或遇 WinError 5：不要重复同一命令；缩小依赖集，或立刻 ask_user_choice 让用户选「项目内 .venv / pip --user / 自行安装」。` +
+          `需要密钥或用户决策时必须互动，禁止只把问题抛回；外部依赖不可用则写清根因与可选下一步后收口，不要空等。`,
+      )
+      patchJob(jobId, {
+        agent_id: cre.agent_id || null,
+        run_id: cre.run_id || null,
+        assistant_text: clampAssistantText(
+          [String(loadJob(jobId)?.assistant_text || ''), cre.text || ''].filter(Boolean).join('\n\n'),
+        ),
+        thinking_text: clampText(cre.thinking || ''),
+      })
+      job = loadJob(jobId)
+      if (!job || job.cancelled || cre.error === '已取消') {
+        if (job?.cancelled || cre.error === '已取消') forceCancelJob(jobId)
+        return
+      }
+      probe = await probeDevPorts(opsWorkspace, opsPortExpectation(opsRequirement))
     }
-    if (!cre.ok) {
+    if (!cre.ok && !(restartWanted && !probe.missing.length)) {
       const detail = cre.error || '开发操作未完成'
       setStatus(loadJob(jobId)!, 'failed', detail)
       appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
       return
     }
-    const restart = opsWantsRunningService(job.requirement)
-    const probe = restart
-      ? await probeDevPorts(job.workspace, opsPortExpectation(job.requirement))
-      : { missing: [] as string[], line: '' }
-    if (cre.idle_timed_out && !String(cre.text || '').trim()) {
+    const mutated = transcriptMutatedProject(cre.transcript || [])
+    // 非重启降级：改文件一律不采用。重启降级且端口已齐：允许为启动做的最小改动。
+    if (mutated && !(restartWanted && restartFallback && !probe.missing.length)) {
+      const detail = probe.missing.length
+        ? `为启动改过文件，但${probe.missing.join('、')}仍未在听。改动还在磁盘上。${probe.line}`
+        : '这次是开发操作，Cursor 已经改到真实项目上的文件，这些改动还在磁盘上，本轮结果不采用。改代码请另说具体要改什么。'
+      setStatus(loadJob(jobId)!, 'failed', detail)
+      appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+      return
+    }
+    if (cre.idle_timed_out && !String(cre.text || '').trim() && probe.missing.length) {
       const detail = probe.line
-        ? `Cursor 还没在终端里执行，等待超时。${probe.line}`
-        : '开发操作未完成：等待超时，且没有可用结果。'
+        ? `重启未完成：等待超时且服务未在听。${probe.line} 请根据结论中的原因处理后，再说「重启服务」。`
+        : '重启未完成：等待超时，且没有可用结果。请说明环境后重试。'
       setStatus(loadJob(jobId)!, 'failed', detail)
       appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
       return
     }
-    if (restart && probe.missing.length) {
-      const detail = `终端已执行，但${probe.missing.join('、')}没有在听。${probe.line}`
+    if (restartWanted && probe.missing.length) {
+      const detail =
+        `重启未成功：${probe.missing.join('、')}没有在听。${probe.line}` +
+        ` 结论应已写清根因与已尝试处理；若仍缺决策（venv/装法/密钥），按结论里的选项回复后再说「重启服务」。`
       setStatus(loadJob(jobId)!, 'failed', detail)
       appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
       return
     }
-    const detail = probe.line
-      ? `已在项目目录完成开发操作，未改代码。${probe.line}`
-      : '已在项目目录完成开发操作，未改代码。'
+    const detail = mutated
+      ? `已在项目目录完成重启；为启动做了必要处理。${probe.line}`.trim()
+      : probe.line
+        ? `已在项目目录完成开发操作，未改代码。${probe.line}`
+        : '已在项目目录完成开发操作，未改代码。'
     setStatus(loadJob(jobId)!, 'succeeded', detail)
     appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
   } catch (err) {
@@ -1135,6 +1405,22 @@ async function executeJob(jobId: string): Promise<void> {
       return
     }
 
+    // 正式工程禁止 Mock 落盘：误继承 CURSOR_CHAT_MOCK 时不得把 .cursor-chat-mock.md 同步进真仓库
+    if (cre.mocked && !allowMockDelivery()) {
+      const detail =
+        '写码进入了 Mock 模式，已中止同步以免污染工程。请完全退出客户端后重开，确认未设置 CURSOR_CHAT_MOCK 后再试。'
+      emit({ type: 'error', message: detail })
+      setStatus(loadJob(jobId)!, 'failed', detail)
+      patchJob(jobId, {
+        assistant_text: cre.text || '',
+        review_gate: null,
+        last_synced_files: [],
+        synced_files: [],
+      })
+      appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+      return
+    }
+
     // ========== 删除分支 ②：Cursor 结束 → 解析清单 → 引擎强制执行 ==========
     // 只有删除 intent 才走。普通写码任务不受影响。
     if (deletePreflight && cre.ok) {
@@ -1254,6 +1540,67 @@ async function executeJob(jobId: string): Promise<void> {
           const afterRetry = snapshotSandbox(meta.sandbox)
           diff = diffSnapshots(before, afterRetry)
           changed = diff.changed
+        }
+      }
+
+      // ②b 沙箱交付预检（分页契约等）失败则先续修，避免把 422 同步进真工程再甩给用户
+      if (!mockMode && cre.agent_id && changed.length > 0 && !process.env.CURSOR_CHAT_SKIP_AUDIT_REPAIR) {
+        const pageSize = verifyPageSizeContractOnTarget(meta.sandbox, {
+          synced_files: changed,
+          backendRoot: job.workspace,
+        })
+        const api = verifyApiMountedOnTarget(meta.sandbox, job.requirement, {
+          synced_files: changed,
+        })
+        const schema = verifySchemaDriftOnTarget(job.workspace, {
+          synced_files: changed,
+          modelRoot: meta.sandbox,
+          dbRoot: job.workspace,
+        })
+        const preFails: { name: string; detail: string }[] = []
+        if (!pageSize.ok) preFails.push({ name: 'param_contract', detail: pageSize.detail })
+        if (!api.ok && api.detail) preFails.push({ name: 'api_mount', detail: api.detail })
+        if (!schema.ok) preFails.push({ name: 'schema_drift', detail: schema.detail })
+        if (preFails.length) {
+          emit({ type: 'status', message: '沙箱审计未过，自动续修…' })
+          const repairCre = await runCursorLocal({
+            sandbox: meta.sandbox,
+            apiKey: cfg.cursorApiKey,
+            prompt: buildAuditRepairPrompt(job.requirement, preFails),
+            resumeAgentId: cre.agent_id,
+            model: cfg.model,
+            userPreface: job.requirement,
+            ledgerJobId: `${jobId}-pre-audit-repair`,
+            onEvent: emit,
+            isCancel: () => Boolean(loadJob(jobId)?.cancelled),
+          })
+          if (repairCre.ok) {
+            cre.text = repairCre.text || cre.text
+            const afterPre = snapshotSandbox(meta.sandbox)
+            diff = diffSnapshots(before, afterPre)
+            changed = diff.changed
+            // 续修后必须再验一遍，避免带着原问题进入同步
+            const pageSize2 = verifyPageSizeContractOnTarget(meta.sandbox, {
+              synced_files: changed,
+              backendRoot: job.workspace,
+            })
+            const api2 = verifyApiMountedOnTarget(meta.sandbox, job.requirement, {
+              synced_files: changed,
+            })
+            const schema2 = verifySchemaDriftOnTarget(job.workspace, {
+              synced_files: changed,
+              modelRoot: meta.sandbox,
+              dbRoot: job.workspace,
+            })
+            const stillBad =
+              (!pageSize2.ok ? 1 : 0) + (!api2.ok && api2.detail ? 1 : 0) + (!schema2.ok ? 1 : 0)
+            emit({
+              type: 'status',
+              message: stillBad
+                ? '沙箱审计续修后仍有问题，将在同步后再次审计续修'
+                : '沙箱审计续修完成，继续后续检查…',
+            })
+          }
         }
       }
 
@@ -1438,6 +1785,8 @@ export type ApplyResult =
       code?: string
       synced_files?: string[]
       deleted_files?: string[]
+      /** code=audit_repair 时带回，供调用方续修后再同步 */
+      audit?: DeliveryAuditResult
     }
 
 /**
@@ -1565,6 +1914,26 @@ export function applyJobReview(opts: {
         code: 'delivery_audit',
         synced_files: synced,
         deleted_files: deleted,
+      }
+    }
+    // 可修审计失败：先落盘证据，交调用方 Cursor 续修后再同步，禁止「已完成+审计❌」甩给用户
+    if (auditNeedsRepair(audit)) {
+      patchJob(job.id, {
+        write_scope: effectiveScope,
+        synced_files: synced,
+        last_synced_files: synced,
+        deferred_files: deferredLeft,
+        delivery_audit: audit,
+        backend_restart: null,
+        backend_restart_hint: settled.hint || null,
+      })
+      return {
+        ok: false,
+        detail: audit.detail || '交付审计未通过，需续修',
+        code: 'audit_repair',
+        synced_files: synced,
+        deleted_files: deleted,
+        audit,
       }
     }
     const detail =

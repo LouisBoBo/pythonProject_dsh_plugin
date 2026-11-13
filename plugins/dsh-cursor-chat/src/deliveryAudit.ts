@@ -14,6 +14,8 @@ import {
 import { isDeleteIntent } from './deleteIntent.js'
 import { verifyAddMenuOnTarget } from './menuVerify.js'
 import { finishAudit, requirementEvidenceChecks } from './completionAudit.js'
+import { verifyPageSizeContractOnTarget } from './paramContractVerify.js'
+import { verifySchemaDriftOnTarget } from './schemaDriftVerify.js'
 import { verifySyncedFingerprints } from './sandbox.js'
 
 export type DeliveryAuditCheck = {
@@ -39,12 +41,57 @@ export type DeliveryAuditInput = {
   assistant_text?: string
 }
 
-/** 只有落盘本身没对上时，结果才算未完成。其余核对留在审计行。 */
+/** 只有落盘/删除验尸没对上时，结果才算未完成（修不了只能失败）。 */
 const LANDING_CHECK = new Set(['synced_bytes', 'delete_target'])
+
+/**
+ * 可交给 Cursor 续修的审计项。
+ * 流程：写码 → 审计发现问题 → 自动续修 → 再验；禁止把这些问题留给用户。
+ */
+export const FIXABLE_AUDIT = new Set([
+  'param_contract',
+  'api_mount',
+  'menu',
+  'requirement_page',
+  'schema_drift',
+])
 
 export function auditBlocksDelivery(audit: { ok: boolean; checks?: { name: string; ok: boolean }[] } | null | undefined): boolean {
   if (!audit || audit.ok) return false
   return (audit.checks || []).some((check) => LANDING_CHECK.has(check.name) && check.ok === false)
+}
+
+export function fixableAuditFailures(
+  audit: { checks?: { name: string; ok: boolean; detail: string }[] } | null | undefined,
+): { name: string; ok: boolean; detail: string }[] {
+  return (audit?.checks || []).filter((c) => c && c.ok === false && FIXABLE_AUDIT.has(c.name))
+}
+
+/** 还有可修的审计失败 → 不得标「已完成」，须续修后再验。 */
+export function auditNeedsRepair(
+  audit: { ok?: boolean; checks?: { name: string; ok: boolean; detail: string }[] } | null | undefined,
+): boolean {
+  return fixableAuditFailures(audit).length > 0
+}
+
+/** 把审计失败项写成 Cursor 续修提示（只含权威检查 detail，不扫用户正文）。 */
+export function buildAuditRepairPrompt(
+  requirement: string,
+  failures: { name: string; detail: string }[],
+): string {
+  const lines = failures
+    .map((f) => `- [${f.name}] ${String(f.detail || '').trim()}`)
+    .filter((l) => l.length > 4)
+  return (
+    `交付审计未通过，请在沙箱内直接修好下列问题后收工（不要只改说明文案）。\n\n` +
+    `【审计失败项】\n${lines.join('\n') || '-（无明细）'}\n\n` +
+    `【要求】\n` +
+    `- 按失败项最小必要改动；分页超限就把 page_size 调到 ≤ 后端 le。\n` +
+    `- 未挂载就把 router include 进挂载文件；缺页面就补 views 与路由/菜单接线。\n` +
+    `- 库缺 ORM 列：在项目既有 db_migrate / 启动迁移里补 ALTER（或空表重建），禁止只改模型不改库。\n` +
+    `- 终稿仍须含「## 说明方案」。\n\n` +
+    `【原始诉求】\n${String(requirement || '').trim()}\n`
+  )
 }
 
 /**
@@ -79,6 +126,26 @@ export function runDeliveryAudit(input: DeliveryAuditInput): DeliveryAuditResult
     })
     if (api.detail || !api.ok) {
       checks.push({ name: 'api_mount', ok: api.ok, detail: api.detail || '' })
+    }
+  }
+
+  // 2b) 分页契约：前端 page_size 字面量不得超过后端 Query le（否则首屏 422）
+  {
+    const pageSize = verifyPageSizeContractOnTarget(input.workspace, {
+      synced_files: synced,
+    })
+    if (pageSize.detail || !pageSize.ok) {
+      checks.push({ name: 'param_contract', ok: pageSize.ok, detail: pageSize.detail || '' })
+    }
+  }
+
+  // 2c) ORM↔SQLite 列漂移（缺列会列表 500，OpenAPI 有路径仍假通过）
+  {
+    const schema = verifySchemaDriftOnTarget(input.workspace, {
+      synced_files: synced,
+    })
+    if (schema.detail || !schema.ok) {
+      checks.push({ name: 'schema_drift', ok: schema.ok, detail: schema.detail || '' })
     }
   }
 

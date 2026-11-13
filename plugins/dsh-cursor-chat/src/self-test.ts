@@ -1,6 +1,6 @@
 /**
  * 阶段 B+C 自检：HITL + Mock Cursor → pending_review → apply 同步 + 续改。
- * 用法：CURSOR_CHAT_MOCK=1 pnpm build && pnpm self-test
+ * 用法：CURSOR_CHAT_MOCK=1 CURSOR_CHAT_SELFTEST=1 pnpm build && pnpm self-test
  */
 import {
   closeSync,
@@ -16,8 +16,18 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _resetHitlStoreForTests, consume, issue } from './hitl.js'
-import { loadConfig, saveConfig } from './config.js'
-import { isLocalDbRel, partitionChangedPaths, pathInScope } from './pathScope.js'
+import {
+  allowMockDelivery,
+  loadConfig,
+  saveConfig,
+  stripAccidentalMockEnv,
+} from './config.js'
+import {
+  isLocalDbRel,
+  isMockMarkerRel,
+  partitionChangedPaths,
+  pathInScope,
+} from './pathScope.js'
 import {
   _resetPendingConfirmForTests,
   bindPendingJob,
@@ -31,7 +41,23 @@ import {
   probeLiveAudit,
   requirementEvidenceChecks,
 } from './completionAudit.js'
-import { runDeliveryAudit } from './deliveryAudit.js'
+import {
+  auditBlocksDelivery,
+  auditNeedsRepair,
+  buildAuditRepairPrompt,
+  fixableAuditFailures,
+  runDeliveryAudit,
+} from './deliveryAudit.js'
+import {
+  collectBackendPageSizeCaps,
+  collectFrontendPageSizeHits,
+  verifyPageSizeContractOnTarget,
+} from './paramContractVerify.js'
+import {
+  parseOrmTablesFromModel,
+  verifySchemaDriftOnTarget,
+} from './schemaDriftVerify.js'
+import { verifyDeleteOnTarget } from './deleteVerify.js'
 import { verifyAddMenuOnTarget } from './menuVerify.js'
 import {
   inferSparseBeforeAfter,
@@ -96,12 +122,20 @@ import {
 import { decideCodingGate, readAskUserAfterLastUser } from './clarifyFlow.js'
 import { launchCodingJob } from './launchJob.js'
 import { planProjectServices } from './opsRestart.js'
+import { buildPrompt, runningBulkInstallTool } from './cursor/runner.js'
+import { inferShellToolOutcome } from './transcript.js'
+import { answerUserChoice, cancelUserChoice, waitForUserChoice } from './userChoice.js'
 import {
   buildOpsPrompt,
+  classifyOpsTerminal,
   classifyWork,
   codingParentLink,
   isInventoryOnlyRequirement,
+  opsRestartVerifySteps,
+  opsRunningStatus,
+  opsVerifyDefaults,
   opsWantsRunningService,
+  parseOpsListenPorts,
 } from './workKind.js'
 import { isDeleteIntent } from './deleteIntent.js'
 import { patchMenuRouterInSandbox, validateDeletePlan } from './deleteEnforce.js'
@@ -176,6 +210,7 @@ async function waitJobStatus(
 
 async function main() {
   process.env.CURSOR_CHAT_MOCK = '1'
+  process.env.CURSOR_CHAT_SELFTEST = '1'
   const prevHome = process.env.CURSOR_CHAT_HOME
   const home = mkdtempSync(join(tmpdir(), 'cc-self-test-'))
   process.env.CURSOR_CHAT_HOME = home
@@ -195,6 +230,43 @@ async function main() {
       : resolve(tilde)
     assert(expanded === resolve(homedir(), 'Desktop/fake-ws-for-cc-test'), '~/ 展开失败')
     console.log('ok: tilde expand contract')
+  }
+
+  // 防回归：误继承 MOCK 不得污染真工程；自检须 SELFTEST+MOCK 才允许 Mock 落盘
+  {
+    const prevMock = process.env.CURSOR_CHAT_MOCK
+    const prevSelf = process.env.CURSOR_CHAT_SELFTEST
+    try {
+      process.env.CURSOR_CHAT_MOCK = '1'
+      delete process.env.CURSOR_CHAT_SELFTEST
+      assert(stripAccidentalMockEnv() === true, '无 SELFTEST 时须剥掉 MOCK')
+      assert(process.env.CURSOR_CHAT_MOCK !== '1', '剥掉后 MOCK 不得残留')
+      assert(allowMockDelivery() === false, '无 MOCK+SELFTEST 不得允许 Mock 落盘')
+
+      process.env.CURSOR_CHAT_MOCK = '1'
+      process.env.CURSOR_CHAT_SELFTEST = '1'
+      assert(stripAccidentalMockEnv() === false, '自检保留 MOCK')
+      assert(process.env.CURSOR_CHAT_MOCK === '1', '自检 MOCK 须仍在')
+      assert(allowMockDelivery() === true, '自检允许 Mock 落盘')
+
+      assert(isMockMarkerRel('.cursor-chat-mock.md'), '须识别 mock 标记文件')
+      const blocked = partitionChangedPaths(['.cursor-chat-mock.md', 'frontend/src/a.js'], null)
+      // 当前仍处 MOCK=1，标记文件可进范围（自检同步链路）
+      assert(blocked.inScope.includes('.cursor-chat-mock.md'), '自检 MOCK 下标记文件可同步')
+      delete process.env.CURSOR_CHAT_MOCK
+      const formal = partitionChangedPaths(['.cursor-chat-mock.md', 'frontend/src/a.js'], null)
+      assert(!formal.inScope.includes('.cursor-chat-mock.md'), '正式模式禁止同步 mock 标记')
+      assert(formal.inScope.includes('frontend/src/a.js'), '正式模式仍同步普通文件')
+    } finally {
+      if (prevMock === undefined) delete process.env.CURSOR_CHAT_MOCK
+      else process.env.CURSOR_CHAT_MOCK = prevMock
+      if (prevSelf === undefined) delete process.env.CURSOR_CHAT_SELFTEST
+      else process.env.CURSOR_CHAT_SELFTEST = prevSelf
+    }
+    // 自检主流程依赖 MOCK+SELFTEST
+    process.env.CURSOR_CHAT_MOCK = '1'
+    process.env.CURSOR_CHAT_SELFTEST = '1'
+    console.log('ok: mock inheritance guard')
   }
 
   // 开发需求仍交给本插件。启动/重启按项目命令拉起；其它开发操作才进 Cursor SDK。宿主不得自己动手
@@ -278,10 +350,36 @@ async function main() {
     assert(classifyWork('看一下后端日志') === 'ops', '看日志按 Cursor 在真实项目执行')
     assert(classifyWork('排障登录失败') === 'ops', '不改代码的排障按 Cursor 在真实项目执行')
     assert(classifyWork('安装依赖') === 'ops', '装依赖按 Cursor 在真实项目执行')
+    assert(classifyWork('把前端依赖装上') === 'ops', '依赖装上是装依赖')
+    assert(classifyWork('排查启动失败') === 'ops', '启动失败诊断是排障')
+    assert(classifyWork('为什么后端起不来') === 'ops', '起不来诊断是排障')
+    assert(classifyWork('检查一下环境') === 'ops', '查环境按 Cursor 在真实项目执行')
     assert(classifyWork('把项目跑起来') === 'ops', '把项目跑起来不进写码沙箱')
     assert(opsWantsRunningService('重启前后端服务') === true, '重启须走项目命令拉起')
     assert(opsWantsRunningService('把项目跑起来') === true, '跑起来须走项目命令拉起')
+    assert(opsWantsRunningService('启动前后端') === true, '启动前后端须走项目命令拉起')
     assert(opsWantsRunningService('跑一下测试') === false, '跑测试仍交给 Cursor')
+    assert(opsWantsRunningService('排查启动失败') === false, '启动失败不得误进项目命令重启')
+    assert(opsWantsRunningService('后端启动失败') === false, '启动失败诊断不得误进重启')
+    assert(opsWantsRunningService('为什么起不来') === false, '起不来不得误进重启')
+    assert(classifyOpsTerminal('跑一下测试') === 'test', '跑测试细类')
+    assert(classifyOpsTerminal('安装依赖') === 'install', '装依赖细类')
+    assert(classifyOpsTerminal('把前端依赖装上') === 'install', '依赖装上细类')
+    assert(classifyOpsTerminal('看一下后端日志') === 'logs', '看日志细类')
+    assert(classifyOpsTerminal('检查一下环境') === 'env', '查环境细类')
+    assert(classifyOpsTerminal('排障登录失败') === 'troubleshoot', '排障细类')
+    assert(classifyOpsTerminal('排查启动失败') === 'troubleshoot', '启动失败须走排障细类')
+    assert(classifyOpsTerminal('为什么后端起不来') === 'troubleshoot', '起不来须走排障细类')
+    assert(classifyOpsTerminal('重启前后端') === 'restart', '重启细类')
+    assert(opsRunningStatus('test').includes('跑测试'), '测试进度文案')
+    assert(opsRunningStatus('install').includes('安装依赖'), '装依赖进度文案')
+    assert(opsRunningStatus('troubleshoot').includes('排障'), '排障进度文案')
+    assert(opsVerifyDefaults('test').some((line) => line.includes('测试命令')), '测试验收不得套重启端口')
+    assert(opsVerifyDefaults('logs').every((line) => !line.includes('前端地址')), '看日志验收不得套重启页面')
+    assert(opsVerifyDefaults('install').some((line) => line.includes('包管理器')), '装依赖验收须对准安装')
+    assert(opsVerifyDefaults('install').every((line) => !line.includes('前端地址')), '装依赖验收不得套重启页面')
+    assert(opsVerifyDefaults('troubleshoot').some((line) => line.includes('根因')), '排障验收须对准根因')
+    assert(opsVerifyDefaults('troubleshoot').every((line) => !line.includes('前端地址')), '排障验收不得套重启页面')
     assert(classifyWork('排查并修复登录') === 'code', '排障同时要修仍走写码')
     assert(classifyWork('不要改代码，重启前后端') === 'ops', '明确不改代码的重启仍只启动服务')
     assert(classifyWork('新增一个报表页面') === 'code', '新增页面仍是写码')
@@ -352,6 +450,18 @@ async function main() {
       assert(opsSrc.includes('LocalAddress 127.0.0.1'), '停端口须限定本机回环')
       assert(opsSrc.includes('命令行含本项目') || opsSrc.includes('projectNeedles'), '停进程须核对本项目标记')
       assert(!/Get-NetTCPConnection -LocalPort \$\{plan\.port\}/.test(opsSrc), '禁止不带回环过滤的端口秒杀')
+      assert(opsSrc.includes('planPythonApp'), '须能识别 Python/Gradio 入口')
+      const pyProj = mkdtempSync(join(tmpdir(), 'cc-ops-py-'))
+      writeFileSync(
+        join(pyProj, 'main.py'),
+        'import gradio as gr\nif __name__ == "__main__":\n    gr.Interface(lambda x: x, "text", "text").launch()\n',
+      )
+      const pyPlanned = planProjectServices(pyProj, { frontend: true, backend: true })
+      assert(
+        pyPlanned.plans.some((p) => p.args.includes('main.py') && p.port === 7860),
+        'Gradio main.py 须纳入重启计划，实际 ' + JSON.stringify(pyPlanned),
+      )
+      rmSync(pyProj, { recursive: true, force: true })
       rmSync(proj, { recursive: true, force: true })
       console.log('ok: restart uses project commands')
     }
@@ -389,9 +499,238 @@ async function main() {
         workspace,
         restartFallback: true,
       })
-      assert(fromPlugin.includes('没有直接认出命令'), '降级提示须说明插件未认出')
       assert(fromPlugin.includes('Cursor IDE'), '降级提示须对齐 Cursor IDE')
-      assert(fromPlugin.includes('禁止编造'), '降级后仍禁止编造命令')
+      assert(fromPlugin.includes('安装依赖') || fromPlugin.includes('启动脚本'), '降级须允许装依赖/写启动脚本')
+      assert(fromPlugin.includes('ask_user_choice'), '遇决策须 ask_user_choice 互动')
+      assert(fromPlugin.includes('根因'), '重启须要求先诊断根因')
+      assert(fromPlugin.includes('.venv') || fromPlugin.includes('venv'), '须允许/提示项目内 venv')
+      assert(fromPlugin.includes('终端与问题处理') || fromPlugin.includes('退出码'), '须含终端成败纪律')
+      const afterFail = buildOpsPrompt({
+        requirement: '重启前后端',
+        workspace,
+        restartFallback: true,
+        restartAttemptDetail: '前端没有起来。Start-Process 失败',
+      })
+      assert(afterFail.includes('已尝试结果') || afterFail.includes('未全部成功'), '命令失败降级须带上已尝试结果')
+      assert(afterFail.includes('启动脚本') || afterFail.includes('安装依赖'), '失败后仍须允许 IDE 式修复')
+      assert(afterFail.includes('后台'), '长驻进程须要求后台启动')
+      assert(afterFail.includes('WinError') || afterFail.includes('ask_user_choice'), '权限/挂死须换路或问用户')
+      const runJobSrcOps = readFileSync(
+        fileURLToPath(new URL('../src/orchestrator/runJob.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(runJobSrcOps.includes('start_failed'), '插件启动失败须能降级 Cursor')
+      assert(runJobSrcOps.includes("name: 'Shell'"), '重启过程须推送 Shell 工具块')
+      assert(runJobSrcOps.includes('继续按 Cursor IDE 方式处理'), '未成功时须再给 Cursor 一次 IDE 式机会')
+      assert(runJobSrcOps.includes('ask_user_choice') || runJobSrcOps.includes('AskQuestion'), '重启重试须要求用户互动')
+      const runnerSrcOps = readFileSync(
+        fileURLToPath(new URL('../src/cursor/runner.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(runnerSrcOps.includes('ask_user_choice'), '须注册 ask_user_choice 自定义工具')
+      assert(runnerSrcOps.includes('inferShellToolOutcome'), 'shell 成败推断须接入 runner')
+      assert(
+        buildPrompt({ requirement: '加一列', workspaceHint: workspace }).includes('ask_user_choice'),
+        '写码提示也须含用户确认纪律',
+      )
+      assert(clientSrcEarly.includes('cc-user-choice'), '进度卡须能渲染用户选择')
+      assert(clientSrcEarly.includes('/user-choice'), '进度卡须能提交用户选择')
+      assert(
+        clientSrcEarly.includes("action: 'cursor-chat.user-choice'") ||
+          clientSrcEarly.includes('cursor-chat.user-choice'),
+        '用户选择须走 HITL nonce，禁止裸 POST',
+      )
+      assert(clientSrcEarly.includes('cc-changes-card'), '结论下须能兜底「已编辑」改动卡')
+      assert(clientSrcEarly.includes('data-cc-changes-fallback'), '改动卡兜底须可识别以免叠原生卡')
+      assert(clientSrcEarly.includes('findSiblingNativeChangesCard'), '须按同级原生卡判断，禁止误关兜底')
+      assert(clientSrcEarly.includes('openWorkspaceRel'), '改动卡须有工作区打开入口')
+      assert(clientSrcEarly.includes('dsh-resource://file/session/'), '须能拼右侧工作区 resource 地址')
+      assert(clientSrcEarly.includes('sidebarRight'), 'openFile 缺失时须走 sidebarRight.openResource')
+      assert(clientSrcEarly.includes('is-clickable'), '改动行须可点击样式')
+      assert(clientSrcEarly.includes('data-cc-openable'), '改动卡须标记是否可打开')
+      const layoutSrc = readFileSync(
+        fileURLToPath(new URL('../src/projectLayout.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(layoutSrc.includes('唯一**的工程布局解析入口') || layoutSrc.includes('唯一'), '项目画像须声明为唯一布局入口')
+      assert(layoutSrc.includes('resolveMenuProbeRels'), '画像须提供菜单探针解析')
+      assert(layoutSrc.includes('resolveBackendMountRels'), '画像须提供后端挂载解析')
+      assert(layoutSrc.includes('isUiShellWiringRel'), '画像须提供接线文件识别')
+      const delSrc = readFileSync(
+        fileURLToPath(new URL('../src/deleteVerify.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(delSrc.includes('resolveMenuProbeRels'), '删除验尸须走画像探针')
+      assert(!delSrc.includes("frontend/src/layouts/AppLayout.vue"), '删除验尸不得写死 AppLayout 顶层路径')
+      const menuSrc = readFileSync(
+        fileURLToPath(new URL('../src/menuVerify.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(menuSrc.includes('isUiShellWiringRel'), '菜单验尸接线识别须走画像')
+      assert(
+        !clientSrcEarly.includes("if (/已编辑\\s*\\d+\\s*个文件/.test(t) && t.length < 2000) setSkipNative(true)"),
+        '不得再用 previousSibling 正文模糊匹配关掉改动卡',
+      )
+      assert(clientSrcEarly.includes('路径清单不进正文'), '不得再把涉及文件写进结论文案')
+      assert(clientSrcEarly.includes('fileCount(hit)'), '结论先到时须短轮询补文件列表')
+      {
+        const okShell = inferShellToolOutcome({
+          toolName: 'Shell',
+          status: 'completed',
+          result: { exitCode: 0, stdout: 'ok', stderr: '' },
+          hasCommand: true,
+        })
+        assert(okShell.status === 'completed', 'exit 0 须标成功')
+        const badShell = inferShellToolOutcome({
+          toolName: 'Shell',
+          status: 'completed',
+          result: { exitCode: 1, stdout: '', stderr: 'ModuleNotFoundError: gradio' },
+          hasCommand: true,
+        })
+        assert(badShell.status === 'failed', 'exit≠0 即使 completed 也须 failed')
+        assert(String(badShell.failureReason || '').includes('gradio'), '失败须带 stderr 根因')
+        const notShell = inferShellToolOutcome({
+          toolName: 'Read',
+          status: 'completed',
+          result: { exitCode: 1 },
+        })
+        assert(notShell.status === 'completed', '非 Shell 不得仅因 exitCode 字段误杀')
+        const waitP = waitForUserChoice({
+          jobId: 'job-choice-selftest',
+          question: '装依赖方式？',
+          options: ['项目内 .venv', 'pip --user'],
+        })
+        const answered = answerUserChoice('job-choice-selftest', '项目内 .venv')
+        assert(answered.ok === true, '用户选择须能提交')
+        const waitOut = await waitP
+        assert(waitOut.ok === true && waitOut.answer.includes('venv'), '选定后须返回选项')
+        const waitFuzzy = waitForUserChoice({
+          jobId: 'job-choice-selftest',
+          question: '再选一次',
+          options: ['项目内 .venv', 'pip --user'],
+        })
+        const fuzzy = answerUserChoice('job-choice-selftest', 'venv')
+        assert(!fuzzy.ok, '短串模糊匹配须拒绝')
+        cancelUserChoice('job-choice-selftest')
+        await waitFuzzy
+      }
+      const opsRestartSrc = readFileSync(
+        fileURLToPath(new URL('../src/opsRestart.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(opsRestartSrc.includes('onProgress'), '重启须支持过程回调')
+      assert(opsRestartSrc.includes('npm.cmd'), '前端失败须可改用 npm.cmd 重试')
+      const installHit = runningBulkInstallTool([
+        {
+          id: 't1',
+          kind: 'tool',
+          tool_status: 'running',
+          at: new Date().toISOString(),
+          command:
+            'python -m pip install gradio loguru langchain langchain-openai pymilvus sentence_transformers dashscope',
+        },
+      ])
+      assert(Boolean(installHit), 'pip install 须能识别以便进度提示')
+      const runnerSrc = readFileSync(fileURLToPath(new URL('../src/cursor/runner.ts', import.meta.url)), 'utf8')
+      assert(runnerSrc.includes('正在安装依赖'), '安装中须有心跳文案，不得无声假死')
+      assert(runnerSrc.includes('判定可能网络挂死'), '安装超久无结束须中断并说明')
+      assert(!runnerSrc.includes('已中断以免重启卡死'), '不得再 90 秒误杀合法安装')
+      const testPrompt = buildOpsPrompt({
+        requirement: '跑一下测试',
+        workspace,
+        terminalKind: 'test',
+      })
+      assert(testPrompt.includes('本轮只跑测试'), '测试提示须收窄到测试')
+      assert(!testPrompt.includes('本轮只做启动或重启'), '测试提示不得改成重启专线')
+      const logPrompt = buildOpsPrompt({ requirement: '看一下后端日志', workspace })
+      assert(logPrompt.includes('本轮只看日志'), '日志提示须收窄到看日志')
+      assert(logPrompt.includes('不要清空'), '看日志不得清日志')
+      const installPrompt = buildOpsPrompt({ requirement: '安装依赖', workspace })
+      assert(installPrompt.includes('本轮只安装依赖'), '装依赖提示须收窄到安装')
+      assert(installPrompt.includes('不要顺手重启'), '装依赖不得默认重启')
+      assert(!installPrompt.includes('本轮只做启动或重启'), '装依赖提示不得改成重启专线')
+      assert(!installPrompt.includes('本轮只跑测试'), '装依赖提示不得改成测试专线')
+      const troublePrompt = buildOpsPrompt({ requirement: '排查启动失败', workspace })
+      assert(troublePrompt.includes('本轮只排障定位'), '排障提示须收窄到排障')
+      assert(troublePrompt.includes('不要改文件'), '排障不得本轮改文件')
+      assert(troublePrompt.includes('强行重启') || troublePrompt.includes('不要在未确认前强行重启'), '排障不得未确认就重启')
+      assert(!troublePrompt.includes('本轮只做启动或重启'), '启动失败排障不得走重启专线提示')
+      const fixStillCode = classifyWork('排查并修复登录')
+      assert(fixStillCode === 'code', '细类加固后，带修复的排障仍须走写码')
+    }
+    {
+      const installJob = createJob({ workspace, requirement: '安装依赖' })
+      patchJob(installJob.id, { work_kind: 'ops' })
+      setStatus(loadJob(installJob.id)!, 'succeeded', '已在项目目录完成开发操作，未改代码。')
+      const installBody = formatChatConclusion(loadJob(installJob.id)!)
+      assert(installBody.includes('包管理器'), '装依赖结论验收须对准安装')
+      assert(!installBody.includes('打开原来的前端地址'), '装依赖结论不得套重启验收')
+      assert(installBody.includes('未改代码'), '装依赖结论仍须写未改代码')
+      const troubleJob = createJob({ workspace, requirement: '排查启动失败' })
+      patchJob(troubleJob.id, { work_kind: 'ops' })
+      setStatus(loadJob(troubleJob.id)!, 'succeeded', '已在项目目录完成开发操作，未改代码。')
+      const troubleBody = formatChatConclusion(loadJob(troubleJob.id)!)
+      assert(troubleBody.includes('根因'), '排障结论验收须对准根因')
+      assert(!troubleBody.includes('打开原来的前端地址'), '排障结论不得套重启验收')
+      assert(troubleBody.includes('未改代码'), '排障结论仍须写未改代码')
+    }
+    {
+      const testJob = createJob({ workspace, requirement: '跑一下测试' })
+      patchJob(testJob.id, { work_kind: 'ops' })
+      setStatus(loadJob(testJob.id)!, 'succeeded', '已在项目目录完成开发操作，未改代码。')
+      const testBody = formatChatConclusion(loadJob(testJob.id)!)
+      assert(testBody.includes('测试命令'), '测试结论验收须对准测试')
+      assert(!testBody.includes('打开原来的前端地址'), '测试结论不得套重启验收')
+      assert(testBody.includes('未改代码'), '测试结论仍须写未改代码')
+    }
+    {
+      const tableJob = createJob({ workspace, requirement: '跑一下测试' })
+      patchJob(tableJob.id, {
+        work_kind: 'ops',
+        assistant_text:
+          '## 说明方案\n**结论**\n84 通过、5 失败**。\n**做了什么**\n在 backend 跑了 pytest。\n失败用例摘要：\n| 用例 | 断言 |\n| --- | --- |\n| test_a.py::t1 | assert 0 == 4 |\n| test_b.py::t2 | assert 403 == 401 |\n**验收**\n看退出码。\n',
+      })
+      setStatus(loadJob(tableJob.id)!, 'succeeded', '已在项目目录完成开发操作，未改代码。')
+      const tableBody = formatChatConclusion(loadJob(tableJob.id)!)
+      assert(tableBody.includes('| 用例 | 断言 |'), '结论须保留 MD 表头')
+      assert(tableBody.includes('| --- | --- |'), '结论须保留 MD 表分隔行')
+      assert(tableBody.includes('| test_a.py::t1 | assert 0 == 4 |'), '结论须保留表数据行')
+      assert(!tableBody.includes('• | 用例 |'), '表头不得包进 bullet')
+      assert(!tableBody.includes('• | test_a.py'), '表数据行不得包进 bullet')
+      assert(tableBody.includes('失败用例摘要：'), '表格小标题须保留')
+      assert(!/失败\*\*/.test(tableBody), '结果行不得残留漏配的 **')
+      const clientSrc = readFileSync(fileURLToPath(new URL('../src/client.js', import.meta.url)), 'utf8')
+      assert(clientSrc.includes('function renderLightMdTable'), '结论渲染须支持 MD 表格')
+      assert(clientSrc.includes('cc-md-table'), '结论表格须有样式类')
+      assert(clientSrc.includes('isLightMdTableRow'), '结论渲染须识别表行')
+    }
+    {
+      const logJob = createJob({ workspace, requirement: '看一下后端日志' })
+      patchJob(logJob.id, {
+        work_kind: 'ops',
+        assistant_text:
+          '## 说明方案\n**结论**\n后端正常。\n**做了什么**\n读了 .dev-logs。\n**验收**\n' +
+          '1. 打开 health。\n2. 看 pid。\n' +
+          '文件\t用途\t最近更新\n' +
+          '.dev-logs/backend.log\t访问日志\t今天\n' +
+          '.dev-logs/backend.pid\t进程号\t—\n' +
+          '本地脚本把 stdout/stderr 分开。\n' +
+          '```\nINFO: Application startup complete.\n```\n' +
+          '含义：Uvicorn 已就绪。\n' +
+          '日志行要点\t含义\n' +
+          'GET /api/health → 200\t探活正常\n' +
+          '说明：旧日志里曾有 404，与现在不一致。\n',
+      })
+      setStatus(loadJob(logJob.id)!, 'succeeded', '已在项目目录完成开发操作，未改代码。')
+      const logBody = formatChatConclusion(loadJob(logJob.id)!)
+      assert(logBody.includes('1. 打开 health'), '验收步骤仍编号')
+      assert(logBody.includes('| 文件 | 用途 | 最近更新 |'), '制表符表须收成管道表')
+      assert(!/^\d+\.\s*\| 文件 \|/m.test(logBody), '验收表头不得编成步骤')
+      assert(logBody.includes('```'), '验收区代码围栏须保留')
+      assert(!logBody.includes('6. ```'), '代码围栏不得编成第 6 步')
+      assert(!/^\d+\.\s*INFO:/m.test(logBody), '日志摘录不得编成步骤')
+      assert(logBody.includes('• 含义：Uvicorn 已就绪'), '说明性句子用 bullet 而非大序号')
+      assert(logBody.includes('| GET /api/health → 200 | 探活正常 |'), '第二张表也须保留')
     }
     {
       const passJob = createJob({ workspace, requirement: '重启前后端' })
@@ -417,8 +756,24 @@ async function main() {
       assert(body.includes('未改代码'), '插件重启成功结论须写未改代码')
       assert(body.includes('后端 app.main:app :8009 已在听'), '结论须带上拉起步骤')
       assert(body.includes('前端 npm run dev :5175 已在听'), '结论须带上前端拉起步骤')
-      assert(body.includes('打开原来的前端地址'), '插件重启验收须让人打开页面')
+      assert(!body.includes('访问地址'), '重启验收不要「访问地址」小标题')
+      assert(body.includes('前端：http://127.0.0.1:5175/'), '重启验收须带前端可点开链接')
+      assert(body.includes('健康检查：http://127.0.0.1:8009/api/health'), '重启验收须带后端 health 链接')
+      assert(body.includes('后端：http://127.0.0.1:8009/docs'), '重启验收须带后端 docs 链接')
+      assert(body.includes('• 前端：http://127.0.0.1:5175/'), '访问链接行须用 bullet 而非大序号')
+      assert(!body.includes('打开原来的前端地址'), '有端口时不得再用笼统前端验收')
       assert(!body.includes('看进度卡里的终端命令'), '插件重启不得再写 Cursor 终端验收')
+      const parsedPorts = parseOpsListenPorts('前端 npm run dev :5175 已在听\n后端 app.main:app :8009 已在听')
+      assert(parsedPorts.frontend === 5175 && parsedPorts.backend === 8009, '须从已在听文案解析端口')
+      const linked = opsRestartVerifySteps({ frontend: 5175, backend: 8009 }).join('\n')
+      assert(linked.includes('前端：http://127.0.0.1:5175/'), '验收步骤生成前端链接')
+      assert(linked.includes('/api/health'), '验收步骤生成 health 链接')
+      const clientSrcLink = readFileSync(fileURLToPath(new URL('../src/client.js', import.meta.url)), 'utf8')
+      assert(clientSrcLink.includes('isSafeBrowseUrl'), '结论壳须校验本机链接')
+      assert(clientSrcLink.includes('cc-md-link'), '结论壳须渲染可点击链接样式')
+      assert(clientSrcLink.includes('data-cc-open'), '本机链接须带打开标记')
+      assert(clientSrcLink.includes('installConclusionLinkOpener'), '结论壳须接管链接点击')
+      assert(clientSrcLink.includes('button type="button" class="cc-md-link"'), '链接用 button 避免宿主剥 a')
     }
     console.log('ok: dev work routes to cursor sdk')
   }
@@ -635,6 +990,209 @@ async function main() {
     assert(!onlyBack.frontend && onlyBack.backend, '只改后端时不探前端')
     const onlyDoc = liveAuditScope(['docs/API.md'])
     assert(!onlyDoc.frontend && !onlyDoc.backend, '没改前后端文件时不探服务')
+    const nestedScope = liveAuditScope([
+      'pythonProject_procurement/frontend/src/views/MaterialOutbound.vue',
+      'pythonProject_procurement/backend/app/api/material_outbound.py',
+    ])
+    assert(nestedScope.frontend && nestedScope.backend, '嵌套 pythonProject_*/前后端路径须纳入探测范围')
+    {
+      const { readBackendPortFromViteProxy, resolveBackendRoot, isBackendRuntimeFile, listBackendRestartHits } =
+        await import('./backendRestart.js')
+      const { detectProjectLayout } = await import('./projectLayout.js')
+      const nestRoot = mkdtempSync(join(tmpdir(), 'cc-nest-audit-'))
+      const app = join(nestRoot, 'pythonProject_procurement')
+      mkdirSync(join(app, 'frontend'), { recursive: true })
+      mkdirSync(join(app, 'backend', 'app', 'api'), { recursive: true })
+      writeFileSync(
+        join(app, 'frontend', 'vite.config.js'),
+        "export default { server: { port: 5173, proxy: { '/api': { target: 'http://127.0.0.1:8002' } } } }\n",
+        'utf8',
+      )
+      writeFileSync(join(app, 'backend', 'app', 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n', 'utf8')
+      writeFileSync(
+        join(app, 'backend', 'app', 'api', 'material_outbound.py'),
+        'from fastapi import APIRouter\nrouter = APIRouter()\n',
+        'utf8',
+      )
+      const nestLayout = detectProjectLayout(nestRoot, [
+        'pythonProject_procurement/backend/app/api/material_outbound.py',
+      ])
+      assert(nestLayout.backendProxyPort === 8002, '项目画像须读到嵌套 Vite 代理端口')
+      assert(
+        nestLayout.backendRoots.some((p) =>
+          p.replace(/\\/g, '/').endsWith('/pythonProject_procurement/backend'),
+        ),
+        '项目画像须发现嵌套 FastAPI 根',
+      )
+      assert(
+        isBackendRuntimeFile('pythonProject_procurement/backend/app/api/material_outbound.py', nestLayout),
+        '嵌套 backend 源码须算运行期后端文件',
+      )
+      assert(
+        listBackendRestartHits(
+          ['pythonProject_procurement/backend/app/api/material_outbound.py'],
+          [],
+          nestLayout,
+        ).length === 1,
+        '嵌套后端改动须触发服务确认',
+      )
+      assert(readBackendPortFromViteProxy(nestRoot) === 8002, '外层 workspace 须读到嵌套 Vite 代理端口')
+      assert(
+        resolveBackendRoot(nestRoot)?.replace(/\\/g, '/').endsWith('/pythonProject_procurement/backend'),
+        '外层 workspace 须解析到嵌套 backend 根',
+      )
+      // 非统一命名：apps/web + apps/api，禁止依赖 frontend/backend 目录名
+      const appsRoot = mkdtempSync(join(tmpdir(), 'cc-apps-layout-'))
+      mkdirSync(join(appsRoot, 'apps', 'web'), { recursive: true })
+      mkdirSync(join(appsRoot, 'apps', 'api', 'app', 'routers'), { recursive: true })
+      writeFileSync(
+        join(appsRoot, 'apps', 'web', 'vite.config.ts'),
+        "export default { server: { port: 3000, proxy: { '/api': { target: 'http://127.0.0.1:9001' } } } }\n",
+        'utf8',
+      )
+      writeFileSync(
+        join(appsRoot, 'apps', 'api', 'app', 'main.py'),
+        'from fastapi import FastAPI\napp = FastAPI()\n',
+        'utf8',
+      )
+      writeFileSync(
+        join(appsRoot, 'apps', 'api', 'app', 'routers', 'orders.py'),
+        'from fastapi import APIRouter\nrouter = APIRouter()\n',
+        'utf8',
+      )
+      const appsHints = ['apps/web/src/pages/Orders.vue', 'apps/api/app/routers/orders.py']
+      const appsLayout = detectProjectLayout(appsRoot, appsHints)
+      assert(appsLayout.frontendDevPort === 3000, 'apps/web 画像须读前端端口')
+      assert(appsLayout.backendProxyPort === 9001, 'apps/web 画像须读后端代理端口')
+      assert(
+        appsLayout.frontendRoots.some((p) => p.replace(/\\/g, '/').endsWith('/apps/web')),
+        '须发现 apps/web 为前端根',
+      )
+      assert(
+        appsLayout.backendRoots.some((p) => p.replace(/\\/g, '/').endsWith('/apps/api')),
+        '须发现 apps/api 为后端根',
+      )
+      const appsScope = liveAuditScope(appsHints, appsRoot)
+      assert(appsScope.frontend && appsScope.backend, '非 frontend/backend 命名亦须纳入探测范围')
+      assert(
+        isBackendRuntimeFile('apps/api/app/routers/orders.py', appsLayout),
+        'apps/api 下运行期 py 须识别为后端',
+      )
+      assert(
+        readBackendPortFromViteProxy(appsRoot, appsHints) === 9001,
+        '非统一布局亦须从画像读到后端口',
+      )
+      assert(
+        resolveBackendRoot(appsRoot, appsHints)?.replace(/\\/g, '/').endsWith('/apps/api'),
+        '非统一布局须解析到 apps/api',
+      )
+      const nestAudit = runDeliveryAudit({
+        workspace: nestRoot,
+        sandbox: nestRoot,
+        requirement: '库存管理新增物料出库',
+        synced_files: [
+          'pythonProject_procurement/frontend/src/views/MaterialOutbound.vue',
+          'pythonProject_procurement/backend/app/api/material_outbound.py',
+          'pythonProject_procurement/backend/app/api/__init__.py',
+        ],
+      })
+      assert(
+        nestAudit.checks.some((c) => c.name === 'api_mount' && !c.ok),
+        '嵌套 backend 新 router 未挂载时须有 api_mount 失败，不得只因路径前缀漏检',
+      )
+      writeFileSync(
+        join(app, 'backend', 'app', 'api', '__init__.py'),
+        'from . import material_outbound\n',
+        'utf8',
+      )
+      writeFileSync(
+        join(app, 'backend', 'app', 'main.py'),
+        'from fastapi import FastAPI\nfrom app.api import material_outbound\napp = FastAPI()\napp.include_router(material_outbound.router)\n',
+        'utf8',
+      )
+      // 指纹：沙箱=目标同盘时用自身作 sandbox
+      mkdirSync(join(nestRoot, 'frontend', 'src', 'views'), { recursive: true })
+      const nestOk = runDeliveryAudit({
+        workspace: nestRoot,
+        sandbox: null,
+        requirement: '库存管理新增物料出库',
+        synced_files: [
+          'pythonProject_procurement/backend/app/api/material_outbound.py',
+          'pythonProject_procurement/backend/app/api/__init__.py',
+          'pythonProject_procurement/backend/app/main.py',
+        ],
+      })
+      assert(
+        !nestOk.checks.some((c) => c.name === 'api_mount' && !c.ok),
+        '嵌套 backend 已挂载后不得再报 api_mount 失败',
+      )
+      rmSync(nestRoot, { recursive: true, force: true })
+    }
+    // 删除验尸：嵌套工程 + MainLayout（非 AppLayout），不得因探针路径写死误杀
+    {
+      const delRoot = mkdtempSync(join(tmpdir(), 'cc-del-probe-'))
+      const app = join(delRoot, 'pythonProject_procurement')
+      mkdirSync(join(app, 'frontend', 'src', 'layouts'), { recursive: true })
+      mkdirSync(join(app, 'frontend', 'src', 'router'), { recursive: true })
+      writeFileSync(
+        join(app, 'frontend', 'vite.config.js'),
+        "export default { server: { port: 5173, proxy: { '/api': { target: 'http://127.0.0.1:8002' } } } }\n",
+        'utf8',
+      )
+      writeFileSync(
+        join(app, 'frontend', 'src', 'layouts', 'MainLayout.vue'),
+        `const menus = [
+  { path: '/materials', title: '物料主数据' },
+  { path: '/inventory/outbound', title: '物料出库' },
+]
+`,
+        'utf8',
+      )
+      writeFileSync(
+        join(app, 'frontend', 'src', 'router', 'index.js'),
+        `const routes = [
+  { path: 'materials', name: 'Materials' },
+  { path: 'inventory/outbound', name: 'MaterialOutbound' },
+]
+`,
+        'utf8',
+      )
+      const cleaned = verifyDeleteOnTarget(delRoot, '删除物料入库功能', {
+        deleted_files: [
+          'pythonProject_procurement/frontend/src/views/MaterialInbound.vue',
+        ],
+      })
+      assert(cleaned.ok === true, '嵌套 MainLayout 已清「物料入库」时删除验尸须通过，实际: ' + cleaned.detail)
+      writeFileSync(
+        join(app, 'frontend', 'src', 'layouts', 'MainLayout.vue'),
+        `const menus = [
+  { path: '/inventory/inbound', title: '物料入库' },
+  { path: '/inventory/outbound', title: '物料出库' },
+]
+`,
+        'utf8',
+      )
+      const residual = verifyDeleteOnTarget(delRoot, '删除物料入库功能')
+      assert(residual.ok === false, '菜单仍含「物料入库」时须失败')
+      assert(/物料入库/.test(residual.detail), '失败须点明残留功能名')
+      // 顶层 AppLayout 工程仍可用
+      const flat = mkdtempSync(join(tmpdir(), 'cc-del-flat-'))
+      mkdirSync(join(flat, 'frontend', 'src', 'layouts'), { recursive: true })
+      mkdirSync(join(flat, 'frontend', 'src', 'router'), { recursive: true })
+      writeFileSync(join(flat, 'frontend', 'vite.config.js'), 'export default {}\n', 'utf8')
+      writeFileSync(
+        join(flat, 'frontend', 'src', 'layouts', 'AppLayout.vue'),
+        "const menus = [{ title: '物料出库' }]\n",
+        'utf8',
+      )
+      writeFileSync(join(flat, 'frontend', 'src', 'router', 'index.js'), 'export default []\n', 'utf8')
+      assert(
+        verifyDeleteOnTarget(flat, '删除物料入库功能').ok === true,
+        '顶层 AppLayout 无残留时仍须通过',
+      )
+      rmSync(delRoot, { recursive: true, force: true })
+      rmSync(flat, { recursive: true, force: true })
+    }
     assert(
       pathsForThisRound(['backend/app/routers/reports.py'], ['/api/reports/wip']).length === 0,
       '只有泛名文件时不把旧接口算成本轮',
@@ -1873,6 +2431,157 @@ async function main() {
     })
     assert(good.ok, '挂载后交付审计须通过')
     assert(good.completion?.percent === 100, '全部检查通过时完成度须为 100')
+
+    // 分页契约：前端 page_size>后端 le 必须拦住（复现物料入库 422）
+    {
+      const root = mkdtempSync(join(tmpdir(), 'cc-page-size-'))
+      const sb = join(root, 'sandbox')
+      const tg = join(root, 'target')
+      mkdirSync(join(sb, 'frontend/src/views'), { recursive: true })
+      mkdirSync(join(tg, 'frontend/src/views'), { recursive: true })
+      mkdirSync(join(tg, 'backend/app/api'), { recursive: true })
+      mkdirSync(join(tg, 'backend/app'), { recursive: true })
+      writeFileSync(
+        join(tg, 'backend/app/main.py'),
+        'from fastapi import FastAPI\napp = FastAPI()\n',
+        'utf8',
+      )
+      writeFileSync(
+        join(tg, 'backend/app/api/suppliers.py'),
+        'from fastapi import APIRouter, Query\nrouter = APIRouter()\n' +
+          '@router.get("/suppliers")\n' +
+          'def list_suppliers(page_size: int = Query(20, ge=1, le=100)):\n  return []\n' +
+          '@router.get("/materials")\n' +
+          'def list_materials(page_size: int = Query(20, ge=1, le=200)):\n  return []\n',
+        'utf8',
+      )
+      writeFileSync(join(tg, 'package.json'), '{"name":"t","type":"module"}\n', 'utf8')
+      writeFileSync(
+        join(tg, 'vite.config.js'),
+        'export default { server: { port: 5173, proxy: { "/api": "http://127.0.0.1:8000" } } }\n',
+        'utf8',
+      )
+      const badVue =
+        'async function load(){ await getSuppliers({ page: 1, page_size: 200 }) }\n'
+      writeFileSync(join(sb, 'frontend/src/views/MaterialInbound.vue'), badVue, 'utf8')
+      writeFileSync(join(tg, 'frontend/src/views/MaterialInbound.vue'), badVue, 'utf8')
+      const hits = collectFrontendPageSizeHits(tg, ['frontend/src/views/MaterialInbound.vue'])
+      assert(hits.some((h) => h.value === 200), '须扫到 page_size=200')
+      const caps = collectBackendPageSizeCaps([join(tg, 'backend')])
+      assert(caps.includes(100) && caps.includes(200), '须扫到后端 le=100 与 le=200')
+      const contract = verifyPageSizeContractOnTarget(tg, {
+        synced_files: ['frontend/src/views/MaterialInbound.vue'],
+      })
+      assert(!contract.ok, 'page_size=200 超过最严 le=100 须失败（不得用 max le 假通过）')
+      assert(contract.detail.indexOf('le=100') >= 0, '失败须点明最严 le')
+      const auditBad = runDeliveryAudit({
+        workspace: tg,
+        sandbox: sb,
+        requirement: '库存管理菜单新增物料入库页面',
+        synced_files: ['frontend/src/views/MaterialInbound.vue'],
+      })
+      assert(!auditBad.ok, '交付审计须因分页契约失败')
+      assert(
+        auditBad.checks.some((c) => c.name === 'param_contract' && !c.ok),
+        '须含 param_contract 失败项',
+      )
+      assert(!auditBlocksDelivery(auditBad), '分页契约不走落盘硬拦，应走续修')
+      assert(auditNeedsRepair(auditBad), '分页契约须触发审计续修')
+      assert(
+        fixableAuditFailures(auditBad).some((f) => f.name === 'param_contract'),
+        '须列入可修失败项',
+      )
+      const repairPrompt = buildAuditRepairPrompt('库存管理新增物料入库', fixableAuditFailures(auditBad))
+      assert(repairPrompt.indexOf('page_size') >= 0 || repairPrompt.indexOf('le=100') >= 0, '续修提示须含契约细节')
+      assert(repairPrompt.indexOf('原始诉求') >= 0, '续修提示须带回原始诉求')
+      const okVue =
+        'async function load(){ await getSuppliers({ page: 1, page_size: 100 }) }\n'
+      writeFileSync(join(sb, 'frontend/src/views/MaterialInbound.vue'), okVue, 'utf8')
+      writeFileSync(join(tg, 'frontend/src/views/MaterialInbound.vue'), okVue, 'utf8')
+      const contractOk = verifyPageSizeContractOnTarget(tg, {
+        synced_files: ['frontend/src/views/MaterialInbound.vue'],
+      })
+      assert(contractOk.ok, 'page_size=100≤le=100 须通过')
+      rmSync(root, { recursive: true, force: true })
+    }
+
+    // ORM↔SQLite 缺列须拦住（复现物料出库 no such column: status）
+    {
+      const { spawnSync } = await import('node:child_process')
+      const root = mkdtempSync(join(tmpdir(), 'cc-schema-drift-'))
+      const tg = join(root, 'target')
+      mkdirSync(join(tg, 'backend/app/models'), { recursive: true })
+      mkdirSync(join(tg, 'frontend/src/views'), { recursive: true })
+      writeFileSync(join(tg, 'backend/app/main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n', 'utf8')
+      writeFileSync(
+        join(tg, 'backend/app/models/material_outbound.py'),
+        'from sqlalchemy.orm import Mapped, mapped_column, relationship\n' +
+          'class MaterialOutboundNote:\n' +
+          '  __tablename__ = "material_outbound_notes"\n' +
+          '  id: Mapped[int] = mapped_column(primary_key=True)\n' +
+          '  doc_no: Mapped[str] = mapped_column()\n' +
+          '  status: Mapped[str] = mapped_column()\n' +
+          '  items = relationship("MaterialOutboundItem")\n',
+        'utf8',
+      )
+      writeFileSync(join(tg, 'frontend/src/views/MaterialOutbound.vue'), '<template></template>\n', 'utf8')
+      const dbPath = join(tg, 'backend/pcb_procurement.db')
+      const py = spawnSync(
+        'python',
+        [
+          '-c',
+          'import sqlite3;c=sqlite3.connect(r"""' +
+            dbPath.replace(/\\/g, '/') +
+            '""");c.execute("CREATE TABLE material_outbound_notes (id INTEGER PRIMARY KEY, doc_no TEXT, outbound_date TEXT, recipient TEXT, purpose TEXT, handler_id INTEGER, created_at TEXT, updated_at TEXT)");c.commit()',
+        ],
+        { encoding: 'utf8', windowsHide: true },
+      )
+      assert(py.status === 0, '须能创建旧结构 sqlite 做漂移自检: ' + (py.stderr || ''))
+      const parsed = parseOrmTablesFromModel(
+        readFileSync(join(tg, 'backend/app/models/material_outbound.py'), 'utf8'),
+      )
+      assert(parsed.get('material_outbound_notes')?.includes('status'), '须解析出 status 列')
+      assert(!parsed.get('material_outbound_notes')?.includes('items'), 'relationship 不得当列')
+      const drift = verifySchemaDriftOnTarget(tg, {
+        synced_files: ['backend/app/models/material_outbound.py'],
+      })
+      assert(!drift.ok, '缺 status 列须失败')
+      assert(drift.detail.indexOf('status') >= 0, '失败须点明缺列')
+      const auditDrift = runDeliveryAudit({
+        workspace: tg,
+        sandbox: tg,
+        requirement: '库存管理菜单新增物料出库页面',
+        synced_files: [
+          'backend/app/models/material_outbound.py',
+          'frontend/src/views/MaterialOutbound.vue',
+        ],
+      })
+      assert(
+        auditDrift.checks.some((c) => c.name === 'schema_drift' && !c.ok),
+        '交付审计须含 schema_drift 失败',
+      )
+      assert(auditNeedsRepair(auditDrift), 'schema_drift 须可续修')
+      // 有模型无 .db：不得静默通过
+      const noDbRoot = mkdtempSync(join(tmpdir(), 'cc-schema-nodb-'))
+      mkdirSync(join(noDbRoot, 'backend/app/models'), { recursive: true })
+      writeFileSync(join(noDbRoot, 'backend/app/main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n', 'utf8')
+      writeFileSync(
+        join(noDbRoot, 'backend/app/models/material_outbound.py'),
+        'from sqlalchemy.orm import Mapped, mapped_column\n' +
+          'class MaterialOutboundNote:\n' +
+          '  __tablename__ = "material_outbound_notes"\n' +
+          '  id: Mapped[int] = mapped_column(primary_key=True)\n' +
+          '  status: Mapped[str] = mapped_column()\n',
+        'utf8',
+      )
+      const noDb = verifySchemaDriftOnTarget(noDbRoot, {
+        synced_files: ['backend/app/models/material_outbound.py'],
+      })
+      assert(!noDb.ok, '同步了模型却找不到 .db 须失败，禁止静默通过')
+      rmSync(noDbRoot, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+
     const pageMiss = requirementEvidenceChecks('做一个带筛选的列表页面', [])
     assert(pageMiss.length === 1 && pageMiss[0]?.ok === false, '要页面但没同步页面文件不得算完成')
     const pageHit = requirementEvidenceChecks('做一个带筛选的列表页面', [
@@ -1946,6 +2655,26 @@ async function main() {
     const cancelledBody = formatChatConclusion(loadJob(cancelled.id)!)
     assert(cancelledBody.indexOf('结果：⏹ 已取消') >= 0, '取消后不得改写成已完成')
     assert(cancelledBody.indexOf('✅ 已完成') < 0, '已取消的任务不得打绿勾')
+    assert(cancelledBody.indexOf('请你验收') < 0, '已取消不得再要求验收')
+    {
+      const opsCancel = createJob({ workspace: tg, requirement: '重启前后端服务' })
+      patchJob(opsCancel.id, {
+        work_kind: 'ops',
+        transcript: [
+          {
+            id: 'st1',
+            kind: 'status',
+            at: new Date().toISOString(),
+            text: '后端 app.main:app :8009 已在听',
+          },
+        ],
+      })
+      setStatus(loadJob(opsCancel.id)!, 'cancelled', '用户取消')
+      const opsCancelBody = formatChatConclusion(loadJob(opsCancel.id)!)
+      assert(opsCancelBody.indexOf('⏹ 已取消') >= 0, 'ops 取消须标已取消')
+      assert(opsCancelBody.indexOf('请你验收') < 0, 'ops 取消不得再套重启验收')
+      assert(opsCancelBody.indexOf('打开原来的前端') < 0, 'ops 取消不得出现前端验收句')
+    }
 
     // 宿主 Stop → AbortSignal：必须立刻 forceCancel 后台 job（sleep 中途也会生效）
     {
@@ -2629,6 +3358,7 @@ async function main() {
     else process.env.CURSOR_CHAT_HOME = prevHome
     delete process.env.CURSOR_CHAT_PORT
     delete process.env.CURSOR_CHAT_MOCK
+    delete process.env.CURSOR_CHAT_SELFTEST
   }
 }
 

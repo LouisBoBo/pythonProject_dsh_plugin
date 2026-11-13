@@ -7,7 +7,11 @@ import { join } from 'node:path'
 import { clampAssistantText, mergeAssistantDelta } from '../assistantText.js'
 import {
   clampText,
+  inferShellToolOutcome,
+  isAskUserToolName,
+  isShellToolName,
   newTranscriptId,
+  shellFailureReasonFromResult,
   toolCommandFromArgs,
   toolPathFromArgs,
   toolPatternFromArgs,
@@ -17,6 +21,9 @@ import {
   type TranscriptItem,
 } from '../transcript.js'
 import { appendSdkUsage, pickSdkUsage, sanitizeLedgerKey, type SdkTokenUsage } from '../usageLedger.js'
+import { cancelUserChoice, getPendingUserChoice, waitForUserChoice } from '../userChoice.js'
+import { patchJob } from '../jobs.js'
+import { terminalProblemHandlingInstructions } from '../workKind.js'
 
 export type CursorRunEvent = {
   type: 'assistant' | 'thinking' | 'tool_event' | 'status' | 'error' | 'user'
@@ -58,6 +65,36 @@ export function transcriptHasRunningTools(items: readonly TranscriptItem[]): boo
   })
 }
 
+/** 进行中的依赖安装命令（允许较长时间，只用于进度提示，不作为 90s 误杀依据） */
+export function runningInstallTool(
+  items: readonly TranscriptItem[],
+): { command: string; startedAt: number } | null {
+  for (const it of items || []) {
+    if (!it || it.kind !== 'tool') continue
+    const st = String(it.tool_status || '').toLowerCase()
+    if (st !== 'running' && st !== 'in_progress') continue
+    const cmd = String(it.command || '')
+    if (
+      !/(pip(?:3)?\s+install|python\s+-m\s+pip\s+install|npm\s+(?:i|install)\b|pnpm\s+(?:i|install)\b|yarn\s+(?:add|install)\b)/i.test(
+        cmd,
+      )
+    ) {
+      continue
+    }
+    const startedAt = Date.parse(String(it.at || '')) || 0
+    if (!startedAt) continue
+    return { command: cmd.replace(/\s+/g, ' ').trim().slice(0, 220), startedAt }
+  }
+  return null
+}
+
+/** @deprecated 兼容旧自测名；语义同 runningInstallTool */
+export function runningBulkInstallTool(
+  items: readonly TranscriptItem[],
+): { command: string; startedAt: number } | null {
+  return runningInstallTool(items)
+}
+
 export function buildPrompt(opts: {
   requirement: string
   workspaceHint: string
@@ -95,17 +132,15 @@ export function buildPrompt(opts: {
     '- 本轮是写码：像 Cursor IDE 一样先摸清再改，沿用仓库现有模式，最小必要改动。只改沙箱内文件。\n' +
     '- 禁止在沙箱里启动/重启前后端、npm run dev/build、npx vite 或再起长驻进程，改完即收工。真实项目里的服务由落盘后的确认阶段处理。\n' +
     '- 单纯的启动/重启前后端、跑测试、安装依赖、看日志、查环境、排障不进入本沙箱，它们在真实项目终端里按 Cursor IDE 的方式执行。\n' +
+    terminalProblemHandlingInstructions() +
     '- 终稿第一行恰好是：## 说明方案\n' +
     '- 说明方案须含：**结论**（任务结果一句话）、**做了什么**（改了啥/效果；若排障写清根因与处理）、**验收**（用户怎么验证，3～5 步）、**改动文件**（路径列表）。写给人看，清楚友好。\n'
   )
 }
 
-function shouldMock(apiKey: string): boolean {
-  // 仅显式 MOCK=1 才走假写码；禁止靠 test-* Key 在「已配置」表象下改真工程
-  if (process.env.CURSOR_CHAT_MOCK === '1') return true
-  const k = String(apiKey || '').trim()
-  if (!k) return true
-  return false
+function shouldMock(): boolean {
+  // 仅显式 MOCK=1 才走假写码。空 Key 不得静默 Mock——会把真需求写成 .cursor-chat-mock.md 并同步污染工程。
+  return process.env.CURSOR_CHAT_MOCK === '1'
 }
 
 function shortTool(v: unknown, limit = 240): string {
@@ -193,7 +228,7 @@ function extractToolMeta(message: unknown): {
   if (!message || typeof message !== 'object') return {}
   const m = message as Record<string, unknown>
   const name = String(m.name || m.toolName || m.tool_name || '').trim() || undefined
-  const status = String(m.status || m.tool_status || '').trim() || undefined
+  const rawStatus = String(m.status || m.tool_status || '').trim() || undefined
   const call_id = String(m.call_id || m.callId || m.id || '').trim() || undefined
   const nested =
     m.toolCall && typeof m.toolCall === 'object'
@@ -225,23 +260,44 @@ function extractToolMeta(message: unknown): {
     toolCommandFromArgs(args) ||
     (nested ? toolCommandFromArgs(nested) : '') ||
     undefined
+  const result = m.result ?? m.output ?? (nested ? nested.result : undefined)
+  const outcome = inferShellToolOutcome({
+    toolName: name,
+    status: rawStatus,
+    result,
+    hasCommand: Boolean(command),
+  })
   const writeSnip =
     toolSnippetFromArgs(args, name, path) ||
     toolSnippetFromArgs(m.result, name, path) ||
     undefined
   const todoSnip = toolTodoSnippetFromArgs(args, name)
+  const failSnip =
+    outcome.status === 'failed'
+      ? outcome.failureReason || shellFailureReasonFromResult(result)
+      : undefined
   const resultSnip =
     toolResultPreview(m.result, name, path) ||
     toolResultPreview(m.output, name, path) ||
     (nested ? toolResultPreview(nested.result, name, path) : undefined) ||
     undefined
-  const snippet = writeSnip || todoSnip || resultSnip || undefined
+  const askSnip =
+    isAskUserToolName(name) && args
+      ? String((args as { question?: unknown }).question || '').trim().slice(0, 240) || undefined
+      : undefined
+  const snippet =
+    (failSnip ? `失败：${failSnip}` : undefined) ||
+    writeSnip ||
+    todoSnip ||
+    askSnip ||
+    resultSnip ||
+    undefined
   return {
     name,
     path: path || undefined,
     pattern: pattern || undefined,
     command: command || undefined,
-    status,
+    status: outcome.status || rawStatus,
     call_id,
     snippet,
   }
@@ -579,7 +635,21 @@ export async function runCursorLocal(opts: {
         ? '正在连接 Cursor，准备确认服务…'
         : '正在启动 Cursor Local，请稍候…'
   mkdirSync(opts.sandbox, { recursive: true })
-  if (shouldMock(opts.apiKey)) {
+  const apiKey = String(opts.apiKey || '').trim()
+  if (!apiKey && !shouldMock()) {
+    const err = '未配置 Cursor API Key，无法写码。请到设置 → AI写码填写后重试。'
+    opts.onEvent({ type: 'error', message: err })
+    return {
+      ok: false,
+      text: '',
+      thinking: '',
+      transcript: [],
+      agent_id: '',
+      run_id: '',
+      error: err,
+    }
+  }
+  if (shouldMock()) {
     if (phase === 'service' || phase === 'ops') {
       const ops = phase === 'ops'
       opts.onEvent({ type: 'status', message: ops ? 'Mock：跳过开发操作' : 'Mock：跳过终端确认' })
@@ -666,6 +736,109 @@ export async function runCursorLocal(opts: {
     }
   }
 
+  const jobIdForChoice = String(opts.ledgerJobId || '').trim()
+  let awaitingUserChoice = false
+  const askUserChoiceTool =
+    jobIdForChoice
+      ? {
+          description:
+            '当需要用户确认或在几种处理方案中选择时调用。给出清晰问题与 2～4 个选项，阻塞等待用户在进度卡点选后返回所选内容，再继续执行。',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              question: { type: 'string', description: '要问用户的问题' },
+              options: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '2～4 个互斥选项文案',
+              },
+            },
+            required: ['question', 'options'],
+          },
+          annotations: {
+            title: 'Ask user',
+            readOnlyHint: true,
+            openWorldHint: true,
+            idempotentHint: false,
+          },
+          execute: async (args: Record<string, unknown>, ctx: { toolCallId?: string }) => {
+            if (opts.isCancel()) return { content: [{ type: 'text', text: '任务已取消' }], isError: true }
+            const question = String(args.question || '').trim()
+            const options = args.options
+            const callId = String(ctx.toolCallId || `ask-${Date.now().toString(36)}`)
+            awaitingUserChoice = true
+            bus.upsertTool({
+              name: 'ask_user_choice',
+              status: 'running',
+              call_id: callId,
+              snippet: question.slice(0, 240),
+            })
+            opts.onEvent({
+              type: 'tool_event',
+              name: 'ask_user_choice',
+              tool_status: 'running',
+              call_id: callId,
+              snippet: question.slice(0, 240),
+              message: '等待用户选择…',
+            })
+            opts.onEvent({ type: 'status', message: `等待用户确认：${question.slice(0, 120)}` })
+            const waited = waitForUserChoice({
+              jobId: jobIdForChoice,
+              callId,
+              question,
+              options,
+            })
+            // 落到 job，进度卡/SSE 可渲染选项按钮（waitForUserChoice 同步登记 pending）
+            const pending = getPendingUserChoice(jobIdForChoice)
+            if (pending) {
+              patchJob(jobIdForChoice, { pending_user_choice: pending })
+            }
+            const result = await waited
+            awaitingUserChoice = false
+            patchJob(jobIdForChoice, { pending_user_choice: null })
+            if (opts.isCancel()) {
+              return { content: [{ type: 'text', text: '任务已取消' }], isError: true }
+            }
+            if (!result.ok) {
+              bus.upsertTool({
+                name: 'ask_user_choice',
+                status: 'failed',
+                call_id: callId,
+                snippet: result.detail,
+              })
+              opts.onEvent({
+                type: 'tool_event',
+                name: 'ask_user_choice',
+                tool_status: 'failed',
+                call_id: callId,
+                snippet: result.detail,
+              })
+              return { content: [{ type: 'text', text: result.detail }], isError: true }
+            }
+            const tip = `用户已选：${result.answer}`
+            bus.upsertTool({
+              name: 'ask_user_choice',
+              status: 'completed',
+              call_id: callId,
+              snippet: tip,
+            })
+            opts.onEvent({
+              type: 'tool_event',
+              name: 'ask_user_choice',
+              tool_status: 'completed',
+              call_id: callId,
+              snippet: tip,
+            })
+            opts.onEvent({ type: 'status', message: tip })
+            return tip
+          },
+        }
+      : null
+  const localOpts = {
+    cwd: opts.sandbox,
+    ...(askUserChoiceTool ? { customTools: { ask_user_choice: askUserChoiceTool } } : {}),
+  }
+
   const bootOnce = async (): Promise<Awaited<ReturnType<typeof Agent.create>>> => {
     if (opts.resumeAgentId) {
       const tip = `续跑 Agent ${opts.resumeAgentId.slice(0, 12)}…`
@@ -677,7 +850,7 @@ export async function runCursorLocal(opts: {
           Agent.resume(opts.resumeAgentId, {
             apiKey: opts.apiKey,
             model: { id: model },
-            local: { cwd: opts.sandbox },
+            local: localOpts,
           }),
         )
       } catch (resumeErr) {
@@ -699,7 +872,7 @@ export async function runCursorLocal(opts: {
       Agent.create({
         apiKey: opts.apiKey,
         model: { id: model },
-        local: { cwd: opts.sandbox },
+        local: localOpts,
       }),
     )
   }
@@ -892,16 +1065,46 @@ export async function runCursorLocal(opts: {
     let idleTimedOut = false
     let streamAborted = false
     let idleTimer: ReturnType<typeof setTimeout> | undefined
+    // 同一次安装命令若超过该时长仍未结束：视为下载挂死，中断后由上层再试（不误伤写码 phase）
+    const installStallMaxMs = phase === 'ops' ? 6 * 60_000 : 0
     const bumpIdle = () => {
       if (idleTimer) clearTimeout(idleTimer)
       idleTimer = setTimeout(() => {
         const elapsed = Date.now() - runStartedAt
-        if (transcriptHasRunningTools(bus.transcript) && elapsed < absoluteMaxMs) {
-          opts.onEvent({
-            type: 'status',
-            message: `工具仍在执行，继续等待${working}…`,
-          })
-          bus.addStatus(`工具仍在执行，继续等待${working}…`)
+        const install = phase === 'ops' ? runningInstallTool(bus.transcript) : null
+        if (awaitingUserChoice) {
+          opts.onEvent({ type: 'status', message: '正在等待用户在进度卡确认/选择，选定后继续处理…' })
+          bus.addStatus('等待用户确认')
+          bumpIdle()
+          return
+        }
+        if (
+          installStallMaxMs > 0 &&
+          install &&
+          Date.now() - install.startedAt >= installStallMaxMs
+        ) {
+          idleTimedOut = true
+          const tip =
+            `依赖安装已超过 ${Math.round(installStallMaxMs / 60000)} 分钟仍未结束，判定可能网络挂死，已中断当前安装。` +
+            `原因：长时间无完成的 pip/npm 安装。下一步：只装启动所缺的最小包、换源，或 ask_user_choice 让用户选 venv / --user / 自行安装；不要空等或重复整包盲装。`
+          opts.onEvent({ type: 'status', message: tip })
+          bus.addStatus(tip)
+          void Promise.resolve()
+            .then(async () => {
+              if (run.supports('cancel')) await run.cancel()
+            })
+            .catch(() => {
+              /* ignore */
+            })
+          return
+        }
+        if (transcriptHasRunningTools(bus.transcript) && (awaitingUserChoice || elapsed < absoluteMaxMs)) {
+          const waited = install ? Math.round((Date.now() - install.startedAt) / 1000) : 0
+          const tip = install
+            ? `正在安装依赖（已 ${waited}s），像 Cursor IDE 一样继续等待；装完会再启动服务…`
+            : `工具仍在执行，继续等待${working}…`
+          opts.onEvent({ type: 'status', message: tip })
+          bus.addStatus(tip)
           bumpIdle()
           return
         }
@@ -1035,6 +1238,36 @@ export async function runCursorLocal(opts: {
 
     bus.sealThinking()
     bus.sealAssistant()
+    // 终端命令必须有终态：仍停在 running 的 Shell / ask_user 收成 failed，避免进度卡永远转圈
+    for (const it of bus.transcript) {
+      if (!it || it.kind !== 'tool') continue
+      const st = String(it.tool_status || '').toLowerCase()
+      if (st !== 'running' && st !== 'in_progress') continue
+      const shellish = isShellToolName(it.name) || Boolean(it.command)
+      const askish = isAskUserToolName(it.name)
+      if (!shellish && !askish) continue
+      const reason = opts.isCancel()
+        ? '任务已取消'
+        : askish
+          ? '等待用户选择已中断'
+          : '未收到命令结束状态'
+      it.tool_status = 'failed'
+      if (!it.snippet) it.snippet = `失败：${reason}`
+      opts.onEvent({
+        type: 'tool_event',
+        name: it.name,
+        path: it.path,
+        pattern: it.pattern,
+        command: it.command,
+        tool_status: 'failed',
+        call_id: it.call_id,
+        snippet: it.snippet,
+      })
+    }
+    if (jobIdForChoice) {
+      cancelUserChoice(jobIdForChoice, opts.isCancel() ? '用户取消' : '本轮已结束')
+      patchJob(jobIdForChoice, { pending_user_choice: null })
+    }
 
     if ((opts.isCancel() || streamAborted) && !idleTimedOut) {
       let cancelWait: unknown = null

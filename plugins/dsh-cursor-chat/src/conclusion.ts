@@ -5,7 +5,15 @@
 import { isLocalDbRel } from './pathScope.js'
 import { criticalDeferredFiles } from './scopeCompanions.js'
 import { preferredConclusionAssistantText } from './transcript.js'
-import { isInventoryOnlyRequirement } from './workKind.js'
+import { readBackendPortFromViteProxy } from './backendRestart.js'
+import { readFrontendDevPort } from './serviceEnsure.js'
+import {
+  classifyOpsTerminal,
+  isInventoryOnlyRequirement,
+  opsRestartVerifySteps,
+  opsVerifyDefaults,
+  parseOpsListenPorts,
+} from './workKind.js'
 import type { CursorCodingJob } from './types.js'
 
 const SECTION_NAMES = [
@@ -99,6 +107,10 @@ function auditScopeLines(
       lines.push(`• 需求·页面：${String(c.detail || '').trim()}`)
     } else if (c.name === 'requirement_api') {
       lines.push(`• 需求·接口：${String(c.detail || '').trim()}`)
+    } else if (c.name === 'param_contract') {
+      lines.push(`• 分页契约：${String(c.detail || '').trim()}`)
+    } else if (c.name === 'schema_drift') {
+      lines.push(`• 库表结构：${String(c.detail || '').trim()}`)
     } else if (c.name === 'pytest') {
       lines.push(`• 测试：${String(c.detail || '').trim()}`)
     } else if (c.detail) {
@@ -214,6 +226,240 @@ function bulletize(block: string, fallback: string[]): string[] {
   return lines.slice(0, 12)
 }
 
+/** Markdown 表格行（含分隔行）。进列表会破坏渲染，须整表原样输出。 */
+function isMdTableRow(line: string): boolean {
+  const t = String(line || '').trim()
+  if (!t.includes('|')) return false
+  if (/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(t)) return true
+  return /^\|(.+\|)+/.test(t) || /\|(.+\|)+$/.test(t)
+}
+
+function splitLooseColumns(line: string): string[] {
+  const t = String(line || '').trim()
+  if (!t) return []
+  if (t.includes('|') && isMdTableRow(t)) {
+    let s = t
+    if (s.startsWith('|')) s = s.slice(1)
+    if (s.endsWith('|')) s = s.slice(0, -1)
+    return s.split('|').map((c) => c.trim())
+  }
+  if (t.includes('\t')) return t.split(/\t+/).map((c) => c.trim()).filter(Boolean)
+  if (/\s{2,}/.test(t)) return t.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean)
+  return []
+}
+
+/** 制表符 / 多空格分列 /「--- ---」：Cursor 有时不写管道符 */
+function isLooseTableRow(line: string): boolean {
+  const t = String(line || '').trim()
+  if (!t) return false
+  if (isMdTableRow(t)) return true
+  if (/^[-–—.]{3,}(\s+[-–—.]{3,})+$/.test(t)) return true
+  const cols = splitLooseColumns(t)
+  if (cols.length < 2) return false
+  // 多空格分列时要求短单元格，避免把普通长句误收成表
+  if (!t.includes('\t') && !t.includes('|') && cols.some((c) => c.length > 64)) return false
+  if (/[。；]$/.test(t) && cols.length === 2 && t.length > 48) return false
+  return true
+}
+
+/** 统一成 GFM 管道表行，供 lightMdHtml / renderMd 转 <table> */
+function toPipeTableRow(line: string): string {
+  const t = String(line || '').trim()
+  if (isMdTableRow(t)) return t
+  if (/^[-–—.]{3,}(\s+[-–—.]{3,})+$/.test(t)) {
+    const n = Math.max(2, t.split(/\s+/).filter(Boolean).length)
+    return `| ${Array.from({ length: n }, () => '---').join(' | ')} |`
+  }
+  const cells = splitLooseColumns(t)
+  if (cells.length >= 2) return `| ${cells.join(' | ')} |`
+  return t
+}
+
+function collectTableBlock(rows: string[], start: number): { lines: string[]; next: number } {
+  const first = String(rows[start] || '').trim()
+  if (!isLooseTableRow(first)) return { lines: [], next: start }
+  const wantCols = splitLooseColumns(first).length || 2
+  const table: string[] = []
+  let i = start
+  while (i < rows.length) {
+    const row = String(rows[i] || '').trim()
+    if (!row) break
+    if (!isLooseTableRow(row)) break
+    const cols = splitLooseColumns(row)
+    // 多空格表：列数差太多就停，避免吞进下文
+    if (!row.includes('|') && !row.includes('\t') && cols.length && Math.abs(cols.length - wantCols) > 1) {
+      break
+    }
+    table.push(toPipeTableRow(row))
+    i += 1
+    if (table.length >= 24) break
+  }
+  // 单行不像表
+  if (table.length < 2) return { lines: [], next: start }
+  return { lines: table, next: i }
+}
+
+function collectFenceBlock(rows: string[], start: number): { lines: string[]; next: number } {
+  const first = String(rows[start] || '').trim()
+  if (!/^```/.test(first)) return { lines: [], next: start }
+  const fence: string[] = [String(rows[start] || '').trimEnd()]
+  let i = start + 1
+  while (i < rows.length) {
+    fence.push(String(rows[i] || '').trimEnd())
+    if (/^```\s*$/.test(String(rows[i] || '').trim())) {
+      i += 1
+      break
+    }
+    i += 1
+    if (fence.length >= 80) break
+  }
+  return { lines: fence, next: i }
+}
+
+function looksLikeVerifyStep(text: string): boolean {
+  const t = String(text || '').trim()
+  if (!t || t.length > 160) return false
+  // 「前端：http://…」访问行用 bullet，接近可点链接列表，不占验收序号
+  if (/^(前端|后端|健康检查)[:：]\s*https?:\/\//i.test(t)) return false
+  if (/^(打开|查看|确认|浏览器|curl|对照|执行|在项目|在本机|任务管理器)/.test(t)) return true
+  if (/应(看到|返回|有|为|仍在)/.test(t)) return true
+  if (/^https?:\/\//.test(t)) return true
+  return false
+}
+
+/**
+ * 开发操作「做了什么」：普通句仍用 •；连续表格整块保留（含制表符表），供结论壳渲染。
+ */
+function formatOpsDidOutput(block: string, fallback: string[]): string[] {
+  const raw = String(block || '').replace(/\r\n/g, '\n').trim()
+  if (!raw) {
+    return fallback.filter(Boolean).map((b) => `• ${String(b).replace(/\s+/g, ' ').trim()}`)
+  }
+  const rows = raw.split('\n')
+  const out: string[] = []
+  let i = 0
+  while (i < rows.length) {
+    const trimmed = String(rows[i] || '').trim()
+    if (!trimmed) {
+      i += 1
+      continue
+    }
+    if (isLooseTableRow(trimmed)) {
+      const blockTbl = collectTableBlock(rows, i)
+      i = blockTbl.next
+      if (blockTbl.lines.length >= 2) {
+        if (out.length && out[out.length - 1] !== '') out.push('')
+        out.push(...blockTbl.lines)
+        out.push('')
+      } else if (blockTbl.lines.length === 1) {
+        out.push(`• ${blockTbl.lines[0]}`)
+      }
+      continue
+    }
+    const text = trimmed
+      .replace(/^\s*(?:[-*•]+|\d+[.)、］]|（?\d+）)\s*/, '')
+      .replace(/\*\*/g, '')
+      .trim()
+    if (!text || /^#{1,3}\s/.test(text)) {
+      i += 1
+      continue
+    }
+    // 「失败用例摘要：」一类小标题单独成行，不进 bullet，紧挨后面的表格
+    if (/[:：]$/.test(text) && text.length <= 40) {
+      if (out.length && out[out.length - 1] !== '') out.push('')
+      out.push(text)
+      i += 1
+      continue
+    }
+    out.push(`• ${text.replace(/\s+/g, ' ')}`)
+    i += 1
+  }
+  while (out.length && out[out.length - 1] === '') out.pop()
+  if (!out.length) {
+    return fallback.filter(Boolean).map((b) => `• ${String(b).replace(/\s+/g, ' ').trim()}`)
+  }
+  return out
+}
+
+/**
+ * 「请你验收」：
+ * - 真正的验收步骤才 1.2.3.
+ * - 表格 / 代码围栏整块保留，禁止编进序号
+ * - 说明性长文改用 •，避免把日志摘录编成第 15 步
+ */
+function formatOpsVerifyOutput(block: string, fallback: string[]): string[] {
+  const raw = String(block || '').replace(/\r\n/g, '\n').trim()
+  if (!raw) {
+    // 缺省验收也走同一套分类，避免把「访问地址 / 前端：http…」一律编成 1.2.3.
+    const fb = fallback
+      .filter(Boolean)
+      .map((b) => String(b).replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+    if (!fb.length) return []
+    return formatOpsVerifyOutput(fb.join('\n'), [])
+  }
+  const rows = raw.split('\n')
+  const out: string[] = []
+  let step = 1
+  let i = 0
+  while (i < rows.length) {
+    const trimmed = String(rows[i] || '').trim()
+    if (!trimmed) {
+      i += 1
+      continue
+    }
+    if (/^```/.test(trimmed)) {
+      const fence = collectFenceBlock(rows, i)
+      i = fence.next
+      if (fence.lines.length) {
+        if (out.length && out[out.length - 1] !== '') out.push('')
+        out.push(...fence.lines)
+        out.push('')
+      }
+      continue
+    }
+    const blockTbl = collectTableBlock(rows, i)
+    if (blockTbl.lines.length >= 2) {
+      i = blockTbl.next
+      if (out.length && out[out.length - 1] !== '') out.push('')
+      out.push(...blockTbl.lines)
+      out.push('')
+      continue
+    }
+    const text = trimmed
+      .replace(/^\s*(?:[-*•]+|\d+[.)、］]|（?\d+）)\s*/, '')
+      .replace(/\*\*/g, '')
+      .trim()
+    if (!text || /^#{1,3}\s/.test(text)) {
+      i += 1
+      continue
+    }
+    if (/[:：]$/.test(text) && text.length <= 40 && !/^(请你)?验收/.test(text)) {
+      if (out.length && out[out.length - 1] !== '') out.push('')
+      out.push(text)
+      i += 1
+      continue
+    }
+    const compact = text.replace(/\s+/g, ' ')
+    if (step <= 8 && looksLikeVerifyStep(compact)) {
+      out.push(`${step}. ${compact}`)
+      step += 1
+    } else {
+      out.push(`• ${compact}`)
+    }
+    i += 1
+  }
+  while (out.length && out[out.length - 1] === '') out.pop()
+  if (!out.length) {
+    // 已有正文却仍空时不要递归同一段，退回 bullet，避免死循环
+    return fallback
+      .filter(Boolean)
+      .map((b) => `• ${String(b).replace(/\s+/g, ' ').trim()}`)
+      .filter((b) => b !== '• ')
+  }
+  return out
+}
+
 function uniqPaths(paths: string[]): string[] {
   const seen = new Set<string>()
   const out: string[] = []
@@ -224,6 +470,34 @@ function uniqPaths(paths: string[]): string[] {
     out.push(s)
   }
   return out
+}
+
+/** 重启验收用端口：先认进度/详情里的「已在听」，缺了再读项目配置（与拉起同源）。 */
+function resolveRestartListenPorts(
+  job: CursorCodingJob,
+  detailText: string,
+  stepLines: string[],
+): { frontend?: number; backend?: number } {
+  const fromText = parseOpsListenPorts([detailText, ...stepLines].join('\n'))
+  const ws = String(job.workspace || '').trim()
+  if (!ws) return fromText
+  try {
+    if (!fromText.frontend) {
+      const fe = readFrontendDevPort(ws)
+      if (fe) fromText.frontend = fe
+    }
+  } catch {
+    /* 读配置失败则保持缺省，验收退回笼统文案 */
+  }
+  try {
+    if (!fromText.backend) {
+      const be = readBackendPortFromViteProxy(ws)
+      if (be) fromText.backend = be
+    }
+  } catch {
+    /* 同上 */
+  }
+  return fromText
 }
 
 /** 重启/测试/看日志：结论按终端操作写，不提沙箱、不提空跑。 */
@@ -247,31 +521,36 @@ function formatOpsConclusion(
   // 插件按项目命令拉起时，进度里已有「已在听」；不要再用 Cursor 长文充「做了什么」
   const pluginRestart =
     stepLines.length > 0 || /已按项目命令|没有找到启动命令/.test(detailText)
-  const didLines = (stepLines.length
+  const didOutput = stepLines.length
     ? stepLines
-    : bulletize(didSec, [detailText || '已在项目目录执行，未改代码'])
-  )
-    .map((b) => b.replace(/\s+/g, ' ').trim())
-    .filter((b) => b && b !== detailText)
-  const verifyLines = bulletize(
-    verifySec,
-    pluginRestart
-      ? [
-          '打开原来的前端地址，确认页面能打开',
-          '打开后端健康检查或接口文档，确认仍在原端口',
-          '若没起来，把项目 .dev-logs 里的报错发回本对话',
-        ]
-      : [
-          '看进度卡里的终端命令是否已经执行',
-          '确认前后端仍是原来的端口，页面或接口能打开',
-          '若没起来，把终端报错发回本对话',
-        ],
-  )
-    .map((b) => b.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-  const failed = job.status === 'failed' || job.status === 'cancelled'
+        .map((b) => b.replace(/\s+/g, ' ').trim())
+        .filter((b) => b && b !== detailText)
+        .map((b) => `• ${b}`)
+    : formatOpsDidOutput(didSec, [detailText || '已在项目目录执行，未改代码']).filter(
+        (b) => b !== `• ${detailText}` && b !== detailText,
+      )
+  const cancelled = job.status === 'cancelled'
+  const terminalKind = pluginRestart ? 'restart' : classifyOpsTerminal(job.requirement || '')
+  const verifyFallback =
+    terminalKind === 'restart'
+      ? opsRestartVerifySteps(resolveRestartListenPorts(job, detailText, stepLines))
+      : opsVerifyDefaults(terminalKind)
+  let verifyOutput = cancelled ? [] : formatOpsVerifyOutput(verifySec, verifyFallback)
+  // 重启成功且已有端口时：若 Cursor 验收段没带本机链接，改用带链接的步骤，避免只剩「打开原来的前端地址」
+  if (!cancelled && terminalKind === 'restart') {
+    const ports = resolveRestartListenPorts(job, detailText, stepLines)
+    if ((ports.frontend || ports.backend) && !/https?:\/\/127\.0\.0\.1:\d+/i.test(verifyOutput.join('\n'))) {
+      verifyOutput = formatOpsVerifyOutput('', opsRestartVerifySteps(ports))
+    }
+  }
+  const failed = job.status === 'failed' || cancelled
   const status = statusHeadline(job.status || '')
-  const resultOne = resultSec.replace(/^说明方案\s*/i, '').replace(/\s+/g, ' ').trim()
+  // 结果行仍单行；去掉 Cursor 偶发漏配的 **，避免「5 失败**」
+  const resultOne = resultSec
+    .replace(/^说明方案\s*/i, '')
+    .replace(/\*\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
   const lines = [
     `## 本轮结论`,
     ``,
@@ -279,11 +558,14 @@ function formatOpsConclusion(
     ``,
     `改动：`,
     `• 本轮未改代码`,
-    ...didLines.filter(Boolean).map((b) => `• ${b}`),
-    ``,
-    `请你验收：`,
-    ...verifyLines.map((b, i) => `${i + 1}. ${b}`),
+    ...didOutput,
   ]
+  // 已取消：不要再套「打开前端/健康检查」验收，避免误导用户去验未完成的任务
+  if (!cancelled && verifyOutput.length) {
+    lines.push(``)
+    lines.push(`请你验收：`)
+    lines.push(...verifyOutput)
+  }
   if (failed && job.detail) {
     lines.push(``)
     lines.push(`说明：${String(job.detail).replace(/\s+/g, ' ').trim()}`)
@@ -504,10 +786,13 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     if (sandboxSkipped.length > 15) lines.push(`• …另有 ${sandboxSkipped.length - 15} 个`)
   }
 
-  lines.push(``)
-  lines.push(`请你验收：`)
-  for (let i = 0; i < verifyLines.length; i++) {
-    lines.push(`${i + 1}. ${verifyLines[i]}`)
+  // 已取消：无需验收段
+  if (job.status !== 'cancelled') {
+    lines.push(``)
+    lines.push(`请你验收：`)
+    for (let i = 0; i < verifyLines.length; i++) {
+      lines.push(`${i + 1}. ${verifyLines[i]}`)
+    }
   }
 
   const beOffer = job.backend_restart

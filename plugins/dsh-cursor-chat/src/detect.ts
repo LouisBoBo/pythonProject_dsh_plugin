@@ -210,3 +210,5 @@ export function describeProject(ps: ProjectStack): string {
   if (ps.signals.length) parts.push(`信号: ${ps.signals.join(', ')}`)
   return parts.join(' | ')
 }
+
+// 布局画像（前后端根/端口）见 projectLayout.ts：detectProjectLayout / describeProjectLayout

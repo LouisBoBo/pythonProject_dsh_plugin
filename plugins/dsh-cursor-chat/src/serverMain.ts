@@ -2,10 +2,17 @@
  * 写码 HTTP 独立进程入口：崩溃不拖垮宿主 Node。
  * 由 startServer(auto/child) 拉起；CURSOR_CHAT_SERVER_ROLE=child。
  */
+import { stripAccidentalMockEnv } from './config.js'
 import { startServerInProcess, stopServerInProcess } from './server.js'
 
 async function main(): Promise<void> {
   process.env.CURSOR_CHAT_SERVER_ROLE = 'child'
+  // 禁止从带 MOCK=1 的 shell 启客户端后继承假写码（真需求会写成 .cursor-chat-mock.md）
+  if (stripAccidentalMockEnv()) {
+    console.warn(
+      '[cursor-chat:child] 已忽略误继承的 CURSOR_CHAT_MOCK（正式写码禁止 Mock；自检请设 CURSOR_CHAT_SELFTEST=1）',
+    )
+  }
   const out = await startServerInProcess()
   if (!out.ok) {
     console.error('[cursor-chat:child] 启动失败', out.detail)

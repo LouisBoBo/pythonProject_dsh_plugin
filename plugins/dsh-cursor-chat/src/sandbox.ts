@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import {
   isLocalDbRel,
+  isNonDeliverableRel,
   isSensitiveRel,
   normalizeRel,
   pathInScope,
@@ -611,7 +612,7 @@ export function verifySyncedFingerprints(
   }
   for (const raw of rels || []) {
     const r = normalizeRel(raw)
-    if (!r || isSensitiveRel(r) || isLocalDbRel(r)) continue
+    if (!r || isNonDeliverableRel(r)) continue
     const src = join(sb, r)
     const dst = join(tg, r)
     let srcFp = ''
@@ -760,7 +761,7 @@ export function listSandboxTargetDrift(
   const out: string[] = []
   for (const [rel, fp] of sbMap) {
     const r = normalizeRel(rel)
-    if (!r || isSensitiveRel(r) || isLocalDbRel(r)) continue
+    if (!r || isNonDeliverableRel(r)) continue
     if (scope.length && !pathInScope(r, scope)) continue
     const dest = join(tg, r)
     let tFp = '__absent__'
@@ -781,7 +782,7 @@ export function filterMeaningfulRels(rels: string[]): string[] {
   const seen = new Set<string>()
   for (const raw of rels || []) {
     const r = normalizeRel(raw)
-    if (!r || isSensitiveRel(r) || isLocalDbRel(r) || seen.has(r)) continue
+    if (!r || isNonDeliverableRel(r) || seen.has(r)) continue
     seen.add(r)
     out.push(r)
   }
@@ -810,7 +811,7 @@ export function syncChangedToTarget(
   let totalBytes = 0
   for (const raw of changedRels) {
     const rel = normalizeRel(raw)
-    if (!rel || isSensitiveRel(rel) || isLocalDbRel(rel)) continue
+    if (!rel || isNonDeliverableRel(rel)) continue
     const src = join(sb, rel)
     assertInside(sb, src)
     if (!existsSync(src) || !statSync(src).isFile()) {

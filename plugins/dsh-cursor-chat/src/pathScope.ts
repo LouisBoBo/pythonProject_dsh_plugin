@@ -127,6 +127,24 @@ export function isLocalDbRel(rel: string): boolean {
   return LOCAL_DB_SUFFIXES.some((suf) => lower.endsWith(suf))
 }
 
+/**
+ * Mock 标记文件：正式工程禁止同步（防误继承 MOCK 污染真仓库）。
+ * 自检 CURSOR_CHAT_MOCK=1 时放行，供同步链路验证。
+ */
+export function isMockMarkerRel(rel: string): boolean {
+  const r = normalizeRel(rel)
+  if (!r) return false
+  const base = r.split('/').pop() || r
+  return base === '.cursor-chat-mock.md'
+}
+
+/** 正式交付不得同步的路径（库文件、敏感、Mock 标记等） */
+export function isNonDeliverableRel(rel: string): boolean {
+  if (isSensitiveRel(rel) || isLocalDbRel(rel)) return true
+  if (isMockMarkerRel(rel) && process.env.CURSOR_CHAT_MOCK !== '1') return true
+  return false
+}
+
 export function shouldSkipDirname(name: string): boolean {
   if (COPY_SKIP_DIR_NAMES.has(name) || name.startsWith('.git')) return true
   return false
@@ -140,7 +158,7 @@ export function partitionChangedPaths(
   const deferred: string[] = []
   for (const rel of changed) {
     const r = normalizeRel(rel)
-    if (!r || isSensitiveRel(r) || isLocalDbRel(r)) continue
+    if (!r || isNonDeliverableRel(r)) continue
     if (pathInScope(r, scope)) inScope.push(r)
     else deferred.push(r)
   }

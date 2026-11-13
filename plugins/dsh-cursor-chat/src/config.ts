@@ -120,11 +120,34 @@ export function maskSecret(value: string): string {
   return `${v.slice(0, 4)}…${v.slice(-4)}`
 }
 
+/** 显式 CURSOR_CHAT_MOCK=1 才走假写码（仅自检）。 */
+export function isMockCodingEnabled(): boolean {
+  return process.env.CURSOR_CHAT_MOCK === '1'
+}
+
+/**
+ * 正式写码入口剥掉误继承的 MOCK。
+ * 场景：从带 CURSOR_CHAT_MOCK=1 的 shell Start-Process 启客户端 → 子进程继承 → 真需求写成 .cursor-chat-mock.md。
+ * 自检须同时设 CURSOR_CHAT_SELFTEST=1，否则 Mock 会被剥掉。
+ * @returns 是否实际删除了 MOCK
+ */
+export function stripAccidentalMockEnv(): boolean {
+  if (process.env.CURSOR_CHAT_MOCK !== '1') return false
+  if (process.env.CURSOR_CHAT_SELFTEST === '1') return false
+  delete process.env.CURSOR_CHAT_MOCK
+  return true
+}
+
+/** 仅自检允许把 Mock 结果同步到工作区；正式工程即使误入 Mock 也禁止落盘。 */
+export function allowMockDelivery(): boolean {
+  return process.env.CURSOR_CHAT_MOCK === '1' && process.env.CURSOR_CHAT_SELFTEST === '1'
+}
+
 export function cursorKeyReady(cfg: CursorCodingConfig): boolean {
   const k = cfg.cursorApiKey.trim()
   if (!k) return false
   // Mock 自检允许任意非空 Key；正式运行拒绝 test-* 伪装成已配置
-  if (process.env.CURSOR_CHAT_MOCK === '1') return true
+  if (isMockCodingEnabled()) return true
   if (k === 'test-key-not-real' || /^test-/i.test(k)) return false
   return true
 }

@@ -203,11 +203,19 @@ window.__ModuleLoader__.load({
       }
       if (/把(项目|服务|前后端|前端|后端)跑起来/.test(t)) return true
       if (/(跑|执行|运行).{0,4}(测试|单测)/.test(t)) return true
-      if (/(安装|装).{0,4}依赖/.test(t)) return true
-      if (/npminstall|pnpminstall|yarninstall|pipinstall/i.test(t)) return true
+      // 与 workKind.opsLooksLikeInstall / Troubleshoot 同口径（此处仅影响进度卡文案）
+      if (/(安装|装).{0,6}(依赖|deps|packages?|包)/i.test(t)) return true
+      if (/依赖.{0,6}(安装|装上|装一下|没装|缺失|不全)/.test(t)) return true
+      if (/npminstall|npmi|pnpminstall|pnpmi|yarninstall|yarnadd|pipinstall|uvsync|poetryinstall/i.test(t)) {
+        return true
+      }
       if (/(看|查|查看|读).{0,6}日志/.test(t)) return true
       if (/(查|看|检查).{0,4}环境/.test(t)) return true
-      if (/排障|排查(一下|下)?(问题|报错|服务|启动|原因)/.test(t)) return true
+      if (/排障|排查/.test(t)) return true
+      if (/(定位|诊断).{0,6}(问题|报错|错误|异常|原因)/.test(t)) return true
+      if (/为什么.{0,10}(报错|失败|起不来|挂了|不行)/.test(t)) return true
+      if (/(启动|重启).{0,8}(失败|报错|错误|异常|不了)/.test(t)) return true
+      if (/起不来/.test(t)) return true
       return false
     }
 
@@ -580,6 +588,17 @@ window.__ModuleLoader__.load({
         '.cc-bubble.tool-group .cc-tool-line .name{flex:0 0 auto;font-weight:600;color:#1d4ed8}' +
         '.cc-bubble.tool-group .cc-tool-line .st{flex:0 0 auto;opacity:.62;font-size:11px;letter-spacing:.02em}' +
         '.cc-bubble.tool-group .cc-tool-line .st.is-fail{color:#cf222e;opacity:.9}' +
+        '.cc-cmd .cc-cmd-st{margin-left:auto;font-size:11px;opacity:.75}' +
+        '.cc-cmd .cc-cmd-st.is-fail{color:#ff7b72;opacity:.95}' +
+        '.cc-cmd .cc-cmd-fail{margin:0;padding:8px 12px;font-size:12px;line-height:1.45;color:#ffb4a8;background:#161b22;border-top:1px solid #30363d;white-space:pre-wrap;word-break:break-word}' +
+        '.cc-user-choice{margin:10px 0 12px;padding:12px 14px;border-radius:12px;border:1px solid rgba(47,111,237,.28);background:rgba(47,111,237,.06)}' +
+        '.cc-user-choice .q{font-size:13px;font-weight:600;line-height:1.45;margin:0 0 10px;color:inherit}' +
+        '.cc-user-choice .opts{display:flex;flex-direction:column;gap:8px}' +
+        '.cc-user-choice .opt{display:block;width:100%;text-align:left;padding:9px 12px;border-radius:10px;border:1px solid rgba(47,111,237,.22);background:#fff;color:#1d4ed8;font-size:12.5px;line-height:1.4;cursor:pointer}' +
+        '.cc-user-choice .opt:hover{border-color:rgba(47,111,237,.45);background:rgba(47,111,237,.08)}' +
+        '.cc-user-choice .opt:disabled{opacity:.55;cursor:wait}' +
+        '.cc-user-choice .hint{margin:8px 0 0;font-size:11px;opacity:.65}' +
+
         '.cc-bubble.tool-group .cc-tool-line .path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.72;color:inherit}' +
         /* Cursor Diff：强制深色（!important 防宿主浅色主题冲掉） */ +
         '.cc-bubble.tool-rich{margin:8px 0 12px}' +
@@ -668,8 +687,16 @@ window.__ModuleLoader__.load({
         '.cc-conclusion .cc-li{position:relative;margin:3px 0;padding:0 0 0 1.05em;line-height:1.55;word-break:break-word}' +
         '.cc-conclusion .cc-li::before{content:"•";position:absolute;left:0;opacity:.65}' +
         '.cc-conclusion .cc-ol{margin:3px 0;padding:0;line-height:1.55;word-break:break-word}' +
+        '.cc-conclusion .cc-md-link{color:#38bdf8!important;text-decoration:underline!important;word-break:break-all;cursor:pointer!important;background:transparent!important;border:none!important;padding:0!important;margin:0;font:inherit;display:inline;vertical-align:baseline;box-shadow:none!important}' +
+        '.cc-conclusion .cc-md-link:hover{opacity:.9;filter:brightness(1.08)}' +
         '.cc-conclusion hr{margin:10px 0 6px;border:none;border-top:1px dashed rgba(127,127,127,.35)}' +
+
         '.cc-conclusion pre.cc-md-code{margin:6px 0;padding:10px 12px;border-radius:8px;background:rgba(24,24,27,.92);color:#e4e4e7;overflow:auto;max-height:none;border:1px solid rgba(255,255,255,.06)}' +
+        '.cc-conclusion .cc-md-table-wrap{margin:8px 0 10px;overflow:auto;max-width:100%}' +
+        '.cc-conclusion .cc-md-table{border-collapse:collapse;width:100%;font-size:13px;line-height:1.45}' +
+        '.cc-conclusion .cc-md-table th,.cc-conclusion .cc-md-table td{border:1px solid rgba(127,127,127,.28);padding:6px 10px;text-align:left;vertical-align:top;word-break:break-word}' +
+        '.cc-conclusion .cc-md-table th{font-weight:600;background:rgba(127,127,127,.1)}' +
+        '.cc-conclusion .cc-md-table td code{white-space:pre-wrap}' +
         '.cc-conclusion code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;padding:1px 6px;border-radius:5px;background:rgba(127,127,127,.18)}' +
         /* 挂到过程组外：宿主折叠「已调用工具」后用户仍能看见三段式结论 */
         '.cc-conclusion-hoist{display:block;margin:8px 0 12px;padding:0;color:inherit;font-size:14px;line-height:1.6}' +
@@ -687,7 +714,10 @@ window.__ModuleLoader__.load({
         '.cc-changes-actions .cc-ch-link{border:0;background:transparent;color:inherit;opacity:.75;cursor:default;font:inherit;padding:0 2px}' +
         '.cc-changes-actions .cc-ch-review{border:1px solid var(--color-border,rgba(127,127,127,.35));border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12px;padding:4px 12px;cursor:default;opacity:.85}' +
         '.cc-changes-list{border-top:1px solid var(--color-border,rgba(127,127,127,.22));padding:4px 0}' +
-        '.cc-changes-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 14px;font-size:12.5px;line-height:1.35}' +
+        '.cc-changes-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 14px;font-size:12.5px;line-height:1.35;width:100%;box-sizing:border-box;border:0;background:transparent;color:inherit;text-align:left;font:inherit}' +
+        '.cc-changes-row.is-clickable{cursor:pointer}' +
+        '.cc-changes-row.is-clickable:hover{background:rgba(127,127,127,.08)}' +
+        '.cc-changes-row.is-clickable:hover .path{opacity:1;text-decoration:underline;text-underline-offset:2px}' +
         '.cc-changes-row .path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.88;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}' +
         '.cc-changes-row .tag{flex:0 0 auto;font-size:12px;opacity:.7;font-variant-numeric:tabular-nums}' +
         '.cc-changes-row .tag.del{color:#cf222e}' +
@@ -1605,6 +1635,12 @@ window.__ModuleLoader__.load({
       var beConfirmState = useState(false)
       var beConfirmOpen = beConfirmState[0]
       var setBeConfirmOpen = beConfirmState[1]
+      var pendingChoiceState = useState(null)
+      var pendingChoice = pendingChoiceState[0]
+      var setPendingChoice = pendingChoiceState[1]
+      var choiceBusyState = useState(false)
+      var choiceBusy = choiceBusyState[0]
+      var setChoiceBusy = choiceBusyState[1]
       // 本卡本轮写码过才武装自动重启，避免刷新旧卡误杀端口
       var beAutoArmedRef = useRef(false)
       var beAutoDoneRef = useRef('')
@@ -1656,6 +1692,8 @@ window.__ModuleLoader__.load({
         setBeRestart(null)
         setBeHint('')
         setBeConfirmOpen(false)
+        setPendingChoice(null)
+        setChoiceBusy(false)
         beAutoArmedRef.current = false
         beAutoDoneRef.current = ''
         var req = String(nextReq || argsMsg || lastUser || '').trim()
@@ -2476,6 +2514,11 @@ window.__ModuleLoader__.load({
         } else if (job.backend_restart_hint === null) {
           setBeHint('')
         }
+        if (job.pending_user_choice && job.pending_user_choice.question) {
+          setPendingChoice(job.pending_user_choice)
+        } else if (job.pending_user_choice === null || TERMINAL_JOB[st]) {
+          setPendingChoice(null)
+        }
         var jid = String(job.id || jobId || '').trim()
         if (jid) {
           saveSessionCache(jid, {
@@ -2486,6 +2529,49 @@ window.__ModuleLoader__.load({
             chat_conclusion: conc || undefined,
           })
         }
+      }
+
+      function submitUserChoice(choice) {
+        var id = String(jobId || '').trim()
+        var text = String(choice || '').trim()
+        if (!id || !text || choiceBusy) return
+        setChoiceBusy(true)
+        fetch(base() + '/api/hitl/issue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'cursor-chat.user-choice', job_id: id }),
+        })
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (issued) {
+            if (!issued || !issued.ok || !issued.nonce) {
+              throw new Error((issued && issued.detail) || '签发确认令牌失败')
+            }
+            return fetch(base() + '/api/cursor-chat/jobs/' + encodeURIComponent(id) + '/user-choice', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ choice: text, nonce: issued.nonce }),
+            })
+          })
+          .then(function (r) {
+            return r.json().then(function (d) {
+              return { status: r.status, data: d }
+            })
+          })
+          .then(function (out) {
+            if (!out.data || !out.data.ok) {
+              throw new Error((out.data && out.data.detail) || '确认失败 HTTP ' + out.status)
+            }
+            setPendingChoice(null)
+            appendStream('用户已选：' + String(out.data.answer || text))
+          })
+          .catch(function (e) {
+            setErr(String((e && e.message) || e || '确认失败'))
+          })
+          .finally(function () {
+            setChoiceBusy(false)
+          })
       }
 
       function reconcileJob(jid) {
@@ -2563,10 +2649,14 @@ window.__ModuleLoader__.load({
                 assistant_text: data.assistant_text,
                 chat_conclusion: data.chat_conclusion,
                 synced_files: data.synced_files,
+                pending_user_choice: data.pending_user_choice,
                 transcript: Array.isArray(data.transcript)
                   ? data.transcript.map(function (it) {
                       if (!it || it.kind !== 'tool') return it
                       var st = String(it.tool_status || '').toLowerCase()
+                      if (st === 'error' || st === 'failed') {
+                        return Object.assign({}, it, { tool_status: 'failed', streaming: false })
+                      }
                       if (st === 'completed' || st === 'done' || st === 'success') {
                         return Object.assign({}, it, { tool_status: 'completed', streaming: false })
                       }
@@ -3866,9 +3956,12 @@ window.__ModuleLoader__.load({
         )
       }
 
-      function renderCmdCard(cmd) {
+      function renderCmdCard(cmd, statusLabel, failHint) {
         var text = String(cmd || '').trim()
         if (!text) return null
+        var st = String(statusLabel || '').toLowerCase()
+        var failed = st === 'failed'
+        var stText = failed ? 'failed' : st === 'completed' ? 'completed' : st === 'running' ? 'running' : st || ''
         return h(
           'div',
           {
@@ -3876,8 +3969,19 @@ window.__ModuleLoader__.load({
             'aria-label': '命令',
             style: { background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d' },
           },
-          h('div', { className: 'cc-cmd-head', style: { background: '#161b22' } }, 'Terminal'),
+          h(
+            'div',
+            {
+              className: 'cc-cmd-head',
+              style: { background: '#161b22', display: 'flex', alignItems: 'center', gap: '8px' },
+            },
+            h('span', null, 'Terminal'),
+            stText
+              ? h('span', { className: 'cc-cmd-st' + (failed ? ' is-fail' : '') }, stText)
+              : null,
+          ),
           h('pre', { style: { background: '#0d1117', color: '#e6edf3' } }, text),
+          failed && failHint ? h('pre', { className: 'cc-cmd-fail' }, failHint) : null,
         )
       }
 
@@ -3895,12 +3999,49 @@ window.__ModuleLoader__.load({
         var snip = String((it && it.snippet) || '').trim()
         var path = shortPath((it && it.path) || '') || toolMetaLine(it)
         if (cmd && path === cmd) path = ''
+        var stLabel = toolStatusLabel(it)
+        var failHint =
+          stLabel === 'failed' && snip
+            ? snip
+            : ''
         var block = cmd
-          ? renderCmdCard(cmd)
+          ? renderCmdCard(cmd, stLabel, failHint)
           : snip
             ? renderDiffCard(path || (it && it.path) || '', snip, it && it.id)
             : null
         return h('div', { key: it.id, className: 'cc-bubble tool-rich' }, block)
+      }
+
+      function renderUserChoicePanel() {
+        if (!pendingChoice || !pendingChoice.question) return null
+        var opts = Array.isArray(pendingChoice.options) ? pendingChoice.options : []
+        return h(
+          'div',
+          { className: 'cc-user-choice', 'data-cc-user-choice': '1' },
+          h('p', { className: 'q' }, String(pendingChoice.question || '')),
+          h(
+            'div',
+            { className: 'opts' },
+            opts.map(function (o, i) {
+              var label = String((o && o.label) || o || '').trim()
+              if (!label) return null
+              return h(
+                'button',
+                {
+                  key: String((o && o.id) || i),
+                  type: 'button',
+                  className: 'opt',
+                  disabled: !!choiceBusy,
+                  onClick: function () {
+                    submitUserChoice(label)
+                  },
+                },
+                label,
+              )
+            }),
+          ),
+          h('p', { className: 'hint' }, choiceBusy ? '已提交，继续处理中…' : '请选择一项后继续'),
+        )
       }
 
       function renderToolGroupNode(tools, key) {
@@ -4053,7 +4194,7 @@ window.__ModuleLoader__.load({
                 metaLive && !liveCmd && !liveSnip
                   ? h('span', { className: 'meta' }, metaLive)
                   : null,
-                liveCmd ? renderCmdCard(liveCmd) : null,
+                liveCmd ? renderCmdCard(liveCmd, 'running', '') : null,
                 !liveCmd && liveSnip
                   ? renderDiffCard(shortPath(it.path) || it.path || '', liveSnip, it.id)
                   : null,
@@ -4396,6 +4537,7 @@ window.__ModuleLoader__.load({
                         : null,
                   )
                 : null,
+              renderUserChoicePanel(),
               // 写码终态仍铺过程。开发操作保持折叠，避免终端流水把结论顶走。
               !isDoneView || !opsCard
                 ? h(
@@ -4469,16 +4611,169 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 结论壳只允许点开本机 http(s)，避免把任意外链塞进可点击控件 */
+    function isSafeBrowseUrl(url) {
+      try {
+        var u = new URL(String(url || ''))
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+        var h = String(u.hostname || '').toLowerCase()
+        return h === '127.0.0.1' || h === 'localhost'
+      } catch (e0) {
+        return false
+      }
+    }
+
+    function openSafeBrowseUrl(url) {
+      var href = String(url || '').trim()
+      if (!isSafeBrowseUrl(href)) return false
+      try {
+        var opened = window.open(href, '_blank', 'noopener,noreferrer')
+        if (opened) return true
+      } catch (e0) {}
+      try {
+        var a = document.createElement('a')
+        a.href = href
+        a.target = '_blank'
+        a.rel = 'noopener noreferrer'
+        a.style.display = 'none'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        return true
+      } catch (e1) {
+        return false
+      }
+    }
+
+    /**
+     * 用 button 而不是 a：部分宿主会剥掉结论 HTML 里的 <a>，URL 就变回纯文本。
+     * 点击由 installConclusionLinkOpener 打开系统/新页浏览器。
+     */
+    function lightMdSafeLink(url, label) {
+      var href = String(url || '').trim()
+      if (!isSafeBrowseUrl(href)) return String(label || href)
+      var text = String(label || href)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+      var safeHref = href.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      return (
+        '<button type="button" class="cc-md-link" data-cc-open="' +
+        safeHref +
+        '" title="在浏览器打开">' +
+        text +
+        '</button>'
+      )
+    }
+
+    function installConclusionLinkOpener() {
+      if (typeof document === 'undefined' || document.__ccMdLinkOpen) return
+      document.__ccMdLinkOpen = true
+      var onActivate = function (ev) {
+        var t = ev && ev.target
+        var el = t && t.closest ? t.closest('.cc-md-link[data-cc-open]') : null
+        if (!el) return
+        var href = String(el.getAttribute('data-cc-open') || '').trim()
+        if (!isSafeBrowseUrl(href)) return
+        try {
+          if (ev.preventDefault) ev.preventDefault()
+          if (ev.stopPropagation) ev.stopPropagation()
+        } catch (e0) {}
+        openSafeBrowseUrl(href)
+      }
+      document.addEventListener('click', onActivate, true)
+      document.addEventListener(
+        'keydown',
+        function (ev) {
+          if (!ev || (ev.key !== 'Enter' && ev.key !== ' ')) return
+          onActivate(ev)
+        },
+        true,
+      )
+    }
+    try {
+      installConclusionLinkOpener()
+    } catch (eLink) {}
+
     function lightMdInline(s) {
-      return String(s || '')
+      var html = String(s || '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      // 先占位再还原，避免 data-cc-open 里的 URL 被二次包成控件
+      var slots = []
+      var park = function (piece) {
+        var i = slots.length
+        slots.push(piece)
+        return '\u0000L' + i + '\u0000'
+      }
+      html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, function (_m, label, url) {
+        return park(lightMdSafeLink(url, label))
+      })
+      html = html.replace(/(https?:\/\/[^\s<>"'\u0000））；;，,]+)/g, function (url) {
+        return park(lightMdSafeLink(url, url))
+      })
+      html = html.replace(/\u0000L(\d+)\u0000/g, function (_m, idx) {
+        return slots[Number(idx)] || ''
+      })
+      return html
     }
 
-    /** 按行排版（对齐图二：标签：正文 / • 列表 / 段间空行） */
+    function isLightMdTableRow(t) {
+      var s = String(t || '').trim()
+      if (!s || s.indexOf('|') < 0) return false
+      if (/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(s)) return true
+      return /^\|(.+\|)+/.test(s) || /\|(.+\|)+\s*$/.test(s)
+    }
+
+    function isLightMdTableSep(t) {
+      var s = String(t || '').trim()
+      return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(s)
+    }
+
+    function splitLightMdTableCells(t) {
+      var s = String(t || '').trim()
+      if (s.charAt(0) === '|') s = s.slice(1)
+      if (s.charAt(s.length - 1) === '|') s = s.slice(0, -1)
+      return s.split('|').map(function (c) {
+        return String(c || '').trim()
+      })
+    }
+
+    function renderLightMdTable(rows) {
+      if (!rows || !rows.length) return ''
+      var start = 0
+      var head = null
+      if (rows.length >= 2 && isLightMdTableSep(rows[1])) {
+        head = splitLightMdTableCells(rows[0])
+        start = 2
+      }
+      var html = '<div class="cc-md-table-wrap"><table class="cc-md-table">'
+      if (head && head.length) {
+        html += '<thead><tr>'
+        for (var h = 0; h < head.length; h++) {
+          html += '<th>' + lightMdInline(head[h]) + '</th>'
+        }
+        html += '</tr></thead>'
+      }
+      html += '<tbody>'
+      for (var r = start; r < rows.length; r++) {
+        if (isLightMdTableSep(rows[r])) continue
+        var cells = splitLightMdTableCells(rows[r])
+        if (!cells.length) continue
+        html += '<tr>'
+        for (var c = 0; c < cells.length; c++) {
+          html += '<td>' + lightMdInline(cells[c]) + '</td>'
+        }
+        html += '</tr>'
+      }
+      html += '</tbody></table></div>'
+      return html
+    }
+
+    /** 按行排版（对齐图二：标签：正文 / • 列表 / 段间空行 / MD 表格） */
     function lightMdHtml(text) {
       var lines = String(text || '')
         .replace(/\r\n/g, '\n')
@@ -4501,6 +4796,21 @@ window.__ModuleLoader__.load({
         }
         if (/^---+$/.test(t)) {
           out.push('<hr/>')
+          continue
+        }
+        // GFM 表：须整块转 <table>。结论壳不是宿主 GFM，| 行当普通段落不会成表。
+        if (isLightMdTableRow(t)) {
+          var tableRows = []
+          while (i < lines.length) {
+            var tr = String(lines[i] || '').trim()
+            if (!tr || !isLightMdTableRow(tr)) break
+            tableRows.push(tr)
+            i += 1
+            if (tableRows.length >= 40) break
+          }
+          i -= 1
+          if (tableRows.length >= 2) out.push(renderLightMdTable(tableRows))
+          else out.push('<div class="cc-p">' + lightMdInline(tableRows[0] || t) + '</div>')
           continue
         }
         if (/^[•·]\s+/.test(t) || /^[-*]\s+/.test(t)) {
@@ -4818,6 +5128,45 @@ window.__ModuleLoader__.load({
       return best
     }
 
+    function isFallbackChangesCard(el) {
+      return Boolean(el && el.getAttribute && el.getAttribute('data-cc-changes-fallback') === '1')
+    }
+
+    /** 底座原生改动卡（ui-deliverables），排除本插件兜底卡 */
+    function isNativeChangedFilesCard(el) {
+      if (!el || !el.getAttribute) return false
+      if (isFallbackChangesCard(el)) return false
+      if (!el.hasAttribute('data-changed-files')) return false
+      var t = String(el.textContent || '')
+      // 须像真卡：标题 + 不至于整页正文误伤
+      if (!/已编辑/.test(t)) return false
+      if (t.length >= 8000) return false
+      return true
+    }
+
+    /**
+     * 同级 turnTail 列表里找底座原生卡。禁止用 previousSibling 正文模糊匹配——
+     * 误判一次 skipNative 会永久关掉结论下的文件列表。
+     */
+    function findSiblingNativeChangesCard(host) {
+      if (!host || !host.parentElement || !host.parentElement.children) return null
+      try {
+        var kids = host.parentElement.children
+        for (var i = 0; i < kids.length; i++) {
+          var el = kids[i]
+          if (!el || el === host) continue
+          if (isNativeChangedFilesCard(el)) return el
+          if (el.querySelectorAll) {
+            var marked = el.querySelectorAll('[data-changed-files]')
+            for (var j = 0; j < marked.length; j++) {
+              if (isNativeChangedFilesCard(marked[j])) return marked[j]
+            }
+          }
+        }
+      } catch (e0) {}
+      return null
+    }
+
     function findEditedCardIn(root) {
       if (!root || !root.querySelectorAll) return null
       try {
@@ -4826,9 +5175,13 @@ window.__ModuleLoader__.load({
         var nodes = root.querySelectorAll('div,section,article')
         for (var i = 0; i < nodes.length; i++) {
           var el = nodes[i]
-          if (el.getAttribute && el.getAttribute('data-cc-changes-fallback') === '1') continue
+          if (isFallbackChangesCard(el)) continue
           if (el.getAttribute && el.getAttribute('data-cc-conclusion-hoist') === '1') continue
           if (el.closest && el.closest('[data-cc-conclusion-hoist="1"]')) continue
+          if (!isNativeChangedFilesCard(el) && !/已编辑\s*\d+\s*个文件/.test(String(el.textContent || ''))) {
+            continue
+          }
+          if (isFallbackChangesCard(el)) continue
           var t = String(el.textContent || '')
           if (!/已编辑\s*\d+\s*个文件/.test(t)) continue
           if (t.length >= 2000) continue
@@ -4933,6 +5286,9 @@ window.__ModuleLoader__.load({
       var beErrState = useState('')
       var beErr = beErrState[0]
       var setBeErr = beErrState[1]
+      var skipNativeState = useState(false)
+      var skipNative = skipNativeState[0]
+      var setSkipNative = skipNativeState[1]
       var sessionId = String((props && props.sessionId) || '').trim()
       var turn = props && props.turn
       var turnStart = Number(turn && turn.start && turn.start.time) || 0
@@ -4948,6 +5304,25 @@ window.__ModuleLoader__.load({
       var beHintText = item ? String(item.backend_restart_hint || '').trim() : ''
       var jidTail = item ? String(item.id || '').trim() : ''
       var turnRecent = turnEnd > 0 && Date.now() - turnEnd < 180000
+      var syncedList = item
+        ? [].concat(item.synced_files || [], item.files || []).filter(function (p, i, arr) {
+            var s = String(p || '').trim()
+            if (!s) return false
+            // files 可能已含 synced+deleted，下面 deleted 再补；此处先去重
+            return arr.indexOf(p) === i
+          })
+        : []
+      // files 里可能混了删除项；仍以 deleted_files 为准展示删除标记
+      var deletedList = item && Array.isArray(item.deleted_files) ? item.deleted_files : []
+      if (deletedList.length && syncedList.length) {
+        var delSet = {}
+        for (var di = 0; di < deletedList.length; di++) {
+          delSet[String(deletedList[di] || '').replace(/\\/g, '/')] = true
+        }
+        syncedList = syncedList.filter(function (p) {
+          return !delSet[String(p || '').replace(/\\/g, '/')]
+        })
+      }
 
       useEffect(
         function () {
@@ -4962,6 +5337,13 @@ window.__ModuleLoader__.load({
           var startMs = turnStart
           // 只有刚结束的轮次才轮询：历史轮次各拉一次足够，避免长会话放大请求
           var recent = endMs > 0 && Date.now() - endMs < 180000
+          function fileCount(it) {
+            if (!it) return 0
+            var n = 0
+            var a = [].concat(it.synced_files || [], it.deleted_files || [], it.files || [])
+            for (var i = 0; i < a.length; i++) if (String(a[i] || '').trim()) n += 1
+            return n
+          }
           function pull() {
             loadSessionConclusion(sessionId, { fresh: tries > 0 }).then(function (d) {
               if (stopped) return
@@ -4976,6 +5358,11 @@ window.__ModuleLoader__.load({
                 return
               }
               setPayload(d)
+              // 结论常先于同步落盘：文件列表仍空时短轮询，避免结论下永远没有改动卡
+              if (recent && fileCount(hit) === 0 && tries < 10) {
+                tries += 1
+                timer = setTimeout(pull, 800)
+              }
             })
           }
           pull()
@@ -5051,31 +5438,33 @@ window.__ModuleLoader__.load({
         [jidTail, beOffer && beOffer.port, beOffer && beOffer.started_at, turnRecent, sessionId],
       )
 
+      useEffect(
+        function () {
+          var jid = String(jidTail || '').trim()
+          if (!jid || typeof document === 'undefined') {
+            setSkipNative(false)
+            return
+          }
+          var host = document.querySelector(
+            '[data-cc-turn-tail="1"][data-cc-job-id="' + jid.replace(/"/g, '') + '"]',
+          )
+          if (!host) {
+            setSkipNative(false)
+            return
+          }
+          // 仅当同级已有底座原生卡时跳过兜底；误判会永久吃掉文件列表，禁止扫正文模糊匹配
+          var native = findSiblingNativeChangesCard(host)
+          setSkipNative(Boolean(native))
+        },
+        [jidTail, syncedList.length, deletedList.length, md],
+      )
+
       if (!payload || !item) return null
       if (!md || md.indexOf('本轮结论') < 0) return null
       ensureCss()
-      var files = []
-        .concat(item.synced_files || [])
-        .concat(item.deleted_files || [])
-        .concat(item.files || [])
-      var seen = {}
-      var uniq = []
-      for (var i = 0; i < files.length; i++) {
-        var f = String(files[i] || '').trim()
-        if (!f || seen[f]) continue
-        seen[f] = true
-        uniq.push(f)
-      }
-      var extra = ''
-      if (uniq.length) {
-        extra =
-          '\n\n涉及文件：\n' +
-          uniq
-            .map(function (p) {
-              return '• `' + p + '`'
-            })
-            .join('\n')
-      }
+      // 路径清单不进正文：优先底座原生「已编辑」卡；沙箱写码通常无原生 deliverables，结论下必须兜底
+      var showChangesFallback =
+        !skipNative && (syncedList.length > 0 || deletedList.length > 0)
 
       function runTailRestartManual() {
         if (!jidTail || !beOffer || beOffer.started_at || beBusy) return
@@ -5135,7 +5524,7 @@ window.__ModuleLoader__.load({
         },
         h('div', {
           className: 'cc-conclusion',
-          dangerouslySetInnerHTML: { __html: lightMdHtml(md + extra) },
+          dangerouslySetInnerHTML: { __html: lightMdHtml(md) },
         }),
         beOffer
           ? h(
@@ -5188,6 +5577,167 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'cc-be-reason' }, beHintText),
               )
             : null,
+        // 结论下方：无底座原生卡时补「已编辑 N 个文件」（行可点 → 右侧工作区）
+        showChangesFallback
+          ? renderChangesFallbackCard(syncedList, deletedList, {
+              openFile: props && props.openFile,
+              sessionId: sessionId,
+            })
+          : null,
+      )
+    }
+
+    function displayRelPath(p) {
+      var s = String(p || '').replace(/\\/g, '/')
+      var m = s.match(/\/sandboxes\/[^/]+\/(.+)$/)
+      return m ? m[1] : s
+    }
+
+    /** 编码 dsh-resource://file/session/<id>/<path> 的一段 */
+    function encodeFileAddrSegment(segment) {
+      return encodeURIComponent(String(segment || '')).replace(/%3A/gi, ':')
+    }
+
+    /**
+     * 在右侧工作区打开相对路径。
+     * 优先 turnTail.openFile；没有则直接 sidebarRight.openResource（本机实测 props.openFile 常缺）。
+     */
+    function openWorkspaceRel(relPath, opts) {
+      var path = String(relPath || '')
+        .replace(/\\/g, '/')
+        .replace(/^\.\//, '')
+        .trim()
+      if (!path) return false
+      // 拒绝逃逸：.. / 绝对盘符 / ~ / 空字节
+      if (
+        path.indexOf('\0') >= 0 ||
+        path.indexOf('~') >= 0 ||
+        path.indexOf(':') >= 0 ||
+        path.charAt(0) === '/' ||
+        path.split('/').indexOf('..') >= 0
+      ) {
+        return false
+      }
+      var openFile = opts && opts.openFile
+      if (typeof openFile === 'function') {
+        try {
+          openFile(path)
+          return true
+        } catch (e0) {
+          /* fall through */
+        }
+      }
+      var sid = String((opts && opts.sessionId) || '').trim()
+      var ctx = hostCtxRef && hostCtxRef.ctx
+      if (!sid || !ctx) return false
+      try {
+        var sidebar = ctx.sidebarRight
+        if ((!sidebar || typeof sidebar.openResource !== 'function') && typeof ctx.get === 'function') {
+          try {
+            sidebar = ctx.get('sidebarRight')
+          } catch (e1) {
+            sidebar = null
+          }
+        }
+        if (!sidebar || typeof sidebar.openResource !== 'function') return false
+        var encPath = path
+          .split('/')
+          .map(encodeFileAddrSegment)
+          .join('/')
+        var url =
+          'dsh-resource://file/session/' + encodeFileAddrSegment(sid) + '/' + encPath
+        sidebar.openResource(url)
+        return true
+      } catch (e2) {
+        return false
+      }
+    }
+
+    /** 对齐底座「已编辑 N 个文件」外观；仅兜底。点击走 openWorkspaceRel。 */
+    function renderChangesFallbackCard(synced, deleted, openOpts) {
+      var syncedArr = Array.isArray(synced) ? synced : []
+      var deletedArr = Array.isArray(deleted) ? deleted : []
+      var sid = String((openOpts && openOpts.sessionId) || '').trim()
+      var hasOpenFn = openOpts && typeof openOpts.openFile === 'function'
+      // sessionId 在即可走 sidebar 兜底，不依赖 openFile 是否注入
+      var canOpen = hasOpenFn || Boolean(sid)
+      var seen = {}
+      var rows = []
+      for (var i = 0; i < syncedArr.length; i++) {
+        var p = String(syncedArr[i] || '').trim().replace(/\\/g, '/')
+        if (!p || seen[p]) continue
+        seen[p] = true
+        rows.push({ path: p, kind: 'edit' })
+      }
+      for (var j = 0; j < deletedArr.length; j++) {
+        var d = String(deletedArr[j] || '').trim().replace(/\\/g, '/')
+        if (!d || seen[d]) continue
+        seen[d] = true
+        rows.push({ path: d, kind: 'del' })
+      }
+      if (!rows.length) return null
+      var base0 = displayRelPath(rows[0].path).split('/').pop() || rows[0].path
+      var title = rows.length === 1 ? '已编辑 ' + base0 : '已编辑 ' + rows.length + ' 个文件'
+      return h(
+        'div',
+        {
+          className: 'cc-changes-card',
+          'data-cc-changes-fallback': '1',
+          'data-changed-files': '1',
+          'data-cc-openable': canOpen ? '1' : '0',
+          'aria-label': title,
+        },
+        h(
+          'div',
+          { className: 'cc-changes-head' },
+          h('div', { className: 'cc-changes-ico', 'aria-hidden': 'true' }, '📄'),
+          h(
+            'div',
+            { className: 'cc-changes-meta' },
+            h('p', { className: 'cc-changes-title' }, title),
+            h(
+              'div',
+              { className: 'cc-changes-stats' },
+              syncedArr.length
+                ? h('span', { className: 'plus' }, '+' + syncedArr.length)
+                : null,
+              deletedArr.length
+                ? h('span', { className: 'minus' }, '-' + deletedArr.length)
+                : null,
+            ),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'cc-changes-list' },
+          rows.map(function (row, idx) {
+            var shown = displayRelPath(row.path) || row.path
+            var tip = shown + (canOpen ? '（点击在右侧工作区打开）' : '')
+            return h(
+              canOpen ? 'button' : 'div',
+              {
+                key: row.path + '-' + idx,
+                type: canOpen ? 'button' : undefined,
+                className: 'cc-changes-row' + (canOpen ? ' is-clickable' : ''),
+                title: tip,
+                'aria-label': canOpen ? '在工作区打开 ' + shown : shown,
+                onClick: canOpen
+                  ? function (ev) {
+                      if (ev && ev.preventDefault) ev.preventDefault()
+                      if (ev && ev.stopPropagation) ev.stopPropagation()
+                      openWorkspaceRel(row.path, openOpts || {})
+                    }
+                  : undefined,
+              },
+              h('span', { className: 'path' }, shown),
+              h(
+                'span',
+                { className: 'tag' + (row.kind === 'del' ? ' del' : ' add') },
+                row.kind === 'del' ? '删除' : '改动',
+              ),
+            )
+          }),
+        ),
       )
     }
 

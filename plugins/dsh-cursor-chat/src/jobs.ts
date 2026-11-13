@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { loadConfig } from './config.js'
 import { formatChatConclusion } from './conclusion.js'
 import type { CursorCodingJob, JobStatus, StreamEvent } from './types.js'
+import { cancelUserChoice } from './userChoice.js'
 
 const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
 
@@ -124,6 +125,7 @@ export function jobCardView(job: CursorCodingJob): Record<string, unknown> {
     synced_files: job.synced_files || [],
     backend_restart: job.backend_restart || null,
     backend_restart_hint: job.backend_restart_hint || null,
+    pending_user_choice: job.pending_user_choice || null,
     updated_at: job.updated_at,
     chat_conclusion: formatChatConclusion(job),
   }
@@ -373,7 +375,12 @@ export function forceCancelJob(id: string): CursorCodingJob | null {
     return loadJob(job.id)
   }
 
-  patchJob(job.id, { cancelled: true, transcript: sealedTranscript(job) })
+  cancelUserChoice(job.id, '用户取消')
+  patchJob(job.id, {
+    cancelled: true,
+    transcript: sealedTranscript(job),
+    pending_user_choice: null,
+  })
   const cur = loadJob(job.id)!
   setStatus(cur, 'cancelled', '用户取消')
   appendEvent(loadJob(job.id)!, { type: 'done', status: 'cancelled', message: '用户取消' })

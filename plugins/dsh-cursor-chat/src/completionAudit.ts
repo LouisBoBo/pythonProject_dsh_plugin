@@ -14,6 +14,11 @@ import {
 } from './serviceEnsure.js'
 import { isDeleteIntent } from './deleteIntent.js'
 import { normalizeRel } from './pathScope.js'
+import {
+  detectProjectLayout,
+  isBackendRuntimeRel,
+  isFrontendTouchRel,
+} from './projectLayout.js'
 
 export type AuditCheck = { name: string; ok: boolean; detail: string }
 
@@ -216,11 +221,15 @@ function runProcess(cmd: string, args: string[], cwd: string, timeoutMs: number)
 }
 
 /** 运行中探测只覆盖本轮改过的前后端文件，不因为工程里还有别的目录就去探。 */
-export function liveAuditScope(rels: string[]): { frontend: boolean; backend: boolean } {
+export function liveAuditScope(
+  rels: string[],
+  workspace?: string,
+): { frontend: boolean; backend: boolean } {
   const files = rels.map(normRel).filter(Boolean)
+  const layout = workspace ? detectProjectLayout(workspace, files) : null
   return {
-    frontend: files.some((r) => r.startsWith('frontend/')),
-    backend: files.some((r) => r.startsWith('backend/') && r.endsWith('.py') && !isTestFile(r)),
+    frontend: files.some((r) => isFrontendTouchRel(r, layout)),
+    backend: files.some((r) => isBackendRuntimeRel(r, layout) && !isTestFile(r)),
   }
 }
 
@@ -239,8 +248,8 @@ export async function probeLiveAudit(opts: {
   const rels = (opts.synced || []).map(normRel).filter(Boolean)
   const checks: AuditCheck[] = []
 
-  const scope = liveAuditScope(rels)
-  const frontPort = scope.frontend ? readFrontendDevPort(workspace) : null
+  const scope = liveAuditScope(rels, workspace)
+  const frontPort = scope.frontend ? readFrontendDevPort(workspace, rels) : null
   if (scope.frontend) {
     if (!frontPort) {
       checks.push({
@@ -264,7 +273,7 @@ export async function probeLiveAudit(opts: {
     ...quotedApiPaths(workspace, rels),
   ].filter((p, i, arr) => arr.indexOf(p) === i))
   const needBackend = scope.backend || routePaths.length > 0
-  const backPort = needBackend ? readBackendPortFromViteProxy(workspace) : null
+  const backPort = needBackend ? readBackendPortFromViteProxy(workspace, rels) : null
   let backendUp = false
   if (needBackend) {
     if (!backPort) {
@@ -289,25 +298,32 @@ export async function probeLiveAudit(opts: {
   }
 
   if (routePaths.length) {
-    if (!backPort || !backendUp) {
-        checks.push({
-          name: 'requirement_api',
-          ok: false,
-          detail: '同步文件里有接口路径，但后端文档没打开，不能确认接口已加载',
-        })
-      } else {
-        const settled = await openApiBodyWithRoutes(backPort, routePaths)
-        const body = settled.body
-        const missing = settled.missing
-        checks.push({
-          name: 'requirement_api',
-          ok: Boolean(body) && missing.length === 0,
-          detail: !body
-            ? '后端文档开了，但没有拿到 openapi，不能确认接口已加载'
-            : missing.length
-              ? `正在跑的文档里还没有本轮接口：${missing.slice(0, 4).join('、')}`
-              : `运行中的接口文档含本轮接口 ${routePaths.slice(0, 4).join('、')}`,
-        })
+    if (!backPort) {
+      // 认不到端口时不得谎称「文档没打开」；落盘/挂载另有磁盘审计，此处跳过运行中核对
+      checks.push({
+        name: 'requirement_api',
+        ok: true,
+        detail: '同步文件含接口路径，但未能从 Vite 代理识别后端端口，已跳过运行中接口文档核对',
+      })
+    } else if (!backendUp) {
+      checks.push({
+        name: 'requirement_api',
+        ok: false,
+        detail: `同步文件里有接口路径，但后端 :${backPort} 文档没打开，不能确认接口已加载`,
+      })
+    } else {
+      const settled = await openApiBodyWithRoutes(backPort, routePaths)
+      const body = settled.body
+      const missing = settled.missing
+      checks.push({
+        name: 'requirement_api',
+        ok: Boolean(body) && missing.length === 0,
+        detail: !body
+          ? '后端文档开了，但没有拿到 openapi，不能确认接口已加载'
+          : missing.length
+            ? `正在跑的文档里还没有本轮接口：${missing.slice(0, 4).join('、')}`
+            : `运行中的接口文档含本轮接口 ${routePaths.slice(0, 4).join('、')}`,
+      })
     }
   }
 
@@ -315,12 +331,20 @@ export async function probeLiveAudit(opts: {
     .map((rel) => normalizeRel(rel))
     .filter((rel) => rel && isTestFile(rel) && !rel.split('/').some((part) => part.startsWith('-')))
   if (tests.length) {
-    const backendRoot = resolveBackendRoot(workspace)
+    const backendRoot = resolveBackendRoot(workspace, rels)
     const py = venvPython(backendRoot) || 'python'
     const cwd = backendRoot || workspace
-    const args = tests.map((rel) =>
-      backendRoot && rel.startsWith('backend/') ? rel.slice('backend/'.length) : rel,
-    )
+    const args = tests.map((rel) => {
+      if (!backendRoot) return rel
+      const rootPosix = backendRoot.replace(/\\/g, '/')
+      const wsPosix = workspace.replace(/\\/g, '/')
+      const prefix = rootPosix.startsWith(wsPosix + '/')
+        ? rootPosix.slice(wsPosix.length + 1) + '/'
+        : ''
+      if (prefix && rel.startsWith(prefix)) return rel.slice(prefix.length)
+      if (rel.startsWith('backend/')) return rel.slice('backend/'.length)
+      return rel
+    })
     if (args.some((arg) => !arg || arg.startsWith('-') || arg.includes('..'))) {
       checks.push({
         name: 'pytest',

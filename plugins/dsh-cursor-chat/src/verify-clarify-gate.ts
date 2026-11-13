@@ -33,6 +33,7 @@ async function main() {
   process.env.CURSOR_CHAT_HOME = home
   process.env.CURSOR_CHAT_PORT = '18791'
   process.env.CURSOR_CHAT_MOCK = '1'
+  process.env.CURSOR_CHAT_SELFTEST = '1'
   try {
     await startServer()
     const base = getListenAddr()

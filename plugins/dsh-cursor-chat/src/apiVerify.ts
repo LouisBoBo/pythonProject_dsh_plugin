@@ -1,27 +1,20 @@
 /**
  * 新增后端路由模块后验尸：APIRouter 必须挂进 FastAPI main.py / api/__init__.py。
  *
- * 从 Python mom api_verify.py 移植。
- * 历史事故：只同步 backend/app/api/xxx.py 与页面，未改 main.py 的 include_router。
- * 页面能打开，axios 却弹出 FastAPI 原文 Not Found（接口 404）。禁止这种假成功。
+ * 挂载语料与后端根一律走项目画像，不写死顶层 backend/。
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve, join } from 'node:path'
+import { basename, join, relative, resolve, sep } from 'node:path'
 import { isDeleteIntent } from './deleteIntent.js'
+import {
+  detectProjectLayout,
+  resolveBackendMountRels,
+} from './projectLayout.js'
 
 const SKIP_MODULE = new Set([
   '__init__', 'deps', 'errors', 'auth', 'common', 'utils', 'router', 'base',
 ])
-
-const MOUNT_RELS = [
-  'backend/app/main.py',
-  'backend/main.py',
-  'backend/app/api/__init__.py',
-  'backend/app/api/router.py',
-  'backend/app/router.py',
-  'backend/app/api.py',
-] as const
 
 function normRel(raw: string): string {
   return String(raw || '').trim().replace(/\\/g, '/').replace(/^\.\/?/, '')
@@ -42,29 +35,76 @@ function looksLikeRouterFile(path: string): boolean {
   try {
     const text = readFileSync(path, 'utf8')
     return text.includes('APIRouter') || text.includes('APIRoute')
-  } catch { return false }
+  } catch {
+    return false
+  }
+}
+
+/** 路径段兜底：任意深度的 …/(backend|server)/app/(api|routers)/x.py */
+function isRouterModuleRel(rel: string): boolean {
+  return /(?:^|\/)(?:backend|server)\/app\/(?:api|routers)\/[^/]+\.py$/i.test(rel)
+}
+
+function underAbs(fileAbs: string, rootAbs: string): boolean {
+  const f = resolve(fileAbs)
+  const r = resolve(rootAbs)
+  return f === r || f.startsWith(r + sep)
+}
+
+function relFromRoot(rootAbs: string, fileAbs: string): string {
+  return relative(rootAbs, fileAbs).split(sep).join('/')
 }
 
 function newRouterModules(target: string, synced: string[]): { rel: string; name: string }[] {
+  const layout = detectProjectLayout(target, synced)
   const found: { rel: string; name: string }[] = []
   for (const rel of synced) {
     if (!rel.endsWith('.py')) continue
-    if (!rel.startsWith('backend/app/api/') && !rel.startsWith('backend/app/routers/')) continue
-    const name = rel.split('/').pop()!.replace(/\.py$/, '')
+    const name = basename(rel).replace(/\.py$/, '')
     if (!name || SKIP_MODULE.has(name) || name.startsWith('_')) continue
     const full = join(target, rel)
     if (!existsSync(full) || !looksLikeRouterFile(full)) continue
+
+    let accepted = isRouterModuleRel(rel)
+    if (!accepted && layout.backendRoots.length) {
+      for (const br of layout.backendRoots) {
+        if (!underAbs(full, br)) continue
+        const sub = relFromRoot(br, full)
+        if (/^app\/(?:api|routers)\/[^/]+\.py$/i.test(sub)) {
+          accepted = true
+          break
+        }
+      }
+    }
+    if (!accepted) continue
     found.push({ rel, name })
   }
   return found
 }
 
-function mountCorpus(target: string): string {
+function mountCorpus(target: string, synced: string[]): string {
+  const mountRels = resolveBackendMountRels(target, synced)
   const chunks: string[] = []
-  for (const rel of MOUNT_RELS) {
+  for (const rel of mountRels) {
     const path = join(target, rel)
     if (!existsSync(path)) continue
-    try { chunks.push(readFileSync(path, 'utf8')) } catch { /* skip */ }
+    try {
+      chunks.push(readFileSync(path, 'utf8'))
+    } catch {
+      /* skip */
+    }
+  }
+  // 本轮同步的挂载文件也并入语料（画像漏扫时）
+  for (const rel of synced) {
+    if (!/(?:^|\/)(?:main\.py|__init__\.py|router\.py|api\.py)$/i.test(rel)) continue
+    if (mountRels.includes(rel)) continue
+    const path = join(target, rel)
+    if (!existsSync(path)) continue
+    try {
+      chunks.push(readFileSync(path, 'utf8'))
+    } catch {
+      /* skip */
+    }
   }
   return chunks.join('\n')
 }
@@ -93,13 +133,14 @@ export function verifyApiMountedOnTarget(
   const synced = syncedRels(opts?.synced_files)
   const modules = newRouterModules(target, synced)
   if (!modules.length) return { ok: true, detail: '' }
-  const corpus = mountCorpus(target)
-  const missing = modules.filter(m => !moduleMounted(corpus, m.name))
+  const corpus = mountCorpus(target, synced)
+  const missing = modules.filter((m) => !moduleMounted(corpus, m.name))
   if (!missing.length) return { ok: true, detail: '本机接口挂载验尸通过' }
-  const sample = missing.slice(0, 6).map(m => m.rel).join('、')
+  const sample = missing.slice(0, 6).map((m) => m.rel).join('、')
   return {
     ok: false,
-    detail: `${sample} 已同步但未挂进 FastAPI（main.py / api/__init__.py 无 include_router）。` +
+    detail:
+      `${sample} 已同步但未挂进 FastAPI（main.py / api/__init__.py 无 include_router）。` +
       '页面会弹出英文 Not Found（接口 404），禁止报成功。' +
       '请把新 router 注册进挂载文件后重试，并重启本机后端。',
   }
