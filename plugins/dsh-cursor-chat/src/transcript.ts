@@ -288,11 +288,24 @@ export function isWriteToolName(name?: string): boolean {
   )
 }
 
-/** Shell 命令会改或删文件。`2>&1` 这种只重定向到句柄的不算。 */
+/** 重定向目标是空设备或句柄时不改盘。`2>$null`、`2>nul`、`2>&1` 都算只读。 */
+function redirectTargetIsFile(target: string): boolean {
+  const t = target.replace(/^['"]|['"]$/g, '')
+  if (!t) return false
+  if (/^&[12]$/.test(t)) return false
+  if (/^(nul|null|\$null)$/i.test(t)) return false
+  return true
+}
+
+/** Shell 命令会改或删文件。写到文件的重定向算；丢到空设备或句柄的不算。 */
 export function shellCommandMutatesFiles(command?: string): boolean {
   const c = String(command || '')
   if (!c.trim()) return false
-  if (/(?:^|[^&])>(?!&)\s*\S/.test(c)) return true
+  const redirects = /(?:^|[^&])>{1,2}\s*([^\s;&|]+)/g
+  let match: RegExpExecArray | null
+  while ((match = redirects.exec(c))) {
+    if (redirectTargetIsFile(match[1])) return true
+  }
   return /\b(set-content|out-file|add-content|new-item|remove-item|clear-content|git\s+commit|git\s+push|git\s+reset|git\s+checkout)\b/i.test(c)
     || /\b(rm|del|erase|unlink|rmdir)\b/i.test(c)
 }

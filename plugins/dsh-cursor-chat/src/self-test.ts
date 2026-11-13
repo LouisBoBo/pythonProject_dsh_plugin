@@ -76,9 +76,11 @@ import {
 } from './transcript.js'
 import {
   appendEvent,
+  bindAbortToForceCancel,
   createJob,
   findLatestJobByCallId,
   findLatestJobForSession,
+  forceCancelJob,
   jobCardView,
   loadJob,
   onJobChange,
@@ -93,10 +95,17 @@ import {
 } from './requirementGate.js'
 import { decideCodingGate, readAskUserAfterLastUser } from './clarifyFlow.js'
 import { launchCodingJob } from './launchJob.js'
-import { classifyWork, codingParentLink, isInventoryOnlyRequirement } from './workKind.js'
+import { planProjectServices } from './opsRestart.js'
+import {
+  buildOpsPrompt,
+  classifyWork,
+  codingParentLink,
+  isInventoryOnlyRequirement,
+  opsWantsRunningService,
+} from './workKind.js'
 import { isDeleteIntent } from './deleteIntent.js'
 import { patchMenuRouterInSandbox, validateDeletePlan } from './deleteEnforce.js'
-import { BOOT_ATTEMPTS, isTransientBootError, shouldRetryBoot, transcriptHasRunningTools } from './cursor/runner.js'
+import { BOOT_ATTEMPTS, ensureLocalModelCatalog, isTransientBootError, sdkStreamAborted, shouldRetryBoot, transcriptHasRunningTools } from './cursor/runner.js'
 import {
   assertBackendRestartReady,
   buildRestartPowerShellBody,
@@ -188,7 +197,7 @@ async function main() {
     console.log('ok: tilde expand contract')
   }
 
-  // 开发需求（含重启服务）必须交给写码插件里的 Cursor SDK，宿主不得自己动手
+  // 开发需求仍交给本插件。启动/重启按项目命令拉起；其它开发操作才进 Cursor SDK。宿主不得自己动手
   {
     const routeSrc = readFileSync(
       fileURLToPath(new URL('../src/index.ts', import.meta.url)),
@@ -224,6 +233,28 @@ async function main() {
       '只看日志的重定向不得当成改文件',
     )
     assert(
+      transcriptMutatedProject([{ kind: 'tool', name: 'shell', command: 'dir project /b 2>nul' }]) === false,
+      '2>nul 不得当成改文件',
+    )
+    assert(
+      transcriptMutatedProject([{
+        kind: 'tool',
+        name: 'shell',
+        command: 'Select-String -Path proj\\* -Pattern uvicorn -ErrorAction SilentlyContinue 2>$null',
+      }]) === false,
+      '2>$null 不得当成改了真实项目',
+    )
+    assert(
+      transcriptMutatedProject([{ kind: 'tool', name: 'shell', command: 'echo hi > out.txt' }]) === true,
+      '重定向到文件必须算改了真实项目',
+    )
+    assert(sdkStreamAborted('canceled', '') === true, 'SDK 状态 canceled 必须当中止')
+    assert(
+      sdkStreamAborted('', '[unknown] [canceled] This operation was aborted') === true,
+      'SDK 中止短语必须当中止',
+    )
+    assert(sdkStreamAborted('', '重启服务') === false, '用户诉求不得当成 SDK 中止')
+    assert(
       transcriptMutatedProject([{ kind: 'tool', name: 'shell', command: 'Set-Content -Path a.txt -Value x' }]) === true,
       'Set-Content 必须算改了真实项目',
     )
@@ -248,6 +279,9 @@ async function main() {
     assert(classifyWork('排障登录失败') === 'ops', '不改代码的排障按 Cursor 在真实项目执行')
     assert(classifyWork('安装依赖') === 'ops', '装依赖按 Cursor 在真实项目执行')
     assert(classifyWork('把项目跑起来') === 'ops', '把项目跑起来不进写码沙箱')
+    assert(opsWantsRunningService('重启前后端服务') === true, '重启须走项目命令拉起')
+    assert(opsWantsRunningService('把项目跑起来') === true, '跑起来须走项目命令拉起')
+    assert(opsWantsRunningService('跑一下测试') === false, '跑测试仍交给 Cursor')
     assert(classifyWork('排查并修复登录') === 'code', '排障同时要修仍走写码')
     assert(classifyWork('不要改代码，重启前后端') === 'ops', '明确不改代码的重启仍只启动服务')
     assert(classifyWork('新增一个报表页面') === 'code', '新增页面仍是写码')
@@ -285,10 +319,50 @@ async function main() {
       workspace,
     })
     assert(kept.parentSandbox === join(workspace, 'sandbox') && kept.resumeAgentId === 'code-agent', '写码父沙箱仍应继承')
+    {
+      const proj = mkdtempSync(join(tmpdir(), 'cc-ops-plan-'))
+      mkdirSync(join(proj, 'frontend'), { recursive: true })
+      mkdirSync(join(proj, 'backend', 'app'), { recursive: true })
+      writeFileSync(
+        join(proj, 'frontend', 'package.json'),
+        JSON.stringify({ scripts: { dev: 'vite' }, devDependencies: { vite: '6.0.0' } }),
+      )
+      writeFileSync(
+        join(proj, 'frontend', 'vite.config.js'),
+        'export default { server: { port: 5175, proxy: { "/api": { target: "http://127.0.0.1:8009" } } } }\n',
+      )
+      writeFileSync(join(proj, 'backend', 'app', 'main.py'), 'from fastapi import FastAPI\napp = FastAPI()\n')
+      writeFileSync(join(proj, 'pull-refresh.sh'), 'git fetch origin && git merge\n')
+      writeFileSync(join(proj, 'package.json'), JSON.stringify({ scripts: { start: 'bash pull-refresh.sh' } }))
+      const planned = planProjectServices(proj, { frontend: true, backend: true })
+      const fe = planned.plans.find((p) => p.side === 'frontend')
+      const be = planned.plans.find((p) => p.side === 'backend')
+      assert(Boolean(fe && fe.args.join(' ') === 'run dev' && fe.port === 5175), '前端须用项目的 dev 脚本和端口')
+      assert(Boolean(be && be.args.includes('app.main:app') && be.port === 8009), '后端须用项目的 uvicorn 命令')
+      assert(
+        !planned.plans.some((p) => `${p.label} ${p.args.join(' ')}`.includes('pull-refresh')),
+        '不得执行 pull-refresh',
+      )
+      const empty = planProjectServices(workspace, { frontend: true, backend: true })
+      assert(empty.plans.length === 0, '没有命令时不得编造启动命令')
+      const opsSrc = readFileSync(
+        fileURLToPath(new URL('../src/opsRestart.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(opsSrc.includes('LocalAddress 127.0.0.1'), '停端口须限定本机回环')
+      assert(opsSrc.includes('命令行含本项目') || opsSrc.includes('projectNeedles'), '停进程须核对本项目标记')
+      assert(!/Get-NetTCPConnection -LocalPort \$\{plan\.port\}/.test(opsSrc), '禁止不带回环过滤的端口秒杀')
+      rmSync(proj, { recursive: true, force: true })
+      console.log('ok: restart uses project commands')
+    }
     const opsLaunch = launchCodingJob({ workspace, requirement: '重启前后端服务' })
     assert(opsLaunch.ok, 'ops 开工失败')
     if (opsLaunch.ok) {
       assert(opsLaunch.job.work_kind === 'ops', '重启任务须标记为开发操作')
+      assert(
+        String(opsLaunch.job.detail || '').includes('按项目命令启动/重启'),
+        '重启开工文案须写按项目命令，实际 ' + opsLaunch.job.detail,
+      )
       assert(!String(opsLaunch.job.detail || '').includes('沙箱'), '开工文案不得提沙箱')
       const opsDeadline = Date.now() + 8000
       let opsJob = loadJob(opsLaunch.job.id)
@@ -296,14 +370,55 @@ async function main() {
         await new Promise((r) => setTimeout(r, 40))
         opsJob = loadJob(opsLaunch.job.id)
       }
-      assert(opsJob?.status === 'succeeded', '开发操作 Mock 应成功，实际 ' + opsJob?.status + ' ' + opsJob?.detail)
       const opsText = (opsJob?.transcript || []).map((it) => String(it.text || '')).join('\n')
+      assert(opsText.includes('改由 Cursor'), '没有启动命令须降级 Cursor，实际 ' + opsText.slice(0, 200))
+      assert(
+        opsJob?.status === 'succeeded',
+        '没有启动命令时应降级 Cursor 继续处理，实际 ' + opsJob?.status + ' ' + opsJob?.detail,
+      )
       assert(!opsText.includes('正在改码'), '开发操作过程不得说正在改码')
       assert(!opsText.includes('准备沙箱'), '开发操作不得准备沙箱')
       const opsConclusion = formatChatConclusion(opsJob!)
       assert(!opsConclusion.includes('写码空跑'), '未改代码的重启不得写成写码空跑')
       assert(opsConclusion.includes('未改代码'), '结论须写明未改代码')
       assert(!opsJob?.sandbox_path, '启动服务不得把真实项目记成沙箱')
+    }
+    {
+      const fromPlugin = buildOpsPrompt({
+        requirement: '重启前后端',
+        workspace,
+        restartFallback: true,
+      })
+      assert(fromPlugin.includes('没有直接认出命令'), '降级提示须说明插件未认出')
+      assert(fromPlugin.includes('Cursor IDE'), '降级提示须对齐 Cursor IDE')
+      assert(fromPlugin.includes('禁止编造'), '降级后仍禁止编造命令')
+    }
+    {
+      const passJob = createJob({ workspace, requirement: '重启前后端' })
+      patchJob(passJob.id, {
+        work_kind: 'ops',
+        transcript: [
+          {
+            id: 'st1',
+            kind: 'status',
+            at: new Date().toISOString(),
+            text: '后端 app.main:app :8009 已在听',
+          },
+          {
+            id: 'st2',
+            kind: 'status',
+            at: new Date().toISOString(),
+            text: '前端 npm run dev :5175 已在听',
+          },
+        ],
+      })
+      setStatus(loadJob(passJob.id)!, 'succeeded', '已按项目命令处理，未改代码。后端已在听 前端已在听')
+      const body = formatChatConclusion(loadJob(passJob.id)!)
+      assert(body.includes('未改代码'), '插件重启成功结论须写未改代码')
+      assert(body.includes('后端 app.main:app :8009 已在听'), '结论须带上拉起步骤')
+      assert(body.includes('前端 npm run dev :5175 已在听'), '结论须带上前端拉起步骤')
+      assert(body.includes('打开原来的前端地址'), '插件重启验收须让人打开页面')
+      assert(!body.includes('看进度卡里的终端命令'), '插件重启不得再写 Cursor 终端验收')
     }
     console.log('ok: dev work routes to cursor sdk')
   }
@@ -990,6 +1105,31 @@ async function main() {
         'SDK 标了可重试也不能重试密钥错误',
       )
       assert(BOOT_ATTEMPTS >= 3, '启动至少自动重试三轮')
+      const prevCatalog = process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON
+      const prevOwned = process.env.CURSOR_CHAT_MODEL_CATALOG_OWNED
+      delete process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON
+      delete process.env.CURSOR_CHAT_MODEL_CATALOG_OWNED
+      ensureLocalModelCatalog('composer-2.5')
+      assert(
+        process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON === JSON.stringify([{ id: 'composer-2.5' }]),
+        '未提供目录时写入当前模型，避免启动去拉 /v1/models',
+      )
+      ensureLocalModelCatalog('other-model')
+      assert(
+        process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON === JSON.stringify([{ id: 'other-model' }]),
+        '本插件写入的目录随当前模型更新',
+      )
+      process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON = JSON.stringify([{ id: 'kept' }])
+      delete process.env.CURSOR_CHAT_MODEL_CATALOG_OWNED
+      ensureLocalModelCatalog('composer-2.5')
+      assert(
+        process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON === JSON.stringify([{ id: 'kept' }]),
+        '外部模型目录不得覆盖',
+      )
+      if (prevCatalog === undefined) delete process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON
+      else process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON = prevCatalog
+      if (prevOwned === undefined) delete process.env.CURSOR_CHAT_MODEL_CATALOG_OWNED
+      else process.env.CURSOR_CHAT_MODEL_CATALOG_OWNED = prevOwned
       const bootFail = createJob({ workspace, requirement: '看板管理新增设备OEE看板' })
       patchJob(bootFail.id, {
         assistant_text: '',
@@ -1119,6 +1259,10 @@ async function main() {
       '写码卡必须包在自己的边界里',
     )
     assert(clientSrc.includes('!isDoneView || !opsCard'), '写码卡终态仍展示过程，不收进折叠')
+    assert(
+      clientSrc.includes('本轮已停止。') && clientSrc.includes("sealed === 'cancelled'"),
+      '已停止终态不得继续「正在汇总」转圈',
+    )
     console.log('ok: coding card error stays inside the toolview')
   }
 
@@ -1802,6 +1946,31 @@ async function main() {
     const cancelledBody = formatChatConclusion(loadJob(cancelled.id)!)
     assert(cancelledBody.indexOf('结果：⏹ 已取消') >= 0, '取消后不得改写成已完成')
     assert(cancelledBody.indexOf('✅ 已完成') < 0, '已取消的任务不得打绿勾')
+
+    // 宿主 Stop → AbortSignal：必须立刻 forceCancel 后台 job（sleep 中途也会生效）
+    {
+      const live = createJob({ workspace: tg, requirement: '宿主停止须取消后台' })
+      setStatus(loadJob(live.id)!, 'running', '写码中')
+      const ac = new AbortController()
+      const unbind = bindAbortToForceCancel(live.id, ac.signal)
+      ac.abort()
+      unbind()
+      const after = loadJob(live.id)!
+      assert(after.cancelled === true, 'AbortSignal 须写 cancelled=true')
+      assert(after.status === 'cancelled', 'AbortSignal 须把 job 置为 cancelled')
+      console.log('ok: host abort force-cancels running job')
+    }
+    // 历史竞态：status=cancelled 但 cancelled=false 时，forceCancel 须补标志
+    {
+      const leak = createJob({ workspace: tg, requirement: '补写取消标志' })
+      setStatus(loadJob(leak.id)!, 'cancelled', '用户取消')
+      patchJob(leak.id, { cancelled: false })
+      forceCancelJob(leak.id)
+      const fixed = loadJob(leak.id)!
+      assert(fixed.status === 'cancelled', '已取消终态不得改成其它')
+      assert(fixed.cancelled === true, 'forceCancel 须补 cancelled=true')
+      console.log('ok: forceCancel repairs cancelled flag')
+    }
     const passJob = createJob({ workspace: tg, requirement: '审计通过结论' })
     patchJob(passJob.id, {
       synced_files: ['backend/app/routers/work_hours.py'],

@@ -89,6 +89,7 @@ docs/
 | [插件韧性-安装回退与进程隔离.md](./04-Cursor-AI-Coding逼真版本/插件韧性-安装回退与进程隔离.md) | 装失败回退、四套兼容声明、写码 HTTP 子进程隔离 | 0.6.42 |
 | [AI-Coding接入Cursor-插件版实施方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-插件版实施方案.md) | **按五条硬约束重写**：独立 Bundle、零改 WorkBuddy、UI 挂 DSH 原生插槽 | 实施向 |
 | [AI-Coding接入Cursor-体验逼近方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-体验逼近方案.md) | 体验/分期母本（原落点在 WorkBuddy 引擎 + mes-bridge） | 对照用 |
+| [重启服务方案.md](./04-Cursor-AI-Coding逼真版本/重启服务方案.md) | 启动/重启按项目已有命令后台拉起；结构不同时沿用该项目自己的命令 | 2026-11-12 |
 
 **仓库内插件：** `dsh-cursor-coding/`（`@zhongruan/dsh-cursor-coding`）
 

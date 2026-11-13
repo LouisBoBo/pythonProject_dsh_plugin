@@ -107,14 +107,29 @@ export function opsPortExpectation(message: string): { frontend: boolean; backen
 }
 
 export function opsWantsRunningService(message: string): boolean {
-  return /(重启|重新启动|重开|拉起|启动)/.test(compact(message))
+  const t = compact(message)
+  if (/(重启|重新启动|重开|拉起|启动)/.test(t)) return true
+  // 「把项目/服务跑起来」与启动同义，须走项目命令拉起，不能再交给 Cursor 搜仓库
+  if (/(把|让)?(项目|服务|前后端|前端|后端)?跑起来/.test(t)) return true
+  return false
 }
 
-export function buildOpsPrompt(opts: { requirement: string; workspace: string }): string {
+export function buildOpsPrompt(opts: {
+  requirement: string
+  workspace: string
+  /** 插件未认出启动命令后的降级：更贴近 Cursor IDE 自己翻仓库找启动方式 */
+  restartFallback?: boolean
+}): string {
   const req = String(opts.requirement || '').trim()
+  const fallbackNote = opts.restartFallback
+    ? `插件已经扫过常见的 package.json / Vite / uvicorn / Django 启动方式，没有直接认出命令。` +
+      `请像 Cursor IDE 一样继续处理这个启动/重启诉求：读 README、脚本、compose、Makefile、现有终端和配置，找出项目自己的启动方式再后台拉起。` +
+      `仍然禁止编造与本项目无关的命令，禁止为了启动去改代码。\n`
+    : ''
   return (
     `你是 Cursor IDE 里的 Agent，工作目录就是用户正在用的真实项目：${opts.workspace}\n` +
     `本轮没有要求改代码。按 Cursor IDE 处理这类开发任务：先看仓库已有的脚本、配置和正在跑的终端，沿用项目自己的命令，不要另起一套工具链。\n` +
+    fallbackNote +
     `可以做的事包括：启动或重启前后端、把项目跑起来、跑测试、安装依赖、看日志、查环境、排障。只做这句诉求里的那一件，做完就停。\n` +
     `启动或重启时：读配置确认现有端口和启动命令；停掉占用该端口、且工作目录在本项目里的进程；用原来的命令和端口在后台拉起。要前后端就两边都处理。\n` +
     `跑测试、装依赖、看日志、查环境、排障：用项目现有脚本和日志，不要为了看结果去改文件。排障时写清根因；若必须改代码，只在结论里说明该改什么，本轮不要改。\n` +

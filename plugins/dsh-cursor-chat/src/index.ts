@@ -11,7 +11,15 @@ import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { cursorKeyReady, defaultDataRoot, loadConfig, publicConfigView } from './config.js'
-import { findLatestJobForSession, forceCancelJob, jobSummary, listJobs, loadJob, patchJob } from './jobs.js'
+import {
+  bindAbortToForceCancel,
+  findLatestJobForSession,
+  forceCancelJob,
+  jobSummary,
+  listJobs,
+  loadJob,
+  patchJob,
+} from './jobs.js'
 import { applyJobReview, foldLiveAudit, healStalePendingReview } from './orchestrator/runJob.js'
 import { loadPendingConfirm } from './pendingConfirm.js'
 import { decideCodingGate, extractSessionEvents } from './clarifyFlow.js'
@@ -49,7 +57,7 @@ const CODING_ROUTE_SECTION =
   'Cursor SDK 能处理这些开发操作。宿主禁止用 bash/grep/read/glob/pwsh 自己探索、改文件或启动服务。' +
   '范围已够开工时立刻 zr_cchat_begin（同工程续做 zr_cchat_continue），message 放用户最新原话，workspace 为当前工作区绝对路径。' +
   '启动、重启、测试、装依赖、看日志、排障同样立刻 begin/continue，不要先探索工程。' +
-  '不改代码的开发需求（启动/重启前后端、把项目跑起来、跑测试、安装依赖、看日志、查环境、排障）按 Cursor IDE 在真实项目终端执行，不进写码沙箱。改页面、修 bug 以及句子里同时还要改代码的，整轮走写码沙箱。' +
+  '不改代码的启动/重启前后端、把项目跑起来，优先由插件按项目已有命令直接拉起；认不出命令时再降级 Cursor 按 IDE 方式在真实项目终端处理。跑测试、安装依赖、看日志、查环境、排障仍按 Cursor IDE 在真实项目终端执行。改页面、修 bug 以及句子里同时还要改代码的，整轮走写码沙箱。' +
   '若关键范围不清（入口级新增/删除、删到哪一层、新页面挂哪、要不要 CRUD/接口、字段不确定等），必须先 ask_user_question 给 2～4 个选项，答完再 begin/continue（clarified=true）；可追问多轮直到能落地，禁止干等、禁止用长文代替选择题。' +
   '也可先调 begin：若返回 need_clarify，下一步唯一动作仍是 ask_user_question，禁止空转再调 begin。' +
   '调用前禁止用 bash/grep/read/glob/pwsh 探索或动手，禁止自行改文件，禁止用其他工具代替本插件，禁止先向用户长文解释方案。' +
@@ -235,54 +243,67 @@ async function waitJobUntilConclusion(
   jobId: string,
   signal?: AbortSignal,
 ): Promise<ReturnType<typeof loadJob>> {
-  const deadline = Date.now() + 15 * 60 * 1000
-  let pendingSince = 0
-  while (Date.now() < deadline) {
-    if (signal?.aborted) {
+  // 宿主 Stop → AbortSignal：必须立刻 forceCancel 后台 job。
+  // 仅靠循环顶部检查不够——abort 落在 sleep() 里会直接抛错，以前会漏取消。
+  const unbind = bindAbortToForceCancel(jobId, signal)
+  try {
+    const deadline = Date.now() + 15 * 60 * 1000
+    let pendingSince = 0
+    while (Date.now() < deadline) {
+      if (signal?.aborted) {
+        forceCancelJob(jobId)
+        throw new Error('已取消')
+      }
+      healStalePendingReview(jobId)
+      const job = loadJob(jobId)
+      if (!job) return null
+      const st = job.status || ''
+      const detail = String(job.detail || '')
+      const inScopeLen = (job.review_in_scope || []).length
+      const gate = job.review_gate || null
+      // 空范围卡死只对 pending_review 成立；running/queued 时 review 列表天然为空，
+      // 提前返回会把「正在写码」误报成「等待超时」，模型只好自己 sleep 轮询
+      if (
+        FINISH_DONE.has(st) ||
+        (st === 'pending_review' && isStuckEmptyPendingReview(detail, inScopeLen, gate))
+      ) {
+        // 终态已落盘：让 SSE 把带 job_id 的 done 送到进度卡。工具一返回宿主可能冻住 toolview。
+        const updated = Date.parse(String(job.updated_at || '')) || 0
+        const age = updated ? Date.now() - updated : 0
+        if (age >= 0 && age < 700) await sleep(700 - age, signal)
+        return loadJob(jobId)
+      }
+      if (st === 'pending_review') {
+        const autoRaw = String(process.env.CURSOR_CHAT_AUTO_APPLY || '1').trim().toLowerCase()
+        const autoOn = !(autoRaw === '0' || autoRaw === 'false' || autoRaw === 'off' || autoRaw === 'no')
+        const syncFailed = gate === 'auto_failed' || detail === '自动同步失败，请手动同步'
+        const syncing = gate === 'auto_applying' || detail === '自动同步中…'
+        if (syncFailed) return loadJob(jobId)
+        if (gate === 'await_user' || (!gate && !autoOn)) {
+          if (!pendingSince) pendingSince = Date.now()
+          if (Date.now() - pendingSince > 12_000) return loadJob(jobId)
+        } else if (autoOn && syncing) {
+          pendingSince = 0
+        } else {
+          if (!pendingSince) pendingSince = Date.now()
+          if (Date.now() - pendingSince > 8_000) return loadJob(jobId)
+        }
+      } else {
+        pendingSince = 0
+      }
+      await sleep(1500, signal)
+    }
+    healStalePendingReview(jobId)
+    return loadJob(jobId)
+  } catch (err) {
+    if (signal?.aborted || /已取消/.test(String(err || ''))) {
       forceCancelJob(jobId)
       throw new Error('已取消')
     }
-    healStalePendingReview(jobId)
-    const job = loadJob(jobId)
-    if (!job) return null
-    const st = job.status || ''
-    const detail = String(job.detail || '')
-    const inScopeLen = (job.review_in_scope || []).length
-    const gate = job.review_gate || null
-    // 空范围卡死只对 pending_review 成立；running/queued 时 review 列表天然为空，
-    // 提前返回会把「正在写码」误报成「等待超时」，模型只好自己 sleep 轮询
-    if (
-      FINISH_DONE.has(st) ||
-      (st === 'pending_review' && isStuckEmptyPendingReview(detail, inScopeLen, gate))
-    ) {
-      // 终态已落盘：让 SSE 把带 job_id 的 done 送到进度卡。工具一返回宿主可能冻住 toolview。
-      const updated = Date.parse(String(job.updated_at || '')) || 0
-      const age = updated ? Date.now() - updated : 0
-      if (age >= 0 && age < 700) await sleep(700 - age, signal)
-      return loadJob(jobId)
-    }
-    if (st === 'pending_review') {
-      const autoRaw = String(process.env.CURSOR_CHAT_AUTO_APPLY || '1').trim().toLowerCase()
-      const autoOn = !(autoRaw === '0' || autoRaw === 'false' || autoRaw === 'off' || autoRaw === 'no')
-      const syncFailed = gate === 'auto_failed' || detail === '自动同步失败，请手动同步'
-      const syncing = gate === 'auto_applying' || detail === '自动同步中…'
-      if (syncFailed) return loadJob(jobId)
-      if (gate === 'await_user' || (!gate && !autoOn)) {
-        if (!pendingSince) pendingSince = Date.now()
-        if (Date.now() - pendingSince > 12_000) return loadJob(jobId)
-      } else if (autoOn && syncing) {
-        pendingSince = 0
-      } else {
-        if (!pendingSince) pendingSince = Date.now()
-        if (Date.now() - pendingSince > 8_000) return loadJob(jobId)
-      }
-    } else {
-      pendingSince = 0
-    }
-    await sleep(1500, signal)
+    throw err
+  } finally {
+    unbind()
   }
-  healStalePendingReview(jobId)
-  return loadJob(jobId)
 }
 
 /**
@@ -351,7 +372,45 @@ async function startCodingImmediate(opts: {
     })
   }
   const jobId = launched.job.id
-  const doneJob = await waitJobUntilConclusion(jobId, opts.signal)
+  let doneJob: ReturnType<typeof loadJob>
+  try {
+    doneJob = await waitJobUntilConclusion(jobId, opts.signal)
+  } catch (err) {
+    // 宿主停止：后台已 forceCancel；把取消结论交回，禁止继续当「进行中」
+    if (opts.signal?.aborted || /已取消/.test(String(err || ''))) {
+      forceCancelJob(jobId)
+      const cancelled = loadJob(jobId)
+      if (cancelled) {
+        const packed = buildConclusionToolResult({
+          jobId,
+          kind,
+          workspace,
+          requirement,
+          parentJobId: opts.parentJobId,
+          base,
+        })
+        const body =
+          packed && typeof packed === 'object' && packed !== null && 'chat_body' in packed
+            ? String((packed as { chat_body?: unknown }).chat_body || '')
+            : formatChatConclusion(cancelled)
+        await deliverVisibleConclusion(opts.exec, body)
+        return packed
+      }
+      const fallback =
+        '## 本轮结论\n\n结果：⏹ 已取消。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n\n请你验收：\n1. 确认进度卡已停转\n'
+      await deliverVisibleConclusion(opts.exec, fallback)
+      return asJson({
+        ok: false,
+        cancelled: true,
+        job_id: jobId,
+        status: 'cancelled',
+        detail: '用户取消',
+        chat_body: fallback,
+        source: 'cursor_chat',
+      })
+    }
+    throw err
+  }
   if (!doneJob) {
     return asJson({
       ok: false,
@@ -668,29 +727,43 @@ async function pollJobLocal(
   signal?: AbortSignal,
   timeoutMs = 10_000,
 ): Promise<ReturnType<typeof loadJob>> {
-  const start = Date.now()
-  // 最短 2.5s 再带进度回聊天流，避免空等半分钟才看见 Thought/命令
-  const minHoldMs = Math.min(2_500, Math.floor(timeoutMs * 0.3))
-  let prev = ''
-  let job = loadJob(jobId)
-  while (Date.now() - start < timeoutMs) {
-    if (signal?.aborted) throw new Error('已取消')
-    job = loadJob(jobId)
-    if (!job) return null
-    // 进度轮询可在 pending_review 停一下；真正「写完结论」仍用 WAIT_DONE
-    if (WAIT_DONE.has(job.status || '') || job.status === 'pending_review') return job
-    const sig = `${job.status}|${job.detail}|${(job.transcript || []).length}|${(job.thinking_text || '').length}|${(
-      job.assistant_text || ''
-    ).length}`
-    const elapsed = Date.now() - start
-    // 有实质进展且已过最短窗口 → 立刻把 Thought/命令推回聊天
-    if (prev && sig !== prev && elapsed >= minHoldMs) {
-      return job
+  const unbind = bindAbortToForceCancel(jobId, signal)
+  try {
+    const start = Date.now()
+    // 最短 2.5s 再带进度回聊天流，避免空等半分钟才看见 Thought/命令
+    const minHoldMs = Math.min(2_500, Math.floor(timeoutMs * 0.3))
+    let prev = ''
+    let job = loadJob(jobId)
+    while (Date.now() - start < timeoutMs) {
+      if (signal?.aborted) {
+        forceCancelJob(jobId)
+        throw new Error('已取消')
+      }
+      job = loadJob(jobId)
+      if (!job) return null
+      // 进度轮询可在 pending_review 停一下；真正「写完结论」仍用 WAIT_DONE
+      if (WAIT_DONE.has(job.status || '') || job.status === 'pending_review') return job
+      const sig = `${job.status}|${job.detail}|${(job.transcript || []).length}|${(job.thinking_text || '').length}|${(
+        job.assistant_text || ''
+      ).length}`
+      const elapsed = Date.now() - start
+      // 有实质进展且已过最短窗口 → 立刻把 Thought/命令推回聊天
+      if (prev && sig !== prev && elapsed >= minHoldMs) {
+        return job
+      }
+      prev = sig || prev
+      await sleep(400, signal)
     }
-    prev = sig || prev
-    await sleep(400, signal)
+    return loadJob(jobId)
+  } catch (err) {
+    if (signal?.aborted || /已取消/.test(String(err || ''))) {
+      forceCancelJob(jobId)
+      throw new Error('已取消')
+    }
+    throw err
+  } finally {
+    unbind()
   }
-  return loadJob(jobId)
 }
 
 export function apply(ctx: Context) {
@@ -718,7 +791,7 @@ export function apply(ctx: Context) {
         '开发需求的第一步就调用本工具，禁止先用 bash/grep/read/glob/pwsh。' +
         'workspace=侧栏当前打开工程的绝对路径；禁止 Bash/Write 直接改盘。' +
         '本工具会阻塞到本轮结束，直接返回本轮结论；阻塞期间进度卡流式展示过程（无确认卡）。' +
-        '改代码会准备沙箱再同步，这条路径不变。不改代码的启动/重启、测试、装依赖、看日志、查环境、排障按 Cursor IDE 在真实项目终端执行。' +
+        '改代码会准备沙箱再同步，这条路径不变。不改代码的启动/重启优先按项目已有命令直接拉起；认不出命令时再降级 Cursor。测试、装依赖、看日志、查环境、排障按 Cursor IDE 在真实项目终端执行。' +
         '返回后三段式结论（任务结果/做了什么/如何验证）已在 chat_body：禁止再写短复述盖掉正文；一般不必再调 wait/finish。' +
         '入口级新增/删除页面·菜单·报表入口，或范围仍不清：先 ask_user_question（可多轮），答完再调本工具（clarified=true）。' +
         '用户贴了图：把本机图片绝对路径（或 data URL）放进 images；有图必须传。' +
@@ -838,7 +911,7 @@ export function apply(ctx: Context) {
       description:
         '【Cursor 开发·续做】同工程多轮，不限于改代码：用户最新原话 + 可选新截图；优先 resume 上一轮 Agent。启动/重启、测试、排障同样走本工具。' +
         '本工具阻塞到本轮结束并直接返回本轮结论；进度卡在阻塞期间流式展示过程（无确认卡）。' +
-        '续做若不改代码（启动/重启、测试、看日志、排障），按 Cursor IDE 在真实项目终端执行。改代码的续做仍走写码沙箱，不会把上一轮终端任务的目录当成沙箱。' +
+        '续做若不改代码：启动/重启优先按项目已有命令直接拉起，认不出再降级 Cursor；测试、看日志、排障按 Cursor IDE 在真实项目终端执行。改代码的续做仍走写码沙箱，不会把上一轮终端任务的目录当成沙箱。' +
         '返回后三段式结论已在 chat_body：禁止再写短复述盖掉正文。' +
         '换了侧栏工程则 workspace 用新路径。入口级新增/删除或范围不清：先 ask_user_question（可多轮），答完再调（clarified=true）。' +
         FOLLOWUP_AGENT_HINT +
@@ -1012,7 +1085,42 @@ export function apply(ctx: Context) {
         }
         const cfg = loadConfig()
         const base = getListenAddr() || publicConfigView(cfg).base
-        const doneJob = await waitJobUntilConclusion(jobId, exec?.signal)
+        let doneJob: ReturnType<typeof loadJob>
+        try {
+          doneJob = await waitJobUntilConclusion(jobId, exec?.signal)
+        } catch (err) {
+          if (exec?.signal?.aborted || /已取消/.test(String(err || ''))) {
+            forceCancelJob(jobId)
+            const cancelled = loadJob(jobId)
+            if (cancelled) {
+              const packed = buildConclusionToolResult({
+                jobId,
+                kind: cancelled.parent_job_id ? 'continue' : 'live',
+                workspace: cancelled.workspace,
+                requirement: cancelled.requirement,
+                parentJobId: cancelled.parent_job_id || undefined,
+                confirmToken,
+                base,
+              })
+              const body =
+                packed && typeof packed === 'object' && packed !== null && 'chat_body' in packed
+                  ? String((packed as { chat_body?: unknown }).chat_body || '')
+                  : formatChatConclusion(cancelled)
+              await deliverVisibleConclusion(exec, body)
+              return packed
+            }
+            return asJson({
+              ok: false,
+              cancelled: true,
+              silent: true,
+              job_id: jobId,
+              status: 'cancelled',
+              detail: '用户取消',
+              chat_body: '',
+            })
+          }
+          throw err
+        }
         if (!doneJob) {
           return asJson({
             ok: false,

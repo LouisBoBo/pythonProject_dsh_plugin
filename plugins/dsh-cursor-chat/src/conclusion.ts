@@ -239,14 +239,34 @@ function formatOpsConclusion(
     '开发操作已结束。'
   const didSec = pickSection(sections, ['做了什么', '处理说明', '根因', '原因与处理'])
   const verifySec = pickSection(sections, ['如何验证', '验收', '验收步骤', '验证', '请确认'])
-  const didLines = bulletize(didSec, [String(job.detail || '').trim() || '已在项目目录执行，未改代码']).map((b) =>
-    b.replace(/\s+/g, ' ').trim(),
+  const stepLines = (job.transcript || [])
+    .filter((item) => item.kind === 'status')
+    .map((item) => String(item.text || '').replace(/\s+/g, ' ').trim())
+    .filter((text) => /已在听|没有起来|已在后台执行/.test(text))
+  const detailText = String(job.detail || '').replace(/\s+/g, ' ').trim()
+  // 插件按项目命令拉起时，进度里已有「已在听」；不要再用 Cursor 长文充「做了什么」
+  const pluginRestart =
+    stepLines.length > 0 || /已按项目命令|没有找到启动命令/.test(detailText)
+  const didLines = (stepLines.length
+    ? stepLines
+    : bulletize(didSec, [detailText || '已在项目目录执行，未改代码'])
   )
-  const verifyLines = bulletize(verifySec, [
-    '看进度卡里的终端命令是否已经执行',
-    '确认前后端仍是原来的端口，页面或接口能打开',
-    '若没起来，把终端报错发回本对话',
-  ])
+    .map((b) => b.replace(/\s+/g, ' ').trim())
+    .filter((b) => b && b !== detailText)
+  const verifyLines = bulletize(
+    verifySec,
+    pluginRestart
+      ? [
+          '打开原来的前端地址，确认页面能打开',
+          '打开后端健康检查或接口文档，确认仍在原端口',
+          '若没起来，把项目 .dev-logs 里的报错发回本对话',
+        ]
+      : [
+          '看进度卡里的终端命令是否已经执行',
+          '确认前后端仍是原来的端口，页面或接口能打开',
+          '若没起来，把终端报错发回本对话',
+        ],
+  )
     .map((b) => b.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
   const failed = job.status === 'failed' || job.status === 'cancelled'

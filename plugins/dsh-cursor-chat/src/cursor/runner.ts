@@ -510,6 +510,34 @@ export function isTransientBootError(message: string): boolean {
   return shouldRetryBoot(message, false)
 }
 
+/**
+ * SDK 流自己报的中止。只认状态码和 SDK 固定短语，不扫用户诉求或结论正文。
+ */
+export function sdkStreamAborted(status: string, message: string): boolean {
+  const code = String(status || '').trim().toLowerCase()
+  if (code === 'canceled' || code === 'cancelled' || code === 'aborted') return true
+  const msg = String(message || '').toLowerCase()
+  return msg.includes('[canceled]') || msg.includes('[cancelled]') || msg.includes('operation was aborted')
+}
+
+const LOCAL_MODEL_CATALOG_ENV = 'CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON'
+const LOCAL_MODEL_CATALOG_OWNED = 'CURSOR_CHAT_MODEL_CATALOG_OWNED'
+
+/**
+ * Agent.create 会为校验 model.id 去请求 /v1/models。
+ * 该请求不返回时，同进程里的后续 create 会继续等同一次请求，重试不会新开连接。
+ * SDK 认这个环境变量里的目录后就不再发该请求。外部已经提供目录时不覆盖。
+ */
+export function ensureLocalModelCatalog(modelId: string): void {
+  const id = String(modelId || '').trim()
+  if (!id) return
+  const existing = String(process.env[LOCAL_MODEL_CATALOG_ENV] || '').trim()
+  const owned = process.env[LOCAL_MODEL_CATALOG_OWNED] === '1'
+  if (existing && !owned) return
+  process.env[LOCAL_MODEL_CATALOG_ENV] = JSON.stringify([{ id }])
+  process.env[LOCAL_MODEL_CATALOG_OWNED] = '1'
+}
+
 /** SDK 标了 retryable 也不能覆盖取消和密钥错误。 */
 export function shouldRetryBoot(message: string, sdkRetryable = false): boolean {
   const s = String(message || '')
@@ -578,8 +606,9 @@ export async function runCursorLocal(opts: {
     })
   }
 
-  const { Agent, CursorAgentError } = await import('@cursor/sdk')
   const model = opts.model || 'composer-2.5'
+  ensureLocalModelCatalog(model)
+  const { Agent, CursorAgentError } = await import('@cursor/sdk')
   const bus = new DialogBus()
   if (opts.userPreface) {
     bus.addUser(opts.userPreface)
@@ -773,13 +802,77 @@ export async function runCursorLocal(opts: {
         error: '已取消',
       }
     }
-    const run =
+    const sendWork =
       opts.images && opts.images.length
-        ? await agent.send({
+        ? agent.send({
             text: opts.prompt,
             images: opts.images,
           })
-        : await agent.send(opts.prompt)
+        : agent.send(opts.prompt)
+    let sendTick = 0
+    const sendHeartbeat = setInterval(() => {
+      sendTick += 1
+      const message = `Cursor 正在接收任务（已等待 ${sendTick * 10}s），随后在项目终端处理…`
+      opts.onEvent({ type: 'status', message })
+      bus.addStatus(message)
+    }, 10_000)
+    /** send 本身不轮询取消；宿主 Stop 后必须在此打断，否则会空等数分钟仍继续写码 */
+    let sendAbandoned = false
+    let run: Awaited<typeof sendWork>
+    try {
+      run = await new Promise<Awaited<typeof sendWork>>((resolveSend, rejectSend) => {
+        const cancelPoll = setInterval(() => {
+          if (!opts.isCancel()) return
+          sendAbandoned = true
+          clearInterval(cancelPoll)
+          void disposeAgent(agent)
+          rejectSend(new Error('已取消'))
+        }, 400)
+        sendWork.then(
+          (value) => {
+            clearInterval(cancelPoll)
+            if (sendAbandoned || opts.isCancel()) {
+              void Promise.resolve()
+                .then(async () => {
+                  try {
+                    if (value && typeof value.supports === 'function' && value.supports('cancel')) {
+                      await value.cancel()
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                  await disposeAgent(agent)
+                })
+                .catch(() => {})
+              rejectSend(new Error('已取消'))
+              return
+            }
+            resolveSend(value)
+          },
+          (err) => {
+            clearInterval(cancelPoll)
+            rejectSend(err)
+          },
+        )
+      })
+    } catch (sendErr) {
+      clearInterval(sendHeartbeat)
+      if (sendAbandoned || opts.isCancel() || /已取消/.test(String(sendErr || ''))) {
+        await disposeAgent(agent)
+        return {
+          ok: false,
+          text: bus.assistant,
+          thinking: bus.thinking,
+          transcript: bus.transcript,
+          agent_id: agentId,
+          run_id: '',
+          error: '已取消',
+        }
+      }
+      throw sendErr
+    } finally {
+      clearInterval(sendHeartbeat)
+    }
     runId = String(run.id || '')
     const working = phase === 'code' ? '写码' : phase === 'ops' ? '处理' : '确认服务'
     const live =
@@ -797,6 +890,7 @@ export async function runCursorLocal(opts: {
     const absoluteMaxMs = opts.absoluteMaxMs ?? 8 * 60_000
     const runStartedAt = Date.now()
     let idleTimedOut = false
+    let streamAborted = false
     let idleTimer: ReturnType<typeof setTimeout> | undefined
     const bumpIdle = () => {
       if (idleTimer) clearTimeout(idleTimer)
@@ -909,6 +1003,7 @@ export async function runCursorLocal(opts: {
         if (mtype === 'status') {
           const st = String(payload.status || '')
           const msg = String(payload.message || st || '')
+          if (sdkStreamAborted(st, msg)) streamAborted = true
           if (msg) {
             bus.addStatus(msg)
             opts.onEvent({ type: 'status', message: msg })
@@ -941,7 +1036,7 @@ export async function runCursorLocal(opts: {
     bus.sealThinking()
     bus.sealAssistant()
 
-    if (opts.isCancel() && !idleTimedOut) {
+    if ((opts.isCancel() || streamAborted) && !idleTimedOut) {
       let cancelWait: unknown = null
       try {
         cancelWait = await run.wait()
@@ -979,7 +1074,7 @@ export async function runCursorLocal(opts: {
     }
     const usage = recordUsage(result)
     const status = String(result.status || '')
-    if (opts.isCancel() && !idleTimedOut) {
+    if ((opts.isCancel() || streamAborted || sdkStreamAborted(status, '')) && !idleTimedOut) {
       await disposeAgent(agent)
       return {
         ok: false,

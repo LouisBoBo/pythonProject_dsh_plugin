@@ -2181,40 +2181,73 @@ window.__ModuleLoader__.load({
         })
         setPhase('done')
         setStatusLabel('已取消')
+        setConclusionMd(function (prev) {
+          return String(prev || '').trim()
+            ? prev
+            : '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+        })
         dialogPinRef.current = false
         stickBottomRef.current = false
         try {
           if (esRef.current && typeof esRef.current.close === 'function') esRef.current.close()
         } catch (e0) {}
-        var jid = String(jobId || (ui && ui.job_id) || '').trim()
-        if (!jid) return
-        fetch(base() + '/api/hitl/issue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'cursor-chat.cancel', job_id: jid }),
-        })
-          .then(function (r) {
-            return r.json()
+        esRef.current = null
+        var jid = String(jobId || (ui && ui.job_id) || toolArgsJobId(props && props.block) || '').trim()
+        var callId = String((props && props.callId) || '').trim()
+        function postCancel(id) {
+          if (!id) return Promise.resolve(null)
+          return fetch(base() + '/api/hitl/issue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'cursor-chat.cancel', job_id: id }),
           })
-          .then(function (issued) {
-            if (!issued || !issued.ok || !issued.nonce) {
-              throw new Error((issued && issued.detail) || '签发取消令牌失败')
-            }
-            return fetch(base() + '/api/cursor-chat/jobs/' + encodeURIComponent(jid) + '/cancel', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ nonce: issued.nonce }),
+            .then(function (r) {
+              return r.json()
             })
-          })
-          .then(function (r) {
-            return r.json()
-          })
-          .then(function (d) {
-            if (d && d.job && Array.isArray(d.job.transcript)) {
-              setTranscript(sealTranscriptItems(d.job.transcript))
-            }
-            setPhase('done')
-            setStatusLabel('已取消')
+            .then(function (issued) {
+              if (!issued || !issued.ok || !issued.nonce) {
+                throw new Error((issued && issued.detail) || '签发取消令牌失败')
+              }
+              return fetch(base() + '/api/cursor-chat/jobs/' + encodeURIComponent(id) + '/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nonce: issued.nonce }),
+              })
+            })
+            .then(function (r) {
+              return r.json()
+            })
+            .then(function (d) {
+              if (d && d.job) {
+                if (Array.isArray(d.job.transcript)) {
+                  setTranscript(sealTranscriptItems(d.job.transcript))
+                }
+                var conc = conclusionFromJob(d.job)
+                if (conc) setConclusionMd(conc)
+              }
+              setPhase('done')
+              setStatusLabel('已取消')
+              return d
+            })
+        }
+        // 无 jobId 时用 call_id 对账，避免宿主停止时漏取消后台写码
+        var resolveId = jid
+          ? Promise.resolve(jid)
+          : callId
+            ? fetch(base() + '/api/cursor-chat/jobs-by-call?call_id=' + encodeURIComponent(callId))
+                .then(function (r) {
+                  return r.json()
+                })
+                .then(function (d) {
+                  return String((d && (d.job_id || (d.job && d.job.id))) || '').trim()
+                })
+                .catch(function () {
+                  return ''
+                })
+            : Promise.resolve('')
+        resolveId
+          .then(function (id) {
+            return postCancel(id)
           })
           .catch(function () {})
       }
@@ -2233,6 +2266,17 @@ window.__ModuleLoader__.load({
                 return prev && prev !== '写码中' && prev !== '自动同步中' && prev !== '准备中'
                   ? prev
                   : '已停止'
+              })
+              setConclusionMd(function (prev) {
+                if (String(prev || '').trim()) return prev
+                var payload0 = readToolJobFields(
+                  (block && (block.result || block.value || block.output)) ||
+                    (props && props.result) ||
+                    null,
+                )
+                var body0 = String(payload0.chatBody || '').trim()
+                if (body0) return normalizeConclusionMd(body0)
+                return '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
               })
             }
             return
@@ -2318,6 +2362,17 @@ window.__ModuleLoader__.load({
           setStatusLabel(function (prev) {
             return prev && prev !== '写码中' && prev !== '自动同步中' ? prev : '已取消'
           })
+          // 停止后仍要落结论，禁止一直停在「正在汇总本轮结论」转圈
+          var cancelConc = conclusionFromJob(job)
+          if (cancelConc) {
+            setConclusionMd(cancelConc)
+          } else {
+            setConclusionMd(function (prev) {
+              return String(prev || '').trim()
+                ? prev
+                : '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+            })
+          }
           dialogPinRef.current = false
           stickBottomRef.current = false
           return
@@ -3260,6 +3315,28 @@ window.__ModuleLoader__.load({
         !(toolSettledNow && !jobId && !beginBlocking) &&
         (!!hostTurnLive || hasActiveJob || beginBlocking)
 
+      // 已停止/已取消却无卡内结论：立刻钉一文案，禁止「正在汇总」空转
+      useEffect(
+        function () {
+          var sealed = String(sealedStatusRef.current || '')
+          var stopped =
+            cancelOnceRef.current ||
+            toolCancelledNow ||
+            sealed === 'cancelled' ||
+            statusZh === '已取消' ||
+            statusZh === '已停止'
+          if (!stopped) return
+          if (phase !== 'done' && visiblePhase !== 'done') return
+          setConclusionMd(function (prev) {
+            if (String(prev || '').trim()) return prev
+            var body = String(resultFields.chatBody || '').trim()
+            if (body) return normalizeConclusionMd(body)
+            return '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+          })
+        },
+        [phase, visiblePhase, statusZh, toolCancelledNow, resultFields.chatBody],
+      )
+
       // 三段式结论只挂过程组外一次；文件列表只用底座原生卡（禁止自绘）
       useEffect(
         function () {
@@ -4176,20 +4253,45 @@ window.__ModuleLoader__.load({
                 ? h(
                     'div',
                     { className: 'cc-done-panel' },
-                    !conclusionMd
-                      ? h(
-                          'div',
-                          { className: 'cc-hold' },
-                          h('span', { className: 'cc-spin', 'aria-hidden': 'true' }),
-                          h(
-                            'span',
-                            null,
-                            serviceRunCard(requirement, workKind)
-                              ? '处理已结束，正在汇总本轮结论…'
-                              : '写码已结束，正在汇总本轮结论…',
-                          ),
-                        )
-                      : h('p', { className: 'cc-note' }, '本轮结论见下方正文'),
+                    (function () {
+                      var sealed = String(sealedStatusRef.current || authStatus || '')
+                      var stopped =
+                        cancelOnceRef.current ||
+                        toolCancelledNow ||
+                        sealed === 'cancelled' ||
+                        statusZh === '已取消' ||
+                        statusZh === '已停止'
+                      var terminal =
+                        stopped ||
+                        sealed === 'succeeded' ||
+                        sealed === 'failed' ||
+                        sealed === 'blocked_no_runner' ||
+                        statusZh === '已完成' ||
+                        statusZh === '失败'
+                      var md = String(conclusionMd || resultFields.chatBody || '').trim()
+                      if (md) {
+                        return h('p', { className: 'cc-note' }, '本轮结论见下方正文')
+                      }
+                      // 已终态/已停止：禁止「正在汇总」转圈（结论可能已在下方 hoist）
+                      if (stopped) {
+                        return h('p', { className: 'cc-note' }, '本轮已停止。')
+                      }
+                      if (terminal) {
+                        return h('p', { className: 'cc-note' }, '本轮结论见下方正文')
+                      }
+                      return h(
+                        'div',
+                        { className: 'cc-hold' },
+                        h('span', { className: 'cc-spin', 'aria-hidden': 'true' }),
+                        h(
+                          'span',
+                          null,
+                          serviceRunCard(requirement, workKind)
+                            ? '处理已结束，正在汇总本轮结论…'
+                            : '写码已结束，正在汇总本轮结论…',
+                        ),
+                      )
+                    })(),
                     err ? h('p', { className: 'cc-set-msg err' }, err) : null,
                     conclusionMd
                       ? h(
@@ -4309,7 +4411,7 @@ window.__ModuleLoader__.load({
                   ? h(
                       'details',
                       { className: 'cc-log-fold', style: { marginTop: '10px' } },
-                      h('summary', null, '本轮过程（Thinking / Diff）'),
+                      h('summary', null, '本轮过程'),
                       h(
                         'div',
                         {

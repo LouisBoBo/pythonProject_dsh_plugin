@@ -353,15 +353,21 @@ function sealedTranscript(job: CursorCodingJob): CursorCodingJob['transcript'] {
 /**
  * 用户取消：立刻终态。封住思考流，通知 SSE。
  * - 进行中（queued/running/pending_review/syncing）：cancelled=true + status=cancelled + done
- * - 已终态（succeeded/failed/cancelled/blocked）：只封流并推 done 停转，**不得**再写 cancelled=true
+ * - 已终态 succeeded/failed/blocked：只封流并推 done 停转，**不得**再写 cancelled=true
  *   （否则成功任务被标成取消，续改/编排会误判）
+ * - 已 status=cancelled 但 cancelled 标志仍为 false：补写 cancelled=true（历史竞态修复）
  */
 export function forceCancelJob(id: string): CursorCodingJob | null {
   const job = loadJob(String(id || '').trim())
   if (!job) return null
 
   if (JOB_ENDED.includes(job.status)) {
-    patchJob(job.id, { transcript: sealedTranscript(job) })
+    const patch: Partial<CursorCodingJob> = { transcript: sealedTranscript(job) }
+    // 仅补取消标志；禁止把 succeeded/failed 改写成取消
+    if (job.status === 'cancelled' && !job.cancelled) {
+      patch.cancelled = true
+    }
+    patchJob(job.id, patch)
     const cur = loadJob(job.id)!
     appendEvent(cur, { type: 'done', status: cur.status, message: '用户取消（封口）' })
     return loadJob(job.id)
@@ -372,4 +378,24 @@ export function forceCancelJob(id: string): CursorCodingJob | null {
   setStatus(cur, 'cancelled', '用户取消')
   appendEvent(loadJob(job.id)!, { type: 'done', status: 'cancelled', message: '用户取消' })
   return loadJob(job.id)
+}
+
+/**
+ * 宿主点「停止」会 abort 工具 AbortSignal。立刻 forceCancel，避免只在 sleep 循环顶部检查时漏掉。
+ * 返回解绑函数；wait/poll 结束时务必调用。
+ */
+export function bindAbortToForceCancel(jobId: string, signal?: AbortSignal): () => void {
+  const id = String(jobId || '').trim()
+  if (!id || !signal) return () => {}
+  const onAbort = () => {
+    forceCancelJob(id)
+  }
+  if (signal.aborted) {
+    onAbort()
+    return () => {}
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+  return () => {
+    signal.removeEventListener('abort', onAbort)
+  }
 }

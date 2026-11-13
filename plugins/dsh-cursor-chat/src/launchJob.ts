@@ -10,7 +10,7 @@ import { expandWriteScopeWithCompanions } from './scopeCompanions.js'
 import { bindPendingJob, createPendingConfirm } from './pendingConfirm.js'
 import type { ChatImageRef } from './images.js'
 import type { CursorCodingJob } from './types.js'
-import { classifyWork } from './workKind.js'
+import { classifyWork, opsWantsRunningService } from './workKind.js'
 
 export type LaunchJobInput = {
   workspace: string
@@ -102,11 +102,13 @@ export function launchCodingJob(input: LaunchJobInput): LaunchJobResult {
     return { ok: false, detail: `创建任务失败：${String(err).slice(0, 160)}` }
   }
 
-  setStatus(
-    job,
-    'queued',
-    workKind === 'ops' ? '已开工，直接在项目终端处理，不改代码…' : '已开工，后台准备沙箱与 Cursor…',
-  )
+  const queuedDetail =
+    workKind === 'ops'
+      ? opsWantsRunningService(requirement)
+        ? '已开工，按项目命令启动/重启服务，不改代码…'
+        : '已开工，直接在项目终端处理，不改代码…'
+      : '已开工，后台准备沙箱与 Cursor…'
+  setStatus(job, 'queued', queuedDetail)
   // 落盘 pending(call_id→job_id)：begin 阻塞未返回时，进度卡用 pending-latest 挂 SSE
   // （兼容尚未热加载 jobs-by-call 的旧 HTTP 子进程）
   try {

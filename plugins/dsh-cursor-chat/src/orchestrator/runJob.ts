@@ -6,6 +6,7 @@ import { buildLiveEditSnippet, shouldAttachEditSnippet } from '../editSnippet.js
 import { nudgeAfterSync } from '../viteNudge.js'
 import { readBackendPortFromViteProxy, settleBackendRestartAfterSync } from '../backendRestart.js'
 import { portOpen, readFrontendDevPort, runServiceCheck, type ServiceCheck } from '../serviceEnsure.js'
+import { startRequestedServices } from '../opsRestart.js'
 import {
   buildOpsPrompt,
   classifyWork,
@@ -14,7 +15,7 @@ import {
   opsPortExpectation,
   opsWantsRunningService,
 } from '../workKind.js'
-import { appendEvent, listJobs, loadJob, patchJob, setStatus } from '../jobs.js'
+import { appendEvent, forceCancelJob, listJobs, loadJob, patchJob, setStatus } from '../jobs.js'
 import { compactParentHandoff } from '../sessionMemory.js'
 import { transcriptMutatedProject } from '../transcript.js'
 import {
@@ -525,8 +526,8 @@ async function enterReviewFromDiff(
   {
     const jCancel = loadJob(jobId)!
     if (jCancel.cancelled || cre.error === '已取消') {
-      setStatus(jCancel, 'cancelled', '用户取消')
-      appendEvent(loadJob(jobId)!, { type: 'done', status: 'cancelled', message: '用户取消' })
+      // 必须走 forceCancel：只 setStatus 会留下 cancelled=false，后续 isCancel 读不到
+      forceCancelJob(jobId)
       return
     }
   }
@@ -854,22 +855,74 @@ async function executeOpsJob(jobId: string): Promise<void> {
   if (!job) return
   try {
     if (job.cancelled) {
-      setStatus(job, 'cancelled', '用户取消')
+      forceCancelJob(jobId)
       return
     }
-    setStatus(job, 'running', '正在项目终端处理，不改代码…')
-    emit({ type: 'status', message: '本轮是开发操作，不准备写码沙箱' })
+    let restartFallback = false
+    if (opsWantsRunningService(job.requirement)) {
+      setStatus(job, 'running', '正在按项目命令重启，不改代码…')
+      emit({ type: 'status', message: '本轮是开发操作，不准备写码沙箱' })
+      const started = await startRequestedServices(
+        job.workspace,
+        opsPortExpectation(job.requirement),
+        () => Boolean(loadJob(jobId)?.cancelled),
+        (message) => emit({ type: 'status', message }),
+      )
+      const fresh = loadJob(jobId)
+      if (fresh?.cancelled || started.detail === '用户取消') {
+        forceCancelJob(jobId)
+        return
+      }
+      if (started.ok) {
+        const probe = await probeDevPorts(job.workspace, opsPortExpectation(job.requirement))
+        if (probe.missing.length) {
+          const detail = `${started.detail} ${probe.line}`.trim()
+          setStatus(loadJob(jobId)!, 'failed', detail)
+          appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+          return
+        }
+        const detail = started.detail.includes('已在听')
+          ? started.detail
+          : probe.line
+            ? `${started.detail} ${probe.line}`
+            : started.detail
+        setStatus(loadJob(jobId)!, 'succeeded', detail)
+        appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
+        return
+      }
+      // 一张计划都认不出：降级 Cursor IDE 式处理，禁止需求落空
+      if (started.no_commands) {
+        restartFallback = true
+        setStatus(loadJob(jobId)!, 'running', '未认出项目启动命令，改由 Cursor 在项目终端处理…')
+        emit({
+          type: 'status',
+          message: '项目里没有现成启动命令，改由 Cursor 按 IDE 方式在项目终端处理…',
+        })
+      } else {
+        // 已认出命令但没拉起来：带日志失败，不再降级瞎搜
+        setStatus(loadJob(jobId)!, 'failed', started.detail)
+        appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: started.detail })
+        return
+      }
+    } else {
+      setStatus(job, 'running', '正在项目终端处理，不改代码…')
+      emit({ type: 'status', message: '本轮是开发操作，不准备写码沙箱' })
+    }
     const { toSdkImages } = await import('../images.js')
     const cre = await runCursorLocal({
       sandbox: job.workspace,
       apiKey: cfg.cursorApiKey,
-      prompt: buildOpsPrompt({ requirement: job.requirement, workspace: job.workspace }),
+      prompt: buildOpsPrompt({
+        requirement: job.requirement,
+        workspace: job.workspace,
+        restartFallback,
+      }),
       model: cfg.model,
       userPreface: job.requirement,
       images: toSdkImages(job.images),
       ledgerJobId: jobId,
       phase: 'ops',
-      idleMs: 90_000,
+      idleMs: 3 * 60_000,
       absoluteMaxMs: 6 * 60_000,
       onEvent: emit,
       isCancel: () => Boolean(loadJob(jobId)?.cancelled),
@@ -885,8 +938,7 @@ async function executeOpsJob(jobId: string): Promise<void> {
     })
     job = loadJob(jobId)!
     if (job.cancelled || cre.error === '已取消') {
-      setStatus(job, 'cancelled', '用户取消')
-      appendEvent(loadJob(jobId)!, { type: 'done', status: 'cancelled', message: '用户取消' })
+      forceCancelJob(jobId)
       return
     }
     if (transcriptMutatedProject(cre.transcript || [])) {
@@ -905,8 +957,10 @@ async function executeOpsJob(jobId: string): Promise<void> {
     const probe = restart
       ? await probeDevPorts(job.workspace, opsPortExpectation(job.requirement))
       : { missing: [] as string[], line: '' }
-    if (cre.idle_timed_out && !String(cre.text || '').trim() && probe.missing.length === 0 && !probe.line) {
-      const detail = '开发操作未完成：等待超时，且没有可用结果。'
+    if (cre.idle_timed_out && !String(cre.text || '').trim()) {
+      const detail = probe.line
+        ? `Cursor 还没在终端里执行，等待超时。${probe.line}`
+        : '开发操作未完成：等待超时，且没有可用结果。'
       setStatus(loadJob(jobId)!, 'failed', detail)
       appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
       return
@@ -1077,7 +1131,7 @@ async function executeJob(jobId: string): Promise<void> {
 
     job = loadJob(jobId)!
     if (job.cancelled || (!cre.ok && cre.error === '已取消')) {
-      setStatus(loadJob(jobId)!, 'cancelled', '用户取消')
+      forceCancelJob(jobId)
       return
     }
 
@@ -1360,7 +1414,7 @@ async function executeSteer(jobId: string, message: string): Promise<void> {
     })
     job = loadJob(jobId)!
     if (job.cancelled || (!cre.ok && cre.error === '已取消')) {
-      setStatus(loadJob(jobId)!, 'cancelled', '用户取消')
+      forceCancelJob(jobId)
       return
     }
     await enterReviewFromDiff(
