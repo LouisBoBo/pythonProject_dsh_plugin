@@ -161,6 +161,7 @@ git_deliver.review_backend =
 
 - [x] 默认 `gitDeliverReviewBackend=embedded`（2026-11-16，`dsh-cursor-chat` 0.3.77）  
 - [x] LLM：公司网关 `ZR_GATEWAY_TOKEN` + `{origin}/api/ai`（拒 `api.deepseek.com`；WB 非官网 base 仍可用）  
+- [x] 旁路打进插件包 `vendor/dsh-batch-review`（2026-11-16，`0.3.80`；市场安装开箱可用）  
 - [ ] 实机：确认 → 审码 → 无高危 → PR；有高危 → 暂停/修  
 - [ ] 对比同批文件在 WorkBuddy UI 审码的严重级别抽检  
 

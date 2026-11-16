@@ -1,5 +1,6 @@
 node_modules/
 lib/
+vendor/
 *.tgz
 .DS_Store
 .last-assistant-body.md

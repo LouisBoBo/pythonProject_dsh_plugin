@@ -193,13 +193,16 @@ async function readJson(res: Response): Promise<Record<string, unknown>> {
   }
 }
 
-/** 旁路包根目录：环境变量优先；否则尝试与本插件同级的 dsh-batch-review（开发仓）。 */
+/** 旁路包根目录：env → 插件内 vendor（市场包）→ 开发仓同级。 */
 export function resolveBatchReviewRoot(): string {
   const env = String(process.env.DSH_BATCH_REVIEW_ROOT || '').trim()
   if (env && existsSync(join(env, 'src', 'dsh_batch_review'))) return env
   try {
     const here = dirname(fileURLToPath(import.meta.url))
-    // .../dsh-cursor-chat/lib → ../../dsh-batch-review
+    // 市场/安装版：…/dsh-cursor-chat/lib → ../vendor/dsh-batch-review
+    const bundled = join(here, '..', 'vendor', 'dsh-batch-review')
+    if (existsSync(join(bundled, 'src', 'dsh_batch_review'))) return bundled
+    // 开发仓：…/plugins/dsh-cursor-chat/lib → ../../dsh-batch-review
     const sibling = join(here, '..', '..', 'dsh-batch-review')
     if (existsSync(join(sibling, 'src', 'dsh_batch_review'))) return sibling
   } catch {
@@ -232,7 +235,7 @@ function runEmbeddedBatchReview(opts: {
   if (!root) {
     return Promise.resolve(
       empty(
-        '未找到 dsh-batch-review（请设 DSH_BATCH_REVIEW_ROOT，或在开发仓与 dsh-cursor-chat 同级放置）',
+        '未找到审码旁路 dsh-batch-review（插件包应含 vendor/；或设 DSH_BATCH_REVIEW_ROOT）',
       ),
     )
   }

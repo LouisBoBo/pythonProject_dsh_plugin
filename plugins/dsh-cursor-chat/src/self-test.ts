@@ -589,7 +589,15 @@ async function main() {
       )
       assert(reviewSrc.includes('runEmbeddedBatchReview'), 'embedded 须走旁路子进程')
       assert(reviewSrc.includes('DSH_BATCH_REVIEW_ROOT'), 'embedded 须可配置旁路根目录')
+      assert(reviewSrc.includes("vendor', 'dsh-batch-review'") || reviewSrc.includes('vendor/dsh-batch-review') || reviewSrc.includes("'vendor', 'dsh-batch-review'"), '须优先解析插件内 vendor 旁路')
       assert(!/api\.deepseek\.com/.test(reviewSrc), '写码插件审码适配器禁止写死 DeepSeek 官网')
+      const { resolveBatchReviewRoot } = await import('./gitDeliverReview.js')
+      const batchRoot = resolveBatchReviewRoot()
+      assert(Boolean(batchRoot), '构建后须能解析到审码旁路根目录')
+      assert(
+        batchRoot.includes('vendor') || batchRoot.includes('dsh-batch-review'),
+        '旁路根须为 vendor 或开发仓同级',
+      )
     }
     const fixSrc = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gitDeliverFix.ts'),
