@@ -17,6 +17,7 @@ function emptyConfig(): CursorCodingConfig {
     port: DEFAULT_PORT,
     dataRoot,
     cursorApiKey: '',
+    gitHostToken: '',
     writeScope: [],
     model: 'composer-2.5',
   }
@@ -73,6 +74,9 @@ export function loadConfig(): CursorCodingConfig {
     port: asNumber(env.CURSOR_CHAT_PORT || disk.port, base.port),
     dataRoot,
     cursorApiKey: env.CURSOR_API_KEY || asString(disk.cursorApiKey, base.cursorApiKey),
+    gitHostToken:
+      env.CURSOR_CHAT_GIT_TOKEN ||
+      asString(disk.gitHostToken, base.gitHostToken),
     writeScope: asStringArray(disk.writeScope),
     model: env.CURSOR_CHAT_MODEL || asString(disk.model, base.model) || 'composer-2.5',
   }
@@ -81,7 +85,10 @@ export function loadConfig(): CursorCodingConfig {
 }
 
 export type ConfigPatch = Partial<
-  Pick<CursorCodingConfig, 'listen' | 'port' | 'dataRoot' | 'cursorApiKey' | 'writeScope' | 'model'>
+  Pick<
+    CursorCodingConfig,
+    'listen' | 'port' | 'dataRoot' | 'cursorApiKey' | 'gitHostToken' | 'writeScope' | 'model'
+  >
 >
 
 export function saveConfig(partial: ConfigPatch): CursorCodingConfig {
@@ -97,6 +104,7 @@ export function saveConfig(partial: ConfigPatch): CursorCodingConfig {
     port: next.port,
     dataRoot: next.dataRoot,
     cursorApiKey: next.cursorApiKey,
+    gitHostToken: next.gitHostToken,
     writeScope: next.writeScope,
     model: next.model,
   }
@@ -152,6 +160,14 @@ export function cursorKeyReady(cfg: CursorCodingConfig): boolean {
   return true
 }
 
+/** Git 托管 Token 是否已配置（开 PR 用；非写码硬性） */
+export function gitHostTokenReady(cfg: CursorCodingConfig): boolean {
+  const t = String(cfg.gitHostToken || '').trim()
+  if (!t) return false
+  if (t === 'test-token-not-real' || /^test-/i.test(t)) return false
+  return true
+}
+
 /** 对外公开视图：不回传 Key 明文 */
 export function publicConfigView(cfg: CursorCodingConfig) {
   const reuseRaw = String(process.env.CURSOR_CHAT_REUSE_PARENT || '').trim().toLowerCase()
@@ -168,6 +184,7 @@ export function publicConfigView(cfg: CursorCodingConfig) {
     base: `http://${cfg.listen}:${cfg.port}`,
     dataRoot: cfg.dataRoot,
     cursorKeyConfigured: cursorKeyReady(cfg),
+    gitHostTokenConfigured: gitHostTokenReady(cfg),
     writeScope: cfg.writeScope,
     model: cfg.model,
     reuseParentSandbox,
@@ -183,6 +200,8 @@ export function editableConfigView(cfg: CursorCodingConfig) {
     dataRoot: cfg.dataRoot,
     cursorApiKey: '',
     cursorKeyConfigured: cursorKeyReady(cfg),
+    gitHostToken: '',
+    gitHostTokenConfigured: gitHostTokenReady(cfg),
     writeScopeText: cfg.writeScope.join('\n'),
     model: cfg.model,
     base: `http://${cfg.listen}:${cfg.port}`,
@@ -214,6 +233,12 @@ export function applyConfigFromUi(body: Record<string, unknown>): CursorCodingCo
   } else {
     cursorApiKey = keepOrReplace(body.cursorApiKey, current.cursorApiKey)
   }
+  let gitHostToken = current.gitHostToken
+  if (body.clearGitHostToken === true || body.clearGitHostToken === '1') {
+    gitHostToken = ''
+  } else {
+    gitHostToken = keepOrReplace(body.gitHostToken, current.gitHostToken)
+  }
   let writeScope = current.writeScope
   if (typeof body.writeScopeText === 'string') {
     writeScope = body.writeScopeText
@@ -232,6 +257,7 @@ export function applyConfigFromUi(body: Record<string, unknown>): CursorCodingCo
     listen: listen === 'localhost' ? '127.0.0.1' : listen,
     port,
     cursorApiKey,
+    gitHostToken,
     writeScope,
     model:
       typeof body.model === 'string' && body.model.trim() ? body.model.trim() : current.model,

@@ -48,15 +48,27 @@ import {
 import { filterStoredImageRefs, type ChatImageRef } from './images.js'
 import {
   bindPendingJob,
+  cancelPendingConfirm,
   claimPendingConfirm,
   createPendingConfirm,
+  findPendingByJobId,
   findPendingForCard,
   loadPendingConfirm,
   releasePendingClaim,
 } from './pendingConfirm.js'
-import { formatChatConclusion } from './conclusion.js'
+import {
+  conclusionDeletedFiles,
+  conclusionSyncedFiles,
+  formatChatConclusion,
+} from './conclusion.js'
 import { formatDialogMarkdown } from './transcript.js'
 import { assertBackendRestartReady, executeBackendRestart } from './backendRestart.js'
+import {
+  cancelGitDeliverWait,
+  confirmGitDeliverWait,
+  getGitDeliverWaitPlan,
+} from './gitDeliverWait.js'
+import { completeGitDeliverFromConfirm } from './launchGitDeliver.js'
 import type { HitlAction } from './types.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -392,7 +404,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       action !== 'cursor-chat.steer' &&
       action !== 'cursor-chat.cancel' &&
       action !== 'cursor-chat.restart-backend' &&
-      action !== 'cursor-chat.user-choice'
+      action !== 'cursor-chat.user-choice' &&
+      action !== 'cursor-chat.git-deliver'
     ) {
       send(
         res,
@@ -400,7 +413,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         {
           ok: false,
           detail:
-            'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend / user-choice',
+            'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend / user-choice / git-deliver',
         },
         req,
       )
@@ -436,6 +449,44 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         workspace: pending.workspace,
         requirement: pending.requirement,
         confirm_token: pending.id,
+      })
+      send(res, 200, issued, req)
+      return
+    }
+    if (action === 'cursor-chat.git-deliver') {
+      const confirmToken = String(body.confirm_token || '').trim()
+      if (!confirmToken) {
+        send(
+          res,
+          400,
+          {
+            ok: false,
+            code: 'confirm_token_required',
+            detail: '签发 git-deliver 须携带 confirm_token',
+          },
+          req,
+        )
+        return
+      }
+      const pending = loadPendingConfirm(confirmToken)
+      if (!pending || pending.status === 'cancelled' || pending.kind !== 'git_deliver') {
+        send(res, 400, { ok: false, detail: 'Git 交付确认令牌无效', code: 'pending_invalid' }, req)
+        return
+      }
+      if (pending.status !== 'waiting' && pending.status !== 'claiming') {
+        send(res, 400, { ok: false, detail: 'Git 交付确认单已不可签发', code: 'pending_not_waiting' }, req)
+        return
+      }
+      if (!getGitDeliverWaitPlan(confirmToken) && !pending.git_plan) {
+        send(res, 400, { ok: false, detail: 'Git 交付计划已过期，请重新发起', code: 'plan_missing' }, req)
+        return
+      }
+      const issued = issue({
+        action,
+        workspace: pending.workspace,
+        requirement: pending.requirement,
+        confirm_token: pending.id,
+        job_id: pending.job_id,
       })
       send(res, 200, issued, req)
       return
@@ -533,6 +584,19 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const pending0 = loadPendingConfirm(confirmToken)
     if (!pending0 || pending0.status === 'cancelled') {
       send(res, 400, { ok: false, detail: `确认令牌无效：${confirmToken}` }, req)
+      return
+    }
+    if (pending0.kind === 'git_deliver') {
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code: 'use_git_deliver',
+          detail: '这是 Git 交付确认卡，请走 /api/cursor-chat/git-deliver/confirm',
+        },
+        req,
+      )
       return
     }
     // 幂等：已开工直接返回
@@ -645,6 +709,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         dsh_session_id: pending0.session_id || null,
         dsh_call_id: pending0.call_id || null,
         write_scope: expandWriteScopeWithCompanions(cfg.writeScope),
+        write_scope_source: (cfg.writeScope || []).length ? 'config' : null,
         continue_count: parentJobId ? (loadJob(parentJobId)?.continue_count || 0) + 1 : 0,
       })
       bindPendingJob(confirmToken, job.id)
@@ -665,6 +730,195 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         job: loadJob(job.id),
         detail: '已确认；后台沙箱 → Cursor → 待审清单（未点同步前不改真工程）',
         stream: `/api/cursor-chat/jobs/${encodeURIComponent(job.id)}/stream`,
+      },
+      req,
+    )
+    return
+  }
+
+  if (method === 'POST' && path === '/api/cursor-chat/git-deliver/confirm') {
+    if (rejectBadOrigin(req, res)) return
+    let body: Record<string, unknown> = {}
+    try {
+      body = parseJson(await readBody(req))
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const nonce = String(body.nonce || body.hitl_nonce || '').trim()
+    const confirmToken = String(body.confirm_token || '').trim()
+    if (!confirmToken) {
+      send(res, 400, { ok: false, code: 'confirm_token_required', detail: '缺少 confirm_token' }, req)
+      return
+    }
+    const pending = loadPendingConfirm(confirmToken)
+    if (!pending || pending.kind !== 'git_deliver' || pending.status === 'cancelled') {
+      send(res, 400, { ok: false, detail: 'Git 交付确认令牌无效', code: 'pending_invalid' }, req)
+      return
+    }
+    const hitl = consume({
+      nonce,
+      action: 'cursor-chat.git-deliver',
+      workspace: pending.workspace,
+      requirement: pending.requirement,
+      confirm_token: confirmToken,
+      job_id: pending.job_id,
+    })
+    if (!hitl.ok) {
+      send(res, 401, { ok: false, detail: hitl.detail, code: hitl.code }, req)
+      return
+    }
+    const selectedRaw = Array.isArray(body.selected_files) ? body.selected_files : []
+    const selected_files = selectedRaw.map((x) => String(x || '').trim()).filter(Boolean)
+    const commit_message = String(body.commit_message || pending.git_plan?.commit_message || '').trim()
+    const target_branch = String(body.target_branch || pending.git_plan?.target_branch || '').trim()
+    const base_branch = String(body.base_branch || pending.git_plan?.base_branch || '').trim()
+    const create_pr = body.create_pr !== false && body.create_pr !== 'false'
+    const plan = pending.git_plan || getGitDeliverWaitPlan(confirmToken)
+    if (!plan) {
+      send(res, 400, { ok: false, detail: 'Git 交付计划已过期，请重新发起', code: 'plan_missing' }, req)
+      return
+    }
+    const payload = {
+      selected_files,
+      commit_message: commit_message || plan.commit_message,
+      target_branch: target_branch || plan.target_branch,
+      base_branch: base_branch || plan.base_branch,
+      create_pr,
+    }
+    // 落盘 + 尽量唤醒本进程 waiter。子进程 HTTP 时 waiter 在宿主：靠磁盘决策唤醒，禁止再 HTTP 双提交。
+    confirmGitDeliverWait(confirmToken, payload)
+    if (pending.job_id) {
+      bindPendingJob(confirmToken, pending.job_id)
+      const live = loadJob(pending.job_id)
+      if (live && live.status === 'pending_review') {
+        setStatus(live, 'running', '已确认，正在 commit / push…')
+        send(
+          res,
+          200,
+          {
+            ok: true,
+            accepted: true,
+            waiting_tool: true,
+            detail: '已确认，正在提交…',
+            job_id: pending.job_id || '',
+            confirm_token: confirmToken,
+          },
+          req,
+        )
+        return
+      }
+    }
+    // 兜底：无进行中的人审 Job（旧会话/工具已返回）→ HTTP 直接执行
+    if (pending.job_id) bindPendingJob(confirmToken, pending.job_id)
+    const done = await completeGitDeliverFromConfirm({
+      jobId: pending.job_id || '',
+      plan,
+      selected_files: payload.selected_files,
+      commit_message: payload.commit_message,
+      target_branch: payload.target_branch,
+      base_branch: payload.base_branch,
+      create_pr: payload.create_pr,
+    })
+    send(
+      res,
+      200,
+      {
+        ok: done.ok,
+        detail: done.result.detail,
+        job_id: pending.job_id || '',
+        confirm_token: confirmToken,
+        conclusion: done.conclusion,
+        result: done.result,
+        job: done.job,
+      },
+      req,
+    )
+    return
+  }
+
+  if (method === 'POST' && path === '/api/cursor-chat/git-deliver/cancel') {
+    if (rejectBadOrigin(req, res)) return
+    let body: Record<string, unknown> = {}
+    try {
+      body = parseJson(await readBody(req))
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const confirmToken = String(body.confirm_token || '').trim()
+    const jobIdHint = String(body.job_id || '').trim()
+    const reason = String(body.reason || '').trim() || '用户取消 Git 交付'
+    let pending = confirmToken ? loadPendingConfirm(confirmToken) : null
+    if ((!pending || pending.kind !== 'git_deliver') && jobIdHint) {
+      pending = findPendingByJobId(jobIdHint)
+    }
+    const token = String(pending?.id || confirmToken || '').trim()
+    const jobId = String(pending?.job_id || jobIdHint || '').trim()
+
+    // 幂等：已取消 / 无 pending 但 job 已终态 → 仍 ok，避免确认卡点取消报错
+    if (!pending || pending.kind !== 'git_deliver') {
+      if (jobId) {
+        const job = loadJob(jobId)
+        if (job && (job.status === 'cancelled' || job.cancelled)) {
+          if (token) cancelGitDeliverWait(token, reason)
+          send(res, 200, { ok: true, detail: '已取消 Git 交付', job_id: jobId, confirm_token: token }, req)
+          return
+        }
+      }
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          detail: 'Git 交付确认令牌无效',
+          code: 'pending_invalid',
+        },
+        req,
+      )
+      return
+    }
+
+    if (token) {
+      cancelGitDeliverWait(token, reason)
+      cancelPendingConfirm(token)
+    }
+    if (jobId) {
+      const job = loadJob(jobId)
+      if (job && !['succeeded', 'failed', 'cancelled'].includes(job.status)) {
+        const { formatGitDeliverConclusion } = await import('./gitDeliver.js')
+        const conclusion = formatGitDeliverConclusion({
+          status: 'cancelled',
+          plan: pending.git_plan,
+          cancelDetail: reason,
+        })
+        patchJob(job.id, {
+          cancelled: true,
+          assistant_text: conclusion,
+          conclusion_delivered: true,
+          conclusion_at: new Date().toISOString(),
+          review_gate: null,
+          // 取消后不得把候选清单留给结论区「已编辑」卡
+          review_in_scope: [],
+          synced_files: [],
+          last_synced_files: [],
+          changed_files: [],
+        })
+        setStatus(loadJob(job.id) || job, 'cancelled', reason)
+      }
+    }
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        detail: '已取消 Git 交付',
+        confirm_token: token,
+        job_id: jobId,
+        conclusion:
+          jobId && loadJob(jobId)
+            ? String(loadJob(jobId)?.assistant_text || '').trim()
+            : '',
       },
       req,
     )
@@ -802,6 +1056,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
               confirm_token: pending.id,
               workspace: pending.workspace,
               requirement: pending.requirement,
+              kind: pending.kind || 'coding',
+              git_plan: pending.git_plan || null,
               parent_job_id: pending.parent_job_id || '',
               image_count: pending.images?.length || 0,
               image_names: (pending.images || []).map((x) => x.name || x.path.split(/[/\\]/).pop() || 'img'),
@@ -841,6 +1097,57 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return
   }
 
+  // Git 交付确认卡：对话区 turnTail 轮询待确认项（不依赖 toolview 是否挂上）
+  if (method === 'GET' && path === '/api/cursor-chat/git-deliver/awaiting') {
+    if (rejectBadOrigin(req, res)) return
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const sessionId = String(u.searchParams.get('session_id') || '').trim()
+    // 必须带 session_id 且与账本一致，禁止仅 workspace/空会话扫出 confirm_token
+    if (!sessionId) {
+      send(res, 400, { ok: false, detail: 'git-deliver/awaiting 须带 session_id' }, req)
+      return
+    }
+    const jobs = listJobs(40).filter((j) => {
+      if (j.work_kind !== 'git_deliver') return false
+      if (j.status !== 'pending_review') return false
+      if (!j.dsh_session_id || j.dsh_session_id !== sessionId) return false
+      return true
+    })
+    const items = jobs.map((j) => {
+      const pending = findPendingForCard({
+        workspace: j.workspace,
+        call_id: j.dsh_call_id || undefined,
+        session_id: j.dsh_session_id || undefined,
+        requirement: j.requirement,
+      })
+      const plan = pending?.git_plan || null
+      const g = j.git_deliver || null
+      return {
+        job_id: j.id,
+        confirm_token: pending && pending.kind === 'git_deliver' ? pending.id : '',
+        status: j.status,
+        workspace: j.workspace,
+        requirement: j.requirement,
+        created_at: j.created_at,
+        updated_at: j.updated_at,
+        dsh_session_id: j.dsh_session_id || null,
+        dsh_call_id: j.dsh_call_id || null,
+        git_plan: plan || {
+          remote_url: g?.remote_url || '',
+          current_branch: g?.current_branch || '',
+          target_branch: g?.target_branch || '',
+          base_branch: g?.base_branch || 'main',
+          commit_message: g?.commit_message || '',
+          create_pr: g?.create_pr !== false,
+          selected_files: g?.selected_files || j.review_in_scope || [],
+          held_sensitive_files: g?.held_sensitive_files || j.review_deferred || [],
+        },
+      }
+    })
+    send(res, 200, { ok: true, items }, req)
+    return
+  }
+
   // 客户端兜底：最近已交付的三段式结论（切会话后靠此 + localStorage 再挂回）
   if (method === 'GET' && path === '/api/cursor-chat/recent-conclusions') {
     if (rejectBadOrigin(req, res)) return
@@ -861,9 +1168,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           dsh_session_id: j.dsh_session_id || null,
           requirement: String(j.requirement || '').slice(0, 240),
           chat_conclusion: formatChatConclusion(j),
+          work_kind: j.work_kind || '',
           // 供客户端在底座未出「已编辑 N 个文件」时补同款改动卡，并按路径对齐会话轮次
-          synced_files: j.synced_files || j.last_synced_files || j.review_in_scope || [],
-          deleted_files: j.deleted_files || j.review_deleted || [],
+          // Git 交付：取消/失败不得用 review_in_scope（候选清单）冒充已编辑
+          synced_files: conclusionSyncedFiles(j),
+          deleted_files: conclusionDeletedFiles(j),
         })),
       },
       req,
@@ -886,25 +1195,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       return
     }
     const items = jobs.map((job) => {
-      // 改动卡数据源：同步结果优先；空时退回审阅范围/变更清单，避免结论下空白
-      const synced = [
-        ...(job.synced_files || []),
-        ...(job.last_synced_files || []),
-        ...(job.review_in_scope || []),
-        ...(job.changed_files || []),
-      ].filter((p, i, arr) => {
-        const s = String(p || '').trim()
-        if (!s) return false
-        return arr.findIndex((x) => String(x || '').replace(/\\/g, '/') === s.replace(/\\/g, '/')) === i
-      })
-      const deleted = [...(job.deleted_files || []), ...(job.review_deleted || [])].filter((p, i, arr) => {
-        const s = String(p || '').trim()
-        if (!s) return false
-        return arr.findIndex((x) => String(x || '').replace(/\\/g, '/') === s.replace(/\\/g, '/')) === i
-      })
+      const synced = conclusionSyncedFiles(job)
+      const deleted = conclusionDeletedFiles(job)
       return {
         id: job.id,
         status: job.status,
+        work_kind: job.work_kind || '',
         updated_at: job.updated_at,
         // 结论首次交付时间：后续应用/续改会刷新 updated_at，客户端按它对轮次
         concluded_at: job.conclusion_at || job.updated_at,
@@ -947,6 +1243,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         job_id: job.id,
         status: job.status,
         detail: job.detail || '',
+        work_kind: job.work_kind || '',
         stream: `/api/cursor-chat/jobs/${encodeURIComponent(job.id)}/stream`,
       },
       req,
@@ -1073,6 +1370,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           status: job.status,
           detail: job.detail,
           workspace: job.workspace,
+          work_kind: job.work_kind || '',
+          git_deliver: job.git_deliver || null,
           review_in_scope: job.review_in_scope || [],
           review_deleted: job.review_deleted || [],
           review_deferred: job.review_deferred || [],

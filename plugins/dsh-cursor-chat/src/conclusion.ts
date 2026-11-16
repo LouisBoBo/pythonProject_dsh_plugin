@@ -2,7 +2,7 @@
  * 聊天正文「本轮结论」：只认 Job 账本字段，不扫用户可见对话原文。
  * 固定友好三段：任务结果 → 做了什么 → 如何验证（格式硬约束）。
  */
-import { isLocalDbRel } from './pathScope.js'
+import { isLocalDbRel, normalizeRel } from './pathScope.js'
 import { criticalDeferredFiles } from './scopeCompanions.js'
 import { preferredConclusionAssistantText } from './transcript.js'
 import { readBackendPortFromViteProxy } from './backendRestart.js'
@@ -472,6 +472,33 @@ function uniqPaths(paths: string[]): string[] {
   return out
 }
 
+/**
+ * 结论区「已编辑 N 个文件」数据源。
+ * - 写码：同步结果优先，空时退回审阅范围（与历史行为一致）
+ * - Git 交付：仅成功 commit 后展示；取消/失败不得用 review_in_scope（确认前候选）冒充已编辑
+ */
+export function conclusionSyncedFiles(job: CursorCodingJob): string[] {
+  if (job.work_kind === 'git_deliver') {
+    if (job.status !== 'succeeded') return []
+    return uniqPaths(job.synced_files || job.last_synced_files || [])
+  }
+  return uniqPaths([
+    ...(job.synced_files || []),
+    ...(job.last_synced_files || []),
+    ...(job.review_in_scope || []),
+    ...(job.changed_files || []),
+  ])
+}
+
+/** 结论区删除文件列表；Git 取消/失败一律空 */
+export function conclusionDeletedFiles(job: CursorCodingJob): string[] {
+  if (job.work_kind === 'git_deliver') {
+    if (job.status !== 'succeeded') return []
+    return uniqPaths(job.deleted_files || [])
+  }
+  return uniqPaths([...(job.deleted_files || []), ...(job.review_deleted || [])])
+}
+
 /** 重启验收用端口：先认进度/详情里的「已在听」，缺了再读项目配置（与拉起同源）。 */
 function resolveRestartListenPorts(
   job: CursorCodingJob,
@@ -580,6 +607,29 @@ function isStartupFailure(job: CursorCodingJob): boolean {
   return /超时（>|已自动重试 \d+ 次，仍未开始写码/.test(detail)
 }
 
+/**
+ * 按 work_kind 钉死结论标题：
+ * - 写码/ops → ## 本轮结论
+ * - git_deliver → ## Git 交付结论
+ * 禁止两套结论互相冒充。
+ */
+export function ensureConclusionTitle(md: string, workKind: string): string {
+  let t = String(md || '').trim()
+  if (!t) return ''
+  if (workKind === 'git_deliver') {
+    if (/^##\s*Git\s*交付结论/m.test(t)) return t.endsWith('\n') ? t : `${t}\n`
+    if (/^##\s*本轮结论/m.test(t)) t = t.replace(/^##\s*本轮结论/m, '## Git 交付结论')
+    else t = `## Git 交付结论\n\n${t}`
+    return t.endsWith('\n') ? t : `${t}\n`
+  }
+  if (/^##\s*本轮结论/m.test(t)) return t.endsWith('\n') ? t : `${t}\n`
+  if (/^##\s*Git\s*交付结论/m.test(t)) {
+    t = t.replace(/^##\s*Git\s*交付结论/m, '## 本轮结论')
+    return t.endsWith('\n') ? t : `${t}\n`
+  }
+  return t.endsWith('\n') ? t : `${t}\n`
+}
+
 /** 终态结论：写入 DSH 聊天壳正文（卡片外），进度卡完成态亦展示同一份。 */
 export function formatChatConclusion(job: CursorCodingJob): string {
   const asst = preferredConclusionAssistantText(job.assistant_text || '')
@@ -587,14 +637,51 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   const synced = uniqPaths(job.synced_files || job.last_synced_files || job.review_in_scope || [])
   const deleted = uniqPaths(job.deleted_files || job.review_deleted || [])
   const deferred = uniqPaths(job.review_deferred || job.deferred_files || [])
+  const heldSensitive = uniqPaths(job.held_sensitive_files || [])
   const changedRaw = uniqPaths([...(job.changed_files || []), ...synced])
   // sqlite 等本机库不算「有效代码变更」
   const changed = changedRaw.filter((p) => !isLocalDbRel(p))
   const delivered = synced.length > 0 || deleted.length > 0
+  const heldSet = new Set(heldSensitive.map((p) => normalizeRel(p)))
+  const heldBase = new Set(
+    heldSensitive.map((p) => {
+      const n = normalizeRel(p)
+      const parts = n.split('/')
+      return parts[parts.length - 1] || n
+    }),
+  )
 
   // 开发操作本来就不改文件。禁止套用「写码空跑 / 未交付代码」。
   if (job.work_kind === 'ops') {
     return formatOpsConclusion(job, asst, sections)
+  }
+
+  // Git 交付：优先用已写好的 assistant_text；标题强制「Git 交付结论」，绝不套写码「本轮结论」
+  if (job.work_kind === 'git_deliver') {
+    if (asst.trim()) return ensureConclusionTitle(asst.trim(), 'git_deliver')
+    const g = job.git_deliver
+    const lines = ['## Git 交付结论', '']
+    if (job.status === 'cancelled') {
+      lines.push('结果：⏹ 已取消 Git 交付。工作区改动仍在，未执行 commit。')
+    } else if (
+      job.status === 'succeeded' &&
+      /没有未提交改动|无需 Git 交付|没有可安全提交|仅有敏感文件未提交/.test(String(job.detail || ''))
+    ) {
+      lines.push('结果：ℹ 当前没有可提交的改动，本次无需 Git 交付。')
+      lines.push('')
+      lines.push(`说明：`)
+      lines.push(`• ${String(job.detail || '').trim()}`)
+      lines.push('• 未执行 commit，也未开 PR。')
+    } else if (job.status === 'succeeded') {
+      lines.push('结果：✅ Git 交付完成。')
+      if (g?.remote_url) lines.push(`• 仓库：${g.remote_url}`)
+      if (g?.target_branch) lines.push(`• 分支：${g.target_branch}`)
+      if (g?.commit_short) lines.push(`• Commit：${g.commit_short}`)
+      if (g?.pr_url) lines.push(`• PR：${g.pr_url}`)
+    } else {
+      lines.push(`结果：❌ Git 交付未完成。${job.detail || ''}`.trim())
+    }
+    return lines.join('\n') + '\n'
   }
 
   // Cursor 没连上：不是空跑，也还没进入审计。结论只报启动失败。
@@ -631,6 +718,46 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     lines.push(`请你验收：`)
     lines.push(`1. 对照清单确认范围。`)
     lines.push(`2. 确认后直接回复，下一轮才会改文件。`)
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n'
+  }
+
+  // 显式 writeScope（source=config）硬闸：沙箱有范围外变更但未同步——不是空跑
+  if (
+    !delivered &&
+    deferred.length > 0 &&
+    job.write_scope_source === 'config' &&
+    (job.status === 'succeeded' || job.status === 'failed')
+  ) {
+    const mark = job.status === 'failed' ? '❌' : '⚠'
+    const lines: string[] = []
+    lines.push(`## 本轮结论`)
+    lines.push(``)
+    lines.push(
+      `结果：${mark} 硬配置拦截，未同步。本机 writeScope 为硬边界，变更落在范围外，目标工程未改写。`,
+    )
+    lines.push(``)
+    lines.push(`改动：`)
+    lines.push(`• 本轮同步文件数：0`)
+    lines.push(`• 范围外未同步 ${deferred.length} 个：`)
+    for (const f of deferred.slice(0, 15)) lines.push(`• \`${f}\``)
+    if (deferred.length > 15) lines.push(`• …另有 ${deferred.length - 15} 个`)
+    const scope = uniqPaths(job.write_scope || [])
+    if (scope.length) {
+      lines.push(``)
+      lines.push(`当前硬配置写范围：`)
+      for (const s of scope.slice(0, 8)) lines.push(`• \`${s}\``)
+      if (scope.length > 8) lines.push(`• …另有 ${scope.length - 8} 条`)
+    }
+    lines.push(``)
+    lines.push(`说明：`)
+    lines.push(`• 这是本机 \`config.json\` 的 \`writeScope\` 硬闸生效，不是写码空跑。`)
+    lines.push(`• 若确需同步这些文件：扩大 writeScope 后完全退出客户端再开，或清空 writeScope 恢复画像自动范围。`)
+    lines.push(``)
+    lines.push(`请你验收：`)
+    lines.push(`1. 确认真工程中上述范围外文件未被本轮改写。`)
+    lines.push(`2. 若本轮是在测硬配置：结果符合预期；测完请把 writeScope 改回 \`[]\` 并重启客户端。`)
+    lines.push(``)
+    lines.push(`如需微调或修 bug，直接说具体问题即可（小改续改，大改会先澄清）。`)
     return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n'
   }
 
@@ -730,7 +857,38 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   ) {
     changeLines.unshift(modelPoint)
   }
-  const verifyLines = verifyBullets.map((b) => b.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  // 去掉「已新增 .env」这类易误解为已落盘的模型句子（敏感扣留时）
+  const changeLinesSafe = heldSensitive.length
+    ? changeLines.filter((line) => {
+        const lower = line.toLowerCase()
+        const mentionsHeld =
+          [...heldBase].some((b) => b && lower.includes(String(b).toLowerCase())) ||
+          [...heldSet].some((rel) => rel && line.includes(rel))
+        if (!mentionsHeld) return true
+        return /未同步|仅沙箱|安全拦截|不会写入|未进入真工程/.test(line)
+      })
+    : changeLines
+  let verifyLines = verifyBullets.map((b) => b.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  // 模型常把「沙箱里写了 .env」写进验收步骤；有敏感扣留时改成以真工程为准，避免误判闸失效
+  if (heldSensitive.length) {
+    verifyLines = verifyLines.filter((line) => {
+      const t = line.toLowerCase()
+      if (t.includes('sandbox') || t.includes('沙箱')) return false
+      for (const base of heldBase) {
+        if (base && t.includes(base.toLowerCase())) return false
+      }
+      for (const rel of heldSet) {
+        if (rel && line.includes(rel)) return false
+      }
+      return true
+    })
+    verifyLines.unshift(
+      `确认真工程没有新增/改写敏感文件：${heldSensitive
+        .slice(0, 6)
+        .map((f) => `\`${f}\``)
+        .join('、')}` + (heldSensitive.length > 6 ? ' 等' : ''),
+    )
+  }
   const status = job.status === 'cancelled'
     ? statusHeadline('cancelled')
     : landed
@@ -760,8 +918,8 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     lines.push(``)
   }
   lines.push(`改动：`)
-  if (changeLines.length) {
-    for (const b of changeLines) lines.push(`• ${b}`)
+  if (changeLinesSafe.length) {
+    for (const b of changeLinesSafe) lines.push(`• ${b}`)
   } else {
     lines.push(`• 见上方结果说明`)
   }
@@ -776,6 +934,16 @@ export function formatChatConclusion(job: CursorCodingJob): string {
         `⚠ 契约文件未同步（${crit.join(', ')}）：易出现「页面已改但接口失败」。请扩大可写范围后续改，或在设置里补上 \`schemas.py\` / \`models.py\`。`,
       )
     }
+  }
+
+  if (heldSensitive.length) {
+    lines.push(``)
+    lines.push(`安全拦截（仅沙箱、未同步真工程） ${heldSensitive.length} 个：`)
+    for (const f of heldSensitive.slice(0, 15)) lines.push(`• \`${f}\``)
+    if (heldSensitive.length > 15) lines.push(`• …另有 ${heldSensitive.length - 15} 个`)
+    lines.push(
+      `说明：敏感/密钥类文件不会写入目标工程；请勿按沙箱路径验收这些文件，以真工程为准。`,
+    )
   }
 
   const sandboxSkipped = uniqPaths(job.sandbox_skipped_files || [])

@@ -36,6 +36,12 @@ import {
   buildImpactHintForChangedFiles,
 } from '../scopeCompanions.js'
 import {
+  coerceWriteScopeSource,
+  resolveEffectiveWriteScope,
+  selectAutoScopePromotions,
+  type WriteScopeSource,
+} from '../autoWriteScope.js'
+import {
   detectProject,
   describeProject,
   type ProjectStack,
@@ -71,6 +77,7 @@ import {
   diffSnapshots,
   filterMeaningfulRels,
   inferSparseBeforeAfter,
+  listHeldSensitiveRels,
   listSandboxTargetDrift,
   prepareSandboxForJob,
   snapshotSandbox,
@@ -104,10 +111,46 @@ import {
   verifyDeleteOnTarget,
 } from '../deleteVerify.js'
 
-function scopeOf(jobWriteScope: string[], cfgScope: string[]): string[] {
-  const fromJob = normalizeWriteScope(jobWriteScope)
-  const base = fromJob.length ? fromJob : normalizeWriteScope(cfgScope)
-  return expandWriteScopeWithCompanions(base)
+/** 开工时解析写范围：显式配置硬闸；否则项目画像自动；认不出则整仓开放。 */
+function resolveScopeForJob(opts: {
+  workspace: string
+  cfgScope: string[]
+  hintRels?: string[]
+}): { scope: string[]; source: WriteScopeSource } {
+  return resolveEffectiveWriteScope({
+    workspace: opts.workspace,
+    configScope: opts.cfgScope,
+    hintRels: opts.hintRels || [],
+  })
+}
+
+/**
+ * 分区 + 契约连带；auto 模式下再软放行可交付的范围外改动（宁宽勿窄）。
+ */
+function partitionWithPromotions(
+  changed: string[],
+  writeScope: string[],
+  scopeSource: WriteScopeSource,
+): { inScope: string[]; deferred: string[]; promoted: string[]; scopeOut: string[] } {
+  const scoped = expandWriteScopeWithCompanions(writeScope)
+  const { inScope: inScope0, deferred: deferred0 } = partitionChangedPaths(changed, scoped)
+  const companion = selectCompanionPromotions(inScope0, deferred0, scoped)
+  let deferred = deferred0.filter((p) => !companion.includes(normalizeRel(p)))
+  const promoted = [...companion]
+  if (scopeSource === 'auto') {
+    const soft = selectAutoScopePromotions(deferred)
+    for (const p of soft) {
+      if (!promoted.includes(p)) promoted.push(p)
+    }
+    const softSet = new Set(soft.map(normalizeRel))
+    deferred = deferred.filter((p) => !softSet.has(normalizeRel(p)))
+  }
+  const inScope = [
+    ...inScope0,
+    ...promoted.filter((p) => !inScope0.includes(p)),
+  ]
+  const scopeOut = normalizeWriteScope([...scoped, ...promoted])
+  return { inScope, deferred, promoted, scopeOut }
 }
 
 export function hashAcceptList(paths: string[]): string {
@@ -122,6 +165,12 @@ export function isJobRunning(jobId: string): boolean {
 }
 
 export function runJobBackground(jobId: string): void {
+  // Git 交付不进写码/运维编排；由 zr_cchat_git_deliver + 确认卡车道执行。
+  const early = loadJob(jobId)
+  if (early?.work_kind === 'git_deliver') {
+    console.warn('[cursor-chat] ignore runJobBackground for git_deliver', jobId)
+    return
+  }
   if (running.has(jobId)) return
   running.add(jobId)
   void executeJob(jobId).finally(() => {
@@ -563,34 +612,49 @@ async function enterReviewFromDiff(
   const after = snapshotSandbox(meta.sandbox)
   const diff = diffSnapshots(before, after)
   const job = loadJob(jobId)!
-  // 配置连带 + 审后提升：改 routers 时 schemas/models 不得永久 defer
-  const writeScope = expandWriteScopeWithCompanions(job.write_scope || [])
-  const { inScope: inScope0, deferred: deferred0 } = partitionChangedPaths(diff.changed, writeScope)
-  const deletedPart = partitionChangedPaths(diff.deleted, writeScope)
-  const promoted = selectCompanionPromotions(inScope0, deferred0, writeScope)
-  const promoteSet = new Set(promoted)
-  const inScope = [...inScope0, ...promoted.filter((p) => !inScope0.includes(p))]
-  const deferred = deferred0.filter((p) => !promoteSet.has(normalizeRel(p)))
-  if (promoted.length || writeScope.join('\n') !== (job.write_scope || []).join('\n')) {
+  const scopeSource = coerceWriteScopeSource(job.write_scope_source, job.write_scope)
+  // 配置连带 + auto 软放行：改 routers 时 schemas/models 不得永久 defer；画像略窄不挡真改动
+  const part = partitionWithPromotions(diff.changed, job.write_scope || [], scopeSource)
+  const deletedPart = partitionChangedPaths(diff.deleted, part.scopeOut)
+  const deletedScoped =
+    scopeSource === 'auto'
+      ? (() => {
+          const softDel = selectAutoScopePromotions(deletedPart.deferred)
+          const softSet = new Set(softDel.map(normalizeRel))
+          return {
+            inScope: [
+              ...deletedPart.inScope,
+              ...softDel.filter((p) => !deletedPart.inScope.includes(p)),
+            ],
+            deferred: deletedPart.deferred.filter((p) => !softSet.has(normalizeRel(p))),
+          }
+        })()
+      : deletedPart
+  const inScope = part.inScope
+  const deferred = part.deferred
+  if (part.promoted.length || part.scopeOut.join('\n') !== (job.write_scope || []).join('\n')) {
     patchJob(jobId, {
-      write_scope: normalizeWriteScope([...writeScope, ...promoted]),
+      write_scope: part.scopeOut,
     })
   }
 
+  // 敏感文件不进 diff 快照，但可能已写在沙箱：单独记账，供结论说明「未进真工程」
+  const heldSensitive = listHeldSensitiveRels(meta.sandbox, job.workspace)
   patchJob(jobId, {
     changed_files: diff.changed,
     deleted_files: diff.deleted,
     deferred_files: deferred,
     review_in_scope: inScope,
-    review_deleted: deletedPart.inScope,
-    review_deferred: [...deferred, ...deletedPart.deferred],
+    review_deleted: deletedScoped.inScope,
+    review_deferred: [...deferred, ...deletedScoped.deferred],
+    held_sensitive_files: heldSensitive,
   })
 
   if (
     !inScope.length &&
-    !deletedPart.inScope.length &&
+    !deletedScoped.inScope.length &&
     !deferred.length &&
-    !deletedPart.deferred.length
+    !deletedScoped.deferred.length
   ) {
     if (!cre.ok) {
       const detail = cre.error || 'Cursor 执行失败'
@@ -614,7 +678,7 @@ async function enterReviewFromDiff(
     // 1) 相对开工快照无有效 diff 时，再比对沙箱↔目标漂移并强制补同步（防父沙箱/拷贝残留「看着已修好」）
     // 2) 仍无落盘 → failed（禁止 succeeded + 假改动结论）
     const drift = filterMeaningfulRels(
-      listSandboxTargetDrift(meta.sandbox, job.workspace, writeScope),
+      listSandboxTargetDrift(meta.sandbox, job.workspace, part.scopeOut),
     )
     if (drift.length) {
       try {
@@ -718,8 +782,8 @@ async function enterReviewFromDiff(
     return
   }
 
-  const accept = [...inScope, ...deletedPart.inScope]
-  const deferredAll = [...deferred, ...deletedPart.deferred]
+  const accept = [...inScope, ...deletedScoped.inScope]
+  const deferredAll = [...deferred, ...deletedScoped.deferred]
 
   // 企业体验：范围内变更自动同步，用户只确认页面效果（可用 CURSOR_CHAT_AUTO_APPLY=0 回退人工审）
   const autoRaw = String(process.env.CURSOR_CHAT_AUTO_APPLY || '1').trim().toLowerCase()
@@ -756,7 +820,7 @@ async function enterReviewFromDiff(
       : ''
     const detail =
       (gateWhy ? `${gateWhy} ` : '') +
-      `待审：范围内 ${inScope.length} 改 / ${deletedPart.inScope.length} 删；范围外 ${deferredAll.length}` +
+      `待审：范围内 ${inScope.length} 改 / ${deletedScoped.inScope.length} 删；范围外 ${deferredAll.length}` +
       (cre.mocked ? '（Mock）' : '') +
       (accept.length ? '。请勾选后同步。' : '。范围内无可同步项（均在范围外）。') +
       (crit.length
@@ -769,9 +833,10 @@ async function enterReviewFromDiff(
       status: 'pending_review',
       message: JSON.stringify({
         in_scope: inScope,
-        deleted: deletedPart.inScope,
+        deleted: deletedScoped.inScope,
         deferred: deferredAll,
-        promoted_companions: promoted,
+        promoted_companions: part.promoted,
+        write_scope_source: scopeSource,
       }),
     })
     return
@@ -784,9 +849,10 @@ async function enterReviewFromDiff(
     status: 'pending_review',
     message: JSON.stringify({
       in_scope: inScope,
-      deleted: deletedPart.inScope,
+      deleted: deletedScoped.inScope,
       deferred: deferredAll,
-      promoted_companions: promoted,
+      promoted_companions: part.promoted,
+      write_scope_source: scopeSource,
       auto_apply: true,
     }),
   })
@@ -794,7 +860,7 @@ async function enterReviewFromDiff(
   let applied = applyJobReview({
     job_id: jobId,
     accept,
-    expand_scope: promoted,
+    expand_scope: part.promoted,
     seal: false,
   })
   if (!applied.ok) {
@@ -813,7 +879,7 @@ async function enterReviewFromDiff(
         cre,
         emit,
         firstAccept: accept,
-        promoted,
+        promoted: part.promoted,
         audit: applied.audit,
       })
       if (!repaired.ok) {
@@ -842,7 +908,7 @@ async function enterReviewFromDiff(
   const critLeft = criticalDeferredFiles(deferredAll)
   const detail =
     `${applied.detail || '已自动同步'}；${compileNote}` +
-    (promoted.length ? `；已连带同步契约 ${promoted.length} 个` : '') +
+    (part.promoted.length ? `；已连带/软放行 ${part.promoted.length} 个` : '') +
     (deferredAll.length ? `；另有 ${deferredAll.length} 个范围外未同步` : '') +
     (critLeft.length
       ? `；⚠ 仍有契约文件未同步：${critLeft.slice(0, 5).join(', ')}`
@@ -933,27 +999,46 @@ async function repairAuditAndReapply(opts: {
 
   const after = snapshotSandbox(meta.sandbox)
   const diff = diffSnapshots(before, after)
-  const writeScope = expandWriteScopeWithCompanions(loadJob(jobId)!.write_scope || [])
-  const { inScope: inScope0, deferred: deferred0 } = partitionChangedPaths(diff.changed, writeScope)
-  const deletedPart = partitionChangedPaths(diff.deleted, writeScope)
-  const morePromoted = selectCompanionPromotions(inScope0, deferred0, writeScope)
-  const promoteSet = new Set([...promoted, ...morePromoted])
-  const inScope = [...inScope0, ...morePromoted.filter((p) => !inScope0.includes(p))]
-  const deferred = deferred0.filter((p) => !promoteSet.has(normalizeRel(p)))
+  const jobAfterRepair = loadJob(jobId)!
+  const repairSource = coerceWriteScopeSource(
+    jobAfterRepair.write_scope_source,
+    jobAfterRepair.write_scope,
+  )
+  const repairPart = partitionWithPromotions(
+    diff.changed,
+    jobAfterRepair.write_scope || [],
+    repairSource,
+  )
+  const repairDeleted0 = partitionChangedPaths(diff.deleted, repairPart.scopeOut)
+  const repairDeleted =
+    repairSource === 'auto'
+      ? (() => {
+          const softDel = selectAutoScopePromotions(repairDeleted0.deferred)
+          const softSet = new Set(softDel.map(normalizeRel))
+          return {
+            inScope: [
+              ...repairDeleted0.inScope,
+              ...softDel.filter((p) => !repairDeleted0.inScope.includes(p)),
+            ],
+            deferred: repairDeleted0.deferred.filter((p) => !softSet.has(normalizeRel(p))),
+          }
+        })()
+      : repairDeleted0
   patchJob(jobId, {
     changed_files: diff.changed,
     deleted_files: diff.deleted,
-    deferred_files: deferred,
-    review_in_scope: inScope,
-    review_deleted: deletedPart.inScope,
-    review_deferred: [...deferred, ...deletedPart.deferred],
-    write_scope: normalizeWriteScope([...writeScope, ...morePromoted]),
+    deferred_files: repairPart.deferred,
+    review_in_scope: repairPart.inScope,
+    review_deleted: repairDeleted.inScope,
+    review_deferred: [...repairPart.deferred, ...repairDeleted.deferred],
+    write_scope: repairPart.scopeOut,
+    held_sensitive_files: listHeldSensitiveRels(meta.sandbox, jobAfterRepair.workspace),
   })
 
   // 回到 pending_review 才能再 apply
   setStatus(loadJob(jobId)!, 'pending_review', '审计续修后重新同步…')
   patchJob(jobId, { review_gate: 'auto_applying' })
-  const accept = [...new Set([...inScope, ...deletedPart.inScope])]
+  const accept = [...new Set([...repairPart.inScope, ...repairDeleted.inScope])]
   if (!accept.length) {
     const detail = '审计续修后无可同步变更，交付仍未通过'
     setStatus(loadJob(jobId)!, 'failed', detail)
@@ -963,7 +1048,7 @@ async function repairAuditAndReapply(opts: {
   const applied2 = applyJobReview({
     job_id: jobId,
     accept,
-    expand_scope: [...promoted, ...morePromoted],
+    expand_scope: [...promoted, ...repairPart.promoted],
     seal: false,
   })
   if (applied2.ok) {
@@ -1287,8 +1372,6 @@ async function executeJob(jobId: string): Promise<void> {
     }
 
     setStatus(job, 'running', '准备沙箱…')
-    const writeScope = scopeOf(job.write_scope, cfg.writeScope)
-    patchJob(jobId, { write_scope: writeScope })
 
     const parent = job.parent_job_id ? loadJob(job.parent_job_id) : null
     let parentSummary = ''
@@ -1300,6 +1383,29 @@ async function executeJob(jobId: string): Promise<void> {
       resumeAgentId = link.resumeAgentId
       parentSandbox = link.parentSandbox
       patchJob(jobId, { continue_count: (parent.continue_count || 0) + 1 })
+    }
+
+    const hintRels = parent
+      ? [...(parent.synced_files || []), ...(parent.changed_files || []), ...(parent.write_scope || [])]
+          .map(normalizeRel)
+          .filter(Boolean)
+          .slice(0, 40)
+      : []
+    const resolved = resolveScopeForJob({
+      workspace: job.workspace,
+      cfgScope: cfg.writeScope,
+      hintRels,
+    })
+    const writeScope = resolved.scope
+    patchJob(jobId, {
+      write_scope: writeScope,
+      write_scope_source: resolved.source,
+    })
+    if (resolved.source === 'auto' && writeScope.length) {
+      appendEvent(loadJob(jobId)!, {
+        type: 'status',
+        message: `可写范围（项目画像）：${writeScope.slice(0, 6).join(', ')}${writeScope.length > 6 ? '…' : ''}`,
+      })
     }
 
     const meta = await prepareSandboxForJob({

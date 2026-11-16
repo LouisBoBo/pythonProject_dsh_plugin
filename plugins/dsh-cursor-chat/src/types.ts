@@ -10,6 +10,11 @@ export type CursorCodingConfig = {
   port: number
   dataRoot: string
   cursorApiKey: string
+  /**
+   * Git 托管 Token（可选）：设置 → AI写码 与 Cursor Key 同页配置。
+   * 用于自动开 PR；空则降级 gh / 手动 Compare 链接。不进插件推送配置。
+   */
+  gitHostToken: string
   writeScope: string[]
   /** 默认 composer-2.5 */
   model: string
@@ -31,10 +36,32 @@ export type CursorCodingJob = {
   workspace: string
   requirement: string
   /**
-   * code=改代码（沙箱 → 同步）；ops=重启/测试/日志等终端操作（真实项目，不改代码）。
+   * code=改代码（沙箱 → 同步）；ops=重启/测试/日志等终端操作（真实项目，不改代码）；
+   * git_deliver=按需 Git 交付（确认后 commit/push/PR，不走写码沙箱）。
    * 缺省按诉求再判；旧账本没有该字段。
    */
-  work_kind?: 'code' | 'ops'
+  work_kind?: 'code' | 'ops' | 'git_deliver'
+  /**
+   * Git 交付确认卡快照（权威字段；仅 work_kind=git_deliver）。
+   * 确认后写入结果摘要，供结论卡展示。
+   */
+  git_deliver?: {
+    remote_url?: string
+    current_branch?: string
+    target_branch?: string
+    base_branch?: string
+    commit_message?: string
+    create_pr?: boolean
+    selected_files?: string[]
+    held_sensitive_files?: string[]
+    /** 确认卡令牌：进度卡取消/确认用，禁止只靠 UI 临时态 */
+    confirm_token?: string
+    commit_sha?: string
+    commit_short?: string
+    pr_url?: string
+    stage?: string
+    pushed?: boolean
+  } | null
   /** 本轮随诉求传入的截图（落盘路径，供 Cursor SDK 多模态） */
   images?: ChatImageRef[]
   parent_job_id: string | null
@@ -52,7 +79,17 @@ export type CursorCodingJob = {
   synced_files: string[]
   last_synced_files: string[]
   write_scope: string[]
+  /**
+   * 写范围来源：config=本机显式配置（硬闸）；auto=项目画像（同步时软放行可交付范围外改动）；
+   * open=整仓不收窄。缺省按旧账本：有范围当 config，无范围当 open。
+   */
+  write_scope_source?: 'config' | 'auto' | 'open' | null
   sandbox_path: string | null
+  /**
+   * 沙箱内存在、但因敏感策略未同步到真工程的路径（如 .env）。
+   * 只供结论提示；不进 synced / deferred，也不改变同步闸。
+   */
+  held_sensitive_files?: string[]
   /** 拷贝超时/失败而未进入沙箱的文件（相对路径） */
   sandbox_skipped_files?: string[]
   agent_id: string | null
@@ -158,6 +195,7 @@ export type HitlAction =
   | 'cursor-chat.cancel'
   | 'cursor-chat.restart-backend'
   | 'cursor-chat.user-choice'
+  | 'cursor-chat.git-deliver'
 
 export type HitlRecord = {
   action: HitlAction

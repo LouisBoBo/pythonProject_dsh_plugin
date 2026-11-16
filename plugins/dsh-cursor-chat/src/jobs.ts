@@ -4,6 +4,8 @@ import { randomBytes } from 'node:crypto'
 import { loadConfig } from './config.js'
 import { formatChatConclusion } from './conclusion.js'
 import type { CursorCodingJob, JobStatus, StreamEvent } from './types.js'
+import { cancelGitDeliverWait } from './gitDeliverWait.js'
+import { cancelPendingConfirm, findPendingByJobId } from './pendingConfirm.js'
 import { cancelUserChoice } from './userChoice.js'
 
 const JOB_ENDED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'blocked_no_runner']
@@ -66,6 +68,15 @@ function migrateJob(raw: CursorCodingJob): CursorCodingJob {
     synced_files: raw.synced_files || [],
     last_synced_files: raw.last_synced_files || raw.synced_files || [],
     write_scope: raw.write_scope || [],
+    write_scope_source:
+      raw.write_scope_source === 'config' ||
+      raw.write_scope_source === 'auto' ||
+      raw.write_scope_source === 'open'
+        ? raw.write_scope_source
+        : null,
+    held_sensitive_files: Array.isArray(raw.held_sensitive_files)
+      ? raw.held_sensitive_files.map((x) => String(x || '').trim()).filter(Boolean)
+      : [],
     sandbox_path: raw.sandbox_path ?? null,
     sandbox_skipped_files: raw.sandbox_skipped_files || [],
     agent_id: raw.agent_id ?? null,
@@ -81,7 +92,11 @@ function migrateJob(raw: CursorCodingJob): CursorCodingJob {
     review_deferred: raw.review_deferred || [],
     review_gate: raw.review_gate ?? null,
     events: raw.events || [],
-    work_kind: raw.work_kind === 'ops' || raw.work_kind === 'code' ? raw.work_kind : undefined,
+    work_kind:
+      raw.work_kind === 'ops' || raw.work_kind === 'code' || raw.work_kind === 'git_deliver'
+        ? raw.work_kind
+        : undefined,
+    git_deliver: raw.git_deliver && typeof raw.git_deliver === 'object' ? raw.git_deliver : null,
   }
 }
 
@@ -116,7 +131,12 @@ export function jobCardView(job: CursorCodingJob): Record<string, unknown> {
     detail: job.detail,
     workspace: job.workspace,
     requirement: job.requirement,
-    work_kind: job.work_kind === 'ops' ? 'ops' : 'code',
+    work_kind:
+      job.work_kind === 'ops'
+        ? 'ops'
+        : job.work_kind === 'git_deliver'
+          ? 'git_deliver'
+          : 'code',
     transcript: job.transcript || [],
     review_in_scope: job.review_in_scope || [],
     review_deleted: job.review_deleted || [],
@@ -126,6 +146,7 @@ export function jobCardView(job: CursorCodingJob): Record<string, unknown> {
     backend_restart: job.backend_restart || null,
     backend_restart_hint: job.backend_restart_hint || null,
     pending_user_choice: job.pending_user_choice || null,
+    git_deliver: job.git_deliver || null,
     updated_at: job.updated_at,
     chat_conclusion: formatChatConclusion(job),
   }
@@ -219,11 +240,17 @@ export function createJob(input: {
   dsh_session_id?: string | null
   dsh_call_id?: string | null
   write_scope?: string[]
+  write_scope_source?: 'config' | 'auto' | 'open' | null
   continue_count?: number
-  work_kind?: 'code' | 'ops'
+  work_kind?: 'code' | 'ops' | 'git_deliver'
 }): CursorCodingJob {
   const now = new Date().toISOString()
-  const workKind = input.work_kind === 'ops' ? 'ops' : 'code'
+  const workKind =
+    input.work_kind === 'ops'
+      ? 'ops'
+      : input.work_kind === 'git_deliver'
+        ? 'git_deliver'
+        : 'code'
   const job: CursorCodingJob = {
     id: newJobId(),
     status: 'queued',
@@ -236,7 +263,12 @@ export function createJob(input: {
     dsh_call_id: input.dsh_call_id ? String(input.dsh_call_id).trim() : null,
     created_at: now,
     updated_at: now,
-    detail: workKind === 'ops' ? '已开工，直接在项目终端处理，不改代码' : '已入队',
+    detail:
+      workKind === 'ops'
+        ? '已开工，直接在项目终端处理，不改代码'
+        : workKind === 'git_deliver'
+          ? '等待确认 Git 交付…'
+          : '已入队',
     events: [],
     changed_files: [],
     deleted_files: [],
@@ -244,6 +276,12 @@ export function createJob(input: {
     synced_files: [],
     last_synced_files: [],
     write_scope: input.write_scope || [],
+    write_scope_source:
+      input.write_scope_source === 'config' ||
+      input.write_scope_source === 'auto' ||
+      input.write_scope_source === 'open'
+        ? input.write_scope_source
+        : null,
     sandbox_path: null,
     sandbox_skipped_files: [],
     agent_id: null,
@@ -258,13 +296,19 @@ export function createJob(input: {
     review_deleted: [],
     review_deferred: [],
     review_gate: null,
+    git_deliver: null,
     cancelled: false,
   }
   saveJob(job)
   appendEvent(job, {
     type: 'status',
     status: 'queued',
-    message: workKind === 'ops' ? '已开工，直接在项目终端处理，不改代码' : '已入队',
+    message:
+      workKind === 'ops'
+        ? '已开工，直接在项目终端处理，不改代码'
+        : workKind === 'git_deliver'
+          ? '等待确认 Git 交付…'
+          : '已入队',
   })
   return loadJob(job.id)!
 }
@@ -376,10 +420,32 @@ export function forceCancelJob(id: string): CursorCodingJob | null {
   }
 
   cancelUserChoice(job.id, '用户取消')
+  const gitCancelClear =
+    job.work_kind === 'git_deliver'
+      ? {
+          // 停止/取消 Git：清空候选清单，避免结论区冒充「已编辑」
+          review_in_scope: [] as string[],
+          synced_files: [] as string[],
+          last_synced_files: [] as string[],
+          changed_files: [] as string[],
+          review_gate: null as null,
+        }
+      : {}
+  // Git：落盘取消决策，唤醒宿主进程里仍阻塞的 waitForGitDeliverConfirm
+  if (job.work_kind === 'git_deliver') {
+    const token =
+      String(job.git_deliver?.confirm_token || '').trim() ||
+      String(findPendingByJobId(job.id)?.id || '').trim()
+    if (token) {
+      cancelPendingConfirm(token)
+      cancelGitDeliverWait(token, '用户停止')
+    }
+  }
   patchJob(job.id, {
     cancelled: true,
     transcript: sealedTranscript(job),
     pending_user_choice: null,
+    ...gitCancelClear,
   })
   const cur = loadJob(job.id)!
   setStatus(cur, 'cancelled', '用户取消')

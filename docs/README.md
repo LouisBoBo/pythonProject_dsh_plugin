@@ -83,15 +83,17 @@ docs/
 
 | 文档 | 说明 | 状态 |
 | --- | --- | --- |
-| [Cursor写码插件-新用户使用手册.md](./05-功能使用手册说明/Cursor写码插件-新用户使用手册.md) | **新用户照做**：装插件、填 Key、澄清→确认→进度→结论、续改、排障 | 使用向 |
-| [Cursor写码插件-主流程冻结.md](./04-Cursor-AI-Coding逼真版本/Cursor写码插件-主流程冻结.md) | 主交互四步冻结口径；过程加厚暂停 | 产品冻结 |
-| [写码插件输出-VS-Cursor原生输出-对比报告.md](./04-Cursor-AI-Coding逼真版本/写码插件输出-VS-Cursor原生输出-对比报告.md) | **输出对照**：整体相似度 + 澄清/确认/思考/工具/结论/续改等节点 | 收口对照（2026-09-13） |
-| [插件韧性-安装回退与进程隔离.md](./04-Cursor-AI-Coding逼真版本/插件韧性-安装回退与进程隔离.md) | 装失败回退、四套兼容声明、写码 HTTP 子进程隔离 | 0.6.42 |
-| [AI-Coding接入Cursor-插件版实施方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-插件版实施方案.md) | **按五条硬约束重写**：独立 Bundle、零改 WorkBuddy、UI 挂 DSH 原生插槽 | 实施向 |
-| [AI-Coding接入Cursor-体验逼近方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-体验逼近方案.md) | 体验/分期母本（原落点在 WorkBuddy 引擎 + mes-bridge） | 对照用 |
-| [重启服务方案.md](./04-Cursor-AI-Coding逼真版本/重启服务方案.md) | 启动/重启按项目已有命令后台拉起；结构不同时沿用该项目自己的命令 | 2026-11-12 |
+| [**Cursor对话写码插件-多轮.md**](./05-功能使用手册说明/Cursor对话写码插件-多轮.md) | **现行主手册**（`dsh-cursor-chat` 0.3.70）：写码/删除/运维终端/交付审计续修/项目画像/改动卡/HITL 全功能 | 使用向 · 2026-11-13 |
+| [重启服务方案.md](./04-Cursor-AI-Coding逼真版本/重启服务方案.md) | 启动/重启按项目命令拉起；认不出再降级 Cursor SDK | 2026-11-12 |
+| [Cursor写码插件-新用户使用手册.md](./05-功能使用手册说明/Cursor写码插件-新用户使用手册.md) | 旧包 `dsh-cursor-coding` 四步手册（历史对照） | 历史 |
+| [Cursor写码插件-主流程冻结.md](./04-Cursor-AI-Coding逼真版本/Cursor写码插件-主流程冻结.md) | 主交互四步冻结口径 | 产品冻结（历史） |
+| [写码插件输出-VS-Cursor原生输出-对比报告.md](./04-Cursor-AI-Coding逼真版本/写码插件输出-VS-Cursor原生输出-对比报告.md) | 输出对照：澄清/确认/思考/工具/结论/续改 | 收口对照（2026-09-13） |
+| [插件韧性-安装回退与进程隔离.md](./04-Cursor-AI-Coding逼真版本/插件韧性-安装回退与进程隔离.md) | 装失败回退、兼容声明、写码 HTTP 子进程隔离 | 0.6.42 |
+| [AI-Coding接入Cursor-插件版实施方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-插件版实施方案.md) | 五条硬约束：独立 Bundle、零改 WorkBuddy、UI 挂原生插槽 | 实施向 |
+| [AI-Coding接入Cursor-体验逼近方案.md](./04-Cursor-AI-Coding逼真版本/AI-Coding接入Cursor-体验逼近方案.md) | 体验/分期母本（对照用） | 对照用 |
 
-**仓库内插件：** `dsh-cursor-coding/`（`@zhongruan/dsh-cursor-coding`）
+**现行仓库插件：** `plugins/dsh-cursor-chat/`（`@zhongruan/dsh-cursor-chat`）  
+**旧包（并存）：** `plugins/dsh-cursor-coding/`（`@zhongruan/dsh-cursor-coding`）
 
 ---
 
@@ -109,6 +111,7 @@ docs/
 
 | 文档 | 说明 |
 | --- | --- |
+| [**2026-W46-对话写码与客户端发版周报.md**](./07-周报/2026-W46-对话写码与客户端发版周报.md) | 2026-11-10～13：chat 0.3.70 审计续修/运维重启/改动卡；客户端发版功能点可摘抄 |
 | [2026-W37-Cursor写码插件收口周报.md](./07-周报/2026-W37-Cursor写码插件收口周报.md) | 2026-09-08～14：写码主路径冻结、体验对照、韧性三项、待领导拍板 |
 | [2026-W38-本周工作计划.md](./07-周报/2026-W38-本周工作计划.md) | 2026-09-14～20：稳定回归、可选上架、审码并行；冻结期内不加厚 |
 

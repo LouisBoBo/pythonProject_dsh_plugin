@@ -1,6 +1,10 @@
 # @zhongruan/dsh-cursor-chat
 
-对话式多轮写码插件（与 `@zhongruan/dsh-cursor-coding` **并存**，互不影响）。
+对话式多轮写码（现行交付，市场 latest 以 `package.json` 为准）。
+
+**完整功能与使用说明（推荐）**：[`docs/05-功能使用手册说明/Cursor对话写码插件-多轮.md`](../../docs/05-功能使用手册说明/Cursor对话写码插件-多轮.md)
+
+与旧包 `@zhongruan/dsh-cursor-coding` **可并存**，互不影响。
 
 ## 隔离
 
@@ -11,54 +15,28 @@
 | 端口 | `18791` | `18788` |
 | 数据 | `~/.zhongruan/cursor-chat` | `~/.zhongruan/cursor-coding` |
 | Cordis id | `cursor-chat` | `cursor-coding` |
+| 设置页 | Cursor 对话写码 | Cursor 写码 |
 
-## 行为
+## 能力摘要
 
-1. `zr_cchat_begin`：用户**原话**（+ 可选 `images` 截图）→（入口级增删先澄清）→ 确认卡 → Cursor 多模态 → 同步 → 正文结论  
-2. `zr_cchat_continue`：同会话续改，**优先 `Agent.resume`**；可再带新图  
-3. 确认前不写盘（HITL nonce）
-
-### 任意项目
-
-- 以侧栏**当前打开工作区**为准：`workspace` 传该工程绝对路径；换仓库即换路径，不绑死某一公司业务仓。  
-- 不限技术栈（前端 / 后端 / 脚本等）；日常改代码走本插件。  
-- MES / 售后 / 测试用例等 **ESC 技能已命中**时不要抢：那些走 ESC，不走 `zr_cchat_*`。
-
-### 贴图（路 A · 接近 IDE）
-
-工具参数 `images`（JSON 字符串）示例：
-
-```json
-[{"path":"D:/shots/ui.png"}]
-```
-
-或 `data`+`mimeType` / `url`。执行时经 Cursor SDK：
-
-`agent.send({ text, images: [{ data, mimeType }] })`
-
-另拷进沙箱 `.cursor-chat-images/` 作 Read 兜底。
+- **写码**：澄清 → 确认（HITL）→ 沙箱 Cursor 改盘 → 同步 → 正文结论；续改优先 `Agent.resume`；可贴图  
+- **删除**：页面 / 菜单验尸走 `projectLayout`，适配嵌套工程  
+- **运维**：重启 / 测试 / 日志 / 装依赖 / 排障不进沙箱；重启优先项目命令，认不出再降级 Cursor SDK  
+- **交付审计**：`param_contract` / `schema_drift` / `api_mount` / 菜单等可自动续修再验；落盘硬闸挡假绿  
+- **进度卡**：用户选择题、改动文件可点开右侧工作区  
 
 ## 本地开发
 
-```bash
-cd plugins/dsh-cursor-chat
-pnpm install   # 或 npm i
-pnpm build
-# mock 自检（不改真工程、不碰旧插件数据目录）
-set CURSOR_CHAT_MOCK=1
-pnpm self-test
-```
-
-Windows PowerShell：
-
 ```powershell
 cd plugins\dsh-cursor-chat
-npm install
 npm run build
 $env:CURSOR_CHAT_MOCK='1'
+$env:CURSOR_CHAT_SELFTEST='1'
 npm run self-test
 ```
 
-## 安装到 DSH
+正式写码禁止只设 `CURSOR_CHAT_MOCK=1`（无 SELFTEST 会被剥掉，且不得静默假交付）。
 
-在插件市场或 profile 中安装本包；**不要**卸载旧写码插件（除非你明确只想用对话版）。
+## 安装
+
+设置 → 插件市场 → 安装 / 更新本包。正式上架：`./scripts/internal-market/pack.sh dsh-cursor-chat` 再 `upload.sh`。

@@ -14,7 +14,7 @@ import {
 } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { _resetHitlStoreForTests, consume, issue } from './hitl.js'
 import {
   allowMockDelivery,
@@ -28,6 +28,13 @@ import {
   partitionChangedPaths,
   pathInScope,
 } from './pathScope.js'
+import {
+  coerceWriteScopeSource,
+  resolveAutoWriteScope,
+  resolveEffectiveWriteScope,
+  selectAutoScopePromotions,
+} from './autoWriteScope.js'
+import { listHeldSensitiveRels } from './sandbox.js'
 import {
   _resetPendingConfirmForTests,
   bindPendingJob,
@@ -153,7 +160,11 @@ import {
   expandWriteScopeWithCompanions,
   selectCompanionPromotions,
 } from './scopeCompanions.js'
-import { formatChatConclusion } from './conclusion.js'
+import {
+  conclusionDeletedFiles,
+  conclusionSyncedFiles,
+  formatChatConclusion,
+} from './conclusion.js'
 import { cardFileNames, pickConclusionForCard } from './conclusionAnchor.js'
 import { compactParentHandoff } from './sessionMemory.js'
 import { startServer, stopServer, getListenAddr } from './server.js'
@@ -232,6 +243,386 @@ async function main() {
     console.log('ok: tilde expand contract')
   }
 
+  // Git 交付：纯函数 + 临时仓（不碰写码主路径）
+  {
+    const {
+      displayRemoteUrl,
+      parsePorcelainLines,
+      buildStatusEntries,
+      pickDefaultBaseBranch,
+      proposeDeliverBranch,
+      inspectGitWorkspace,
+      runGit,
+    } = await import('./gitInspect.js')
+    const {
+      buildGitDeliverPlan,
+      executeGitDeliver,
+      formatGitDeliverConclusion,
+      draftCommitMessage,
+      summarizeCommitFromChanges,
+      isGenericDeliverIntent,
+      isTransientGitNetworkError,
+      isGitDeliverIdleDetail,
+    } = await import('./gitDeliver.js')
+    const { _resetGitDeliverWaitForTests, waitForGitDeliverConfirm, confirmGitDeliverWait } =
+      await import('./gitDeliverWait.js')
+    const { runJobBackground } = await import('./orchestrator/runJob.js')
+    const { createJob, loadJob } = await import('./jobs.js')
+
+    assert(
+      displayRemoteUrl('git@github.com:org/repo.git') === 'https://github.com/org/repo',
+      'ssh remote 展示须转 https',
+    )
+    assert(
+      displayRemoteUrl('https://gitee.com/org/repo.git') === 'https://gitee.com/org/repo',
+      'https remote 去 .git',
+    )
+    const rows = parsePorcelainLines(' M src/a.ts\n?? .env\n?? docs/x.md\n')
+    assert(rows.some((r) => r.rel === 'src/a.ts'), 'porcelain 须解析改动')
+    assert(rows.some((r) => r.rel === '.env'), 'porcelain 须看到 .env')
+    const built = buildStatusEntries(rows)
+    assert(built.selected_files.includes('src/a.ts'), '普通文件默认勾选')
+    assert(built.selected_files.includes('docs/x.md'), '新文件默认勾选')
+    assert(!built.selected_files.includes('.env'), '.env 不得默认勾选')
+    assert(built.held_sensitive_files.includes('.env'), '.env 须进敏感列表')
+    assert(pickDefaultBaseBranch({ currentBranch: 'feat', localBranches: ['main'] }) === 'main', '基线认 local main')
+    const onMain = proposeDeliverBranch({ currentBranch: 'main', baseBranch: 'main' })
+    assert(onMain.create_new && onMain.branch.startsWith('dsh/'), '主干上须新建 dsh 分支')
+    const onFeat = proposeDeliverBranch({ currentBranch: 'feat/x', baseBranch: 'main' })
+    assert(!onFeat.create_new && onFeat.branch === 'feat/x', '功能分支默认沿用当前')
+    assert(isGenericDeliverIntent('提交代码') === true, '「提交代码」不得当 commit 说明')
+    assert(isGenericDeliverIntent('修复登录超时') === false, '具体说明可保留')
+    assert(
+      isTransientGitNetworkError("fatal: unable to access 'https://x': Recv failure: Connection was reset") ===
+        true,
+      'Connection reset 须可重试',
+    )
+    assert(isTransientGitNetworkError('rejected non-fast-forward') === false, '非快进不得当瞬断重试')
+    assert(isGitDeliverIdleDetail('工作区没有未提交改动，无需 Git 交付', 'no_changes') === true, '无改动须认 idle')
+    const idleConc = formatGitDeliverConclusion({
+      status: 'idle',
+      detail: '工作区没有未提交改动，无需 Git 交付',
+      code: 'no_changes',
+    })
+    assert(/没有可提交的改动|无需 Git 交付/.test(idleConc), '无改动结论须友好')
+    assert(/^##\s*Git\s*交付结论/m.test(idleConc), 'Git 结论标题须与写码「本轮结论」区分')
+    assert(!/^##\s*本轮结论/m.test(idleConc), 'Git 结论不得套写码本轮结论标题')
+    assert(!/❌/.test(idleConc), '无改动不得打红叉')
+    assert(!/停在：检视/.test(idleConc), '无改动不得写停在检视')
+    assert(!/冲突\/鉴权/.test(idleConc), '无改动不得套冲突鉴权验收')
+    const autoMsg = summarizeCommitFromChanges({
+      files: ['backend/app/main.py', 'README.md', 'backend/app/schemas.py'],
+      entries: [
+        { rel: 'backend/app/main.py', code: ' M' },
+        { rel: 'README.md', code: ' M' },
+        { rel: 'backend/app/schemas.py', code: '??' },
+      ],
+    })
+    assert(!/提交代码/.test(autoMsg), '自动说明禁止复述提交口令')
+    assert(/更新/.test(autoMsg) && /backend|README/.test(autoMsg), '自动说明须来自真实路径')
+    assert(/改 2/.test(autoMsg) && /新 1/.test(autoMsg), '自动说明须含改/新计数')
+    assert(draftCommitMessage('  hello  ').startsWith('hello'), '非口令诉求仍可作草稿')
+    assert(draftCommitMessage('提交代码') === 'chore: sync workspace changes', '口令草稿须降级')
+
+    const gitRoot = mkdtempSync(join(tmpdir(), 'cc-git-ws-'))
+    const bare = mkdtempSync(join(tmpdir(), 'cc-git-bare-'))
+    await runGit(bare, ['init', '--bare'])
+    await runGit(gitRoot, ['init'])
+    await runGit(gitRoot, ['config', 'user.email', 'selftest@example.com'])
+    await runGit(gitRoot, ['config', 'user.name', 'selftest'])
+    await runGit(gitRoot, ['checkout', '-b', 'main'])
+    writeFileSync(join(gitRoot, 'app.js'), 'console.log(1)\n', 'utf8')
+    await runGit(gitRoot, ['add', 'app.js'])
+    await runGit(gitRoot, ['commit', '-m', 'init'])
+    await runGit(gitRoot, ['remote', 'add', 'origin', bare])
+    writeFileSync(join(gitRoot, 'app.js'), 'console.log(2)\n', 'utf8')
+    writeFileSync(join(gitRoot, '.env'), 'SECRET=1\n', 'utf8')
+    writeFileSync(join(gitRoot, 'note.md'), 'n\n', 'utf8')
+
+    const inspected = await inspectGitWorkspace(gitRoot)
+    assert(inspected.ok === true, '有改动的 git 仓须 inspect ok')
+    if (inspected.ok !== true) throw new Error('inspect failed')
+    assert(inspected.current_branch === 'main', '默认展示当前分支 main')
+    assert(inspected.remote_url.length > 0, '默认展示仓库地址')
+    assert(inspected.selected_files.includes('app.js'), '改动文件进候选')
+    assert(inspected.selected_files.includes('note.md'), '新文件进候选')
+    assert(!inspected.selected_files.includes('.env'), '敏感不进候选')
+
+    const plan = buildGitDeliverPlan(inspected, {
+      requirement: '修一下日志',
+      create_pr: false,
+    })
+    assert(plan.create_new_branch === true, '在 main 上交付须新建分支')
+    assert(plan.target_branch.startsWith('dsh/'), '新分支名 dsh/')
+    assert(plan.remote_url === inspected.remote_url, '计划默认带当前仓库地址')
+    assert(plan.current_branch === 'main', '计划默认带当前分支')
+    assert(plan.commit_message === '修一下日志', '具体诉求可作说明')
+    const planIntent = buildGitDeliverPlan(inspected, {
+      requirement: '提交代码',
+      create_pr: false,
+    })
+    assert(!/提交代码/.test(planIntent.commit_message), '口令不得写入计划 commit_message')
+    assert(/更新/.test(planIntent.commit_message), '口令场景须按改动文件总结')
+
+    // 误传 .env 也必须被执行层剥掉
+    const delivered = await executeGitDeliver(plan, {
+      selected_files: [...plan.selected_files, '.env'],
+      create_pr: false,
+    })
+    assert(delivered.ok === true, '本地 bare remote 推送应成功：' + delivered.detail)
+    assert(!delivered.committed_files.includes('.env'), 'commit 不得含 .env')
+    assert(delivered.committed_files.includes('app.js'), '须提交 app.js')
+    assert(delivered.pushed === true, '须已 push')
+    assert(delivered.commit_short.length >= 7, '须有 commit short')
+
+    const failConc = formatGitDeliverConclusion({
+      status: 'failed',
+      plan,
+      result: {
+        ok: false,
+        stage: 'push',
+        detail: 'denied',
+        remote_url: plan.remote_url,
+        current_branch: plan.current_branch,
+        target_branch: plan.target_branch,
+        base_branch: plan.base_branch,
+        commit_sha: 'abc',
+        commit_short: 'abcdef1',
+        pushed: false,
+        pr_url: '',
+        pr_manual_hint: '手动开 PR',
+        committed_files: ['app.js'],
+      },
+    })
+    assert(/停在：推送/.test(failConc), '失败结论须写清停驻步骤')
+
+    _resetGitDeliverWaitForTests()
+    const waitP = waitForGitDeliverConfirm({ confirmToken: 'pcf-test-git', plan })
+    const woke = confirmGitDeliverWait('pcf-test-git', {
+      selected_files: plan.selected_files,
+      commit_message: 'ok',
+      target_branch: plan.target_branch,
+      base_branch: plan.base_branch,
+      create_pr: false,
+    })
+    assert(woke.ok, 'wait 确认须成功')
+    const waited = await waitP
+    assert(waited.ok === true && waited.payload.commit_message === 'ok', 'wait 载荷须回来')
+
+    // 跨进程：cancel 先落盘；wait 靠轮询醒来（修「卡已取消但深度搜索不停」）
+    _resetGitDeliverWaitForTests()
+    const { cancelGitDeliverWait } = await import('./gitDeliverWait.js')
+    const waitThenCancel = waitForGitDeliverConfirm({
+      confirmToken: 'pcf-wait-then-cancel',
+      plan,
+      ttlMs: 8000,
+    })
+    await new Promise((r) => setTimeout(r, 80))
+    // 模拟子进程 HTTP：无本进程 waiter 时仍 ok（decision_persisted）
+    const diskCancel = cancelGitDeliverWait('pcf-wait-then-cancel', '用户停止')
+    assert(diskCancel.ok, '取消须成功（含仅落盘）')
+    const afterCancel = await waitThenCancel
+    assert(afterCancel.ok === false && afterCancel.cancelled === true, '落盘取消须唤醒 wait')
+    assert(/用户停止|取消/.test(afterCancel.detail), '取消 detail 须可读')
+
+    const gdJob = createJob({
+      workspace: gitRoot,
+      requirement: 'git deliver guard',
+      work_kind: 'git_deliver',
+    })
+    runJobBackground(gdJob.id)
+    await new Promise((r) => setTimeout(r, 50))
+    const gdLive = loadJob(gdJob.id)
+    assert(gdLive?.status === 'queued' || gdLive?.detail?.includes('等待'), 'git_deliver 不得被 runJob 拉去写码')
+    assert(gdLive?.work_kind === 'git_deliver', 'work_kind 须保持 git_deliver')
+
+    const clientSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'client.js'), 'utf8')
+    assert(clientSrc.includes('cc-git-deliver'), '进度卡须有 Git 交付确认 UI')
+    assert(clientSrc.includes('cursor-chat.git-deliver'), '须签发 git-deliver HITL')
+    assert(clientSrc.includes('zr_cchat_git_deliver'), '须注册 git_deliver 工具视图')
+    assert(clientSrc.includes('正在读取仓库地址'), 'Git 卡须有读取中占位，禁止空等')
+    assert(clientSrc.includes('GitDeliverConfirmTurnTail'), '确认卡须挂 turnTail 兜底')
+    assert(clientSrc.includes('git-deliver/awaiting'), 'turnTail 须轮询 awaiting 接口')
+    assert(clientSrc.includes('selectGitDeliverTurn'), '进行中轮次也要挂 Git 确认卡')
+    assert(clientSrc.includes('waiting_tool'), '确认后须认中间件唤醒路径')
+    assert(clientSrc.includes('data.git_deliver'), 'SSE snapshot 须灌 git_deliver 进确认卡')
+    assert(clientSrc.includes('jobs-by-call 不含计划') || clientSrc.includes('pullPending'), 'Git 挂 job 后仍须拉 pending 计划')
+    assert(clientSrc.includes('cc-git-actions'), '确认按钮须右下角布局类')
+    assert(clientSrc.includes('resolveAvatarAccent'), '须用头像底色作强调色')
+    assert(clientSrc.includes('cc-git-tick'), '须自绘勾选视觉，禁止依赖系统黑钩')
+    assert(clientSrc.includes('border:solid #fff'), '自绘勾须白色')
+    assert(!/accentColor:\s*accent/.test(clientSrc), '禁止内联 accentColor（Electron 出黑钩）')
+    assert(clientSrc.includes('job_id: jid') || clientSrc.includes('job_id: gJob'), '取消须可带 job_id')
+    assert(clientSrc.includes('未执行 commit，工作区改动仍在'), '取消/停止终态不得再转圈')
+    assert(clientSrc.includes('recoverGitDeliverHandles'), '取消/确认前须回填 token+jobId')
+    assert(clientSrc.includes('git-accent-v4'), '确认卡强调色样式须刷新')
+    assert(clientSrc.includes("justifyContent: 'flex-end'"), '按钮须内联右对齐')
+    assert(clientSrc.includes('hideGitChanges'), '取消 Git 不得展示已编辑文件卡')
+    assert(clientSrc.includes('hideGitChangesList'), '结论 turnTail 须屏蔽 Git 取消文件列表')
+    assert(clientSrc.includes('gitSubmitted'), '确认后须收起确认卡')
+    assert(clientSrc.includes('确认卡整卡消失') || /gitSubmitted[\s\S]{0,200}return null/.test(clientSrc), '确认后确认卡须整卡消失')
+    assert(clientSrc.includes('gitPostConfirmLabel'), 'Git 进度文案须专用，禁止写码中')
+    assert(clientSrc.includes("=== 'git_deliver'"), 'Git 交付不得套写码已编辑卡')
+    assert(clientSrc.includes('hideGitChanges'), 'Git 交付须屏蔽已编辑兜底卡')
+    const launchSrcEarly = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'launchGitDeliver.ts'),
+      'utf8',
+    )
+    assert(launchSrcEarly.includes('onProgress'), '推送重试须推进度')
+    const gitDeliverSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gitDeliver.ts'),
+      'utf8',
+    )
+    assert(gitDeliverSrc.includes('maxPushAttempts'), '须有推送重试次数')
+    assert(gitDeliverSrc.includes('isTransientGitNetworkError'), '须识别瞬断错误')
+    {
+      const cancelJob = createJob({
+        workspace: gitRoot,
+        requirement: 'cancel hide files',
+        work_kind: 'git_deliver',
+      })
+      patchJob(cancelJob.id, {
+        review_in_scope: ['a.ts', 'b.ts'],
+        synced_files: [],
+        last_synced_files: [],
+        status: 'cancelled',
+        cancelled: true,
+        conclusion_delivered: true,
+      })
+      const cancelledLive = loadJob(cancelJob.id)!
+      assert(conclusionSyncedFiles(cancelledLive).length === 0, 'Git 取消不得用 review_in_scope 冒充已编辑')
+      assert(conclusionDeletedFiles(cancelledLive).length === 0, 'Git 取消删除列表须空')
+      patchJob(cancelJob.id, {
+        status: 'succeeded',
+        cancelled: false,
+        synced_files: ['a.ts'],
+        last_synced_files: ['a.ts'],
+      })
+      const okLive = loadJob(cancelJob.id)!
+      assert(
+        conclusionSyncedFiles(okLive).join(',') === 'a.ts',
+        'Git 成功只展示已提交/已同步文件',
+      )
+    }
+    const pendingSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'pendingConfirm.ts'),
+      'utf8',
+    )
+    assert(pendingSrc.includes('findPendingByJobId'), '取消须能按 job_id 找回 pending')
+    const launchSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'launchGitDeliver.ts'),
+      'utf8',
+    )
+    assert(launchSrc.includes('confirm_token: pending.id'), 'job.git_deliver 须落 confirm_token')
+    const bodyAt = launchSrc.indexOf('export async function prepareGitDeliverSession')
+    assert(bodyAt >= 0, '须有 prepareGitDeliverSession')
+    const body = launchSrc.slice(bodyAt)
+    assert(
+      body.indexOf('createJob(') >= 0 &&
+        body.indexOf('createJob(') < body.indexOf('prepareGitDeliverPlan('),
+      '须先建 Job 再 inspect，进度卡才能挂过程',
+    )
+    assert(launchSrc.includes('pushGitProgress'), 'Git 交付须推过程到 transcript/SSE')
+    assert(launchSrc.includes('appendEvent(live'), '同态 Git 进度也须 SSE，禁止只改 status 不推流')
+    assert(gitDeliverSrc.includes('正在推送到远端…已等待'), '推送须有等待心跳，禁止长时间无输出')
+    assert(gitDeliverSrc.includes('正在创建 commit'), 'commit 阶段须推进度')
+    assert(clientSrc.includes('git-live-'), 'SSE Git 进度须即时写入灰条')
+    assert(launchSrc.includes('runGitDeliverWithHitl'), '须有中间件人审全程')
+    assert(launchSrc.includes('waitForGitDeliverConfirm'), '工具须阻塞等人审确认')
+    assert(launchSrc.includes('completeGitDeliverFromConfirm'), '确认后须执行提交')
+    const indexSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'),
+      'utf8',
+    )
+    assert(indexSrc.includes('runGitDeliverWithHitl'), 'git_deliver 工具须走中间件人审')
+    assert(!/awaiting_git_confirm:\s*true/.test(indexSrc), '禁止提前返回 awaiting 导致确认卡被收起')
+    assert(indexSrc.includes('push_exhausted') || indexSrc.includes('pushExhausted'), '推送耗尽须硬停止')
+    assert(indexSrc.includes('禁止再出「推送失败如何处理」') || indexSrc.includes('推送失败如何处理'), '推送耗尽禁止选择题')
+    assert(indexSrc.includes('禁止填 synced_files') || indexSrc.includes('committed_files'), 'Git 成功勿填宿主 synced_files')
+    assert(indexSrc.includes('GIT_DELIVER_MODEL_STOP'), 'Git 终态须统一硬停止，禁止模型复述结论')
+    assert(indexSrc.includes("suppress_conclusion: true"), 'Git 结论只走 turnTail，finalize 须 suppress')
+    assert(clientSrc.includes('Git 交付结论'), 'client 须认 Git 交付结论标题')
+    assert(clientSrc.includes('交付结论'), 'Git 进度卡终态标题须用交付结论')
+    assert(clientSrc.includes('任务结果') && clientSrc.includes('具体行为'), '须剥离模型写码式双份结论')
+    assert(clientSrc.includes('concludeMdForWorkKind'), '结论标题须按 work_kind 分流')
+    assert(clientSrc.includes('stoppedConclusionMd'), '停止兜底须按写码/Git 分模板')
+    assert(clientSrc.includes('codingStoppedConclusionMd'), '写码停止不得套 Git 文案')
+    assert(clientSrc.includes('gitStoppedConclusionMd'), 'Git 停止不得套写码文案')
+    assert(clientSrc.includes('gitHostToken'), '设置页须有 Git 托管 Token（与 Cursor Key 同页）')
+    assert(clientSrc.includes('开 PR，可选'), 'Git Token 须标明可选，非装 CLI')
+    {
+      const { buildComparePrUrl, parseGitHosting, sanitizeGitRef } = await import('./gitDeliver.js')
+      const p = parseGitHosting('https://github.com/LouisBoBo/pythonProject_zr_aicoding.git')
+      assert(p?.kind === 'github' && p.owner === 'LouisBoBo', '须解析 GitHub owner/repo')
+      const cmp = buildComparePrUrl(
+        'https://github.com/LouisBoBo/pythonProject_zr_aicoding',
+        'hebo',
+        'dsh/20261116-1334-提交代码',
+      )
+      assert(/compare\/hebo\.\.\./.test(cmp) && /expand=1/.test(cmp), '无 Token 时须给 Compare 链接')
+      assert(sanitizeGitRef('dsh/20261116-提交代码', '') === 'dsh/20261116-提交代码', '中文分支名须放行')
+      assert(sanitizeGitRef('HEAD:refs/heads/main', 'safe') === 'safe', '须拦 push refspec 注入')
+      assert(sanitizeGitRef('+refs/heads/*:refs/heads/*', 'safe') === 'safe', '须拦通配 refspec')
+      assert(sanitizeGitRef('-u', 'safe') === 'safe', '须拦选项注入')
+      const { displayRemoteUrl } = await import('./gitInspect.js')
+      assert(
+        !/@/.test(displayRemoteUrl('https://ghp_secret@github.com/a/b.git')),
+        '展示 remote 须剥掉嵌入 token',
+      )
+      const { isSensitiveRel } = await import('./pathScope.js')
+      assert(isSensitiveRel('.npmrc') === true, '.npmrc 不得进 Git 交付')
+      assert(isSensitiveRel('.netrc') === true, '.netrc 不得进 Git 交付')
+    }
+    {
+      const serverSrc = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'server.ts'),
+        'utf8',
+      )
+      assert(serverSrc.includes('git-deliver/awaiting 须带 session_id'), 'awaiting 须强制 session_id')
+    }
+    {
+      const { gitHostTokenReady, loadConfig, saveConfig } = await import('./config.js')
+      const prev = loadConfig()
+      saveConfig({ gitHostToken: 'ghp_test_not_used_in_assert' })
+      assert(gitHostTokenReady(loadConfig()) === true, '非 test- 前缀 Token 须认已配置')
+      saveConfig({ gitHostToken: 'test-token-not-real' })
+      assert(gitHostTokenReady(loadConfig()) === false, 'test- Token 不得冒充已配置')
+      saveConfig({ gitHostToken: prev.gitHostToken || '' })
+    }
+    {
+      const { ensureConclusionTitle } = await import('./conclusion.js')
+      const mixed = ensureConclusionTitle('## 本轮结论\n\n结果：ℹ 无需交付\n', 'git_deliver')
+      assert(/##\s*Git\s*交付结论/.test(mixed), 'Git job 须把误用的本轮结论改成 Git 交付结论')
+      assert(!/^##\s*本轮结论/m.test(mixed), 'Git job 结论不得残留本轮结论标题')
+      const codeKeep = ensureConclusionTitle('## 本轮结论\n\n结果：✅ 已完成\n', 'code')
+      assert(/^##\s*本轮结论/m.test(codeKeep), '写码结论标题不得被改成 Git')
+      const codeFix = ensureConclusionTitle('## Git 交付结论\n\n结果：✅ 已完成\n', 'code')
+      assert(/^##\s*本轮结论/m.test(codeFix), '写码 job 误带 Git 标题须改回本轮结论')
+    }
+    const pushFailConc = formatGitDeliverConclusion({
+      status: 'failed',
+      result: {
+        ok: false,
+        stage: 'push',
+        detail: '已提交但推送失败（已重试 3 次）：Recv failure: Connection was reset',
+        remote_url: 'https://github.com/x/y',
+        current_branch: 'feat',
+        target_branch: 'feat',
+        base_branch: 'main',
+        commit_sha: 'abc',
+        commit_short: 'abcdef1',
+        pushed: false,
+        pr_url: '',
+        pr_manual_hint: '',
+        committed_files: ['a.ts'],
+      },
+    })
+    assert(/已自动重试多次|本地已提交/.test(pushFailConc), '推送耗尽结论须终态提示')
+    assert(/无需在本轮再选/.test(pushFailConc), '推送耗尽不得再诱出如何处理')
+
+    console.log('ok: git deliver inspect/plan/execute/wait')
+  }
+
   // 防回归：误继承 MOCK 不得污染真工程；自检须 SELFTEST+MOCK 才允许 Mock 落盘
   {
     const prevMock = process.env.CURSOR_CHAT_MOCK
@@ -267,6 +658,136 @@ async function main() {
     process.env.CURSOR_CHAT_MOCK = '1'
     process.env.CURSOR_CHAT_SELFTEST = '1'
     console.log('ok: mock inheritance guard')
+  }
+
+  // 可写范围：默认按项目画像自动；宁宽勿窄，不挡真写码
+  {
+    const appsRoot = mkdtempSync(join(tmpdir(), 'cc-auto-scope-apps-'))
+    mkdirSync(join(appsRoot, 'apps', 'web', 'src'), { recursive: true })
+    mkdirSync(join(appsRoot, 'apps', 'api', 'app'), { recursive: true })
+    writeFileSync(
+      join(appsRoot, 'apps', 'web', 'vite.config.ts'),
+      "export default { server: { port: 3000 } }\n",
+      'utf8',
+    )
+    writeFileSync(
+      join(appsRoot, 'apps', 'api', 'app', 'main.py'),
+      'from fastapi import FastAPI\napp = FastAPI()\n',
+      'utf8',
+    )
+    const auto = resolveAutoWriteScope(appsRoot, ['apps/web/src/App.vue', 'apps/api/app/main.py'])
+    assert(
+      auto.some((p) => p === 'apps/web/' || p.startsWith('apps/web/')),
+      '嵌套前端根须进入自动可写范围',
+    )
+    assert(
+      auto.some((p) => p === 'apps/api/' || p.startsWith('apps/api/')),
+      '嵌套后端根须进入自动可写范围',
+    )
+    assert(pathInScope('apps/web/src/App.vue', auto), '前端源码须在自动范围内')
+    assert(pathInScope('apps/api/app/main.py', auto), '后端源码须在自动范围内')
+
+    const effAuto = resolveEffectiveWriteScope({ workspace: appsRoot, configScope: [] })
+    assert(effAuto.source === 'auto', '无显式配置时 source=auto')
+    assert(effAuto.scope.length > 0, '画像可识别时自动范围非空')
+
+    // 范围外但可交付：软放行（根目录编排文件、docs 等）
+    const promoted = selectAutoScopePromotions([
+      'docker-compose.yml',
+      'docs/api.md',
+      'apps/web/src/x.vue',
+      'node_modules/left-pad/index.js',
+      '.env',
+      'data/app.db',
+    ])
+    assert(promoted.includes('docker-compose.yml'), '根目录编排文件须软放行')
+    assert(promoted.includes('docs/api.md'), 'docs 须软放行，避免挡文档类真改动')
+    assert(!promoted.includes('node_modules/left-pad/index.js'), '依赖目录不得软放行')
+    assert(!promoted.includes('.env'), '敏感文件不得软放行')
+    assert(!promoted.includes('data/app.db'), '本机库不得软放行')
+
+    const effCfg = resolveEffectiveWriteScope({
+      workspace: appsRoot,
+      configScope: ['apps/web/src/'],
+    })
+    assert(effCfg.source === 'config', '显式配置优先，source=config')
+    assert(pathInScope('apps/web/src/App.vue', effCfg.scope), '显式前缀生效')
+    assert(!pathInScope('apps/api/app/main.py', effCfg.scope), '显式配置为硬边界，不含未声明后端')
+
+    // Vite 在仓根：整仓开放，禁止收窄成「只能写根」
+    const rootVite = mkdtempSync(join(tmpdir(), 'cc-auto-scope-root-'))
+    writeFileSync(join(rootVite, 'vite.config.js'), 'export default {}\n', 'utf8')
+    writeFileSync(join(rootVite, 'package.json'), '{"dependencies":{"vite":"5.0.0"}}\n', 'utf8')
+    const openScope = resolveAutoWriteScope(rootVite)
+    assert(openScope.length === 0, '仓根即前端时自动范围须整仓开放')
+    const effOpen = resolveEffectiveWriteScope({ workspace: rootVite, configScope: [] })
+    assert(effOpen.source === 'open', '仓根开放时 source=open')
+
+    const unknown = mkdtempSync(join(tmpdir(), 'cc-auto-scope-unk-'))
+    writeFileSync(join(unknown, 'readme.txt'), 'hello\n', 'utf8')
+    assert(resolveAutoWriteScope(unknown).length === 0, '认不出布局时不收窄')
+    assert(
+      resolveEffectiveWriteScope({ workspace: unknown, configScope: [] }).source === 'open',
+      '认不出时 source=open',
+    )
+
+    assert(coerceWriteScopeSource(undefined, []) === 'open', '旧账本空范围当 open')
+    assert(coerceWriteScopeSource(undefined, ['src/']) === 'config', '旧账本有范围当硬配置')
+    assert(coerceWriteScopeSource('auto', ['apps/web/']) === 'auto', '显式 source 保留')
+
+    console.log('ok: auto write scope from project layout')
+  }
+
+  // 敏感文件：沙箱可有、结论须标明未进真工程（不改变同步闸）
+  {
+    const ws = mkdtempSync(join(tmpdir(), 'cc-held-ws-'))
+    const sb = mkdtempSync(join(tmpdir(), 'cc-held-sb-'))
+    writeFileSync(join(ws, 'README.md'), 'ok\n', 'utf8')
+    writeFileSync(join(sb, 'README.md'), 'ok\nscope-probe\n', 'utf8')
+    writeFileSync(join(sb, '.env'), 'DSH_SCOPE_PROBE=1\n', 'utf8')
+    const held = listHeldSensitiveRels(sb, ws)
+    assert(held.includes('.env'), '沙箱新增 .env 须记入 held_sensitive')
+    assert(!(held.includes('README.md')), '非敏感文件不得进 held_sensitive')
+
+    const { createJob, patchJob, loadJob } = await import('./jobs.js')
+    const { saveConfig, loadConfig } = await import('./config.js')
+    const prevRoot = loadConfig().dataRoot
+    const dataRoot = mkdtempSync(join(tmpdir(), 'cc-held-data-'))
+    saveConfig({ dataRoot })
+    try {
+      const job = createJob({
+        workspace: ws,
+        requirement: 'probe held sensitive',
+        write_scope: [],
+      })
+      patchJob(job.id, {
+        status: 'succeeded',
+        synced_files: ['README.md'],
+        last_synced_files: ['README.md'],
+        changed_files: ['README.md'],
+        held_sensitive_files: held,
+        assistant_text: [
+          '## 结论',
+          '已完成。',
+          '## 做了什么',
+          '新增 .env 并改了 README。',
+          '## 如何验证',
+          '1. 打开沙箱根目录确认 .env',
+          '2. 看 README 末行',
+        ].join('\n'),
+        detail: '已同步 1 个文件',
+        delivery_audit: { ok: true, detail: 'ok', checks: [] },
+      })
+      const body = formatChatConclusion(loadJob(job.id)!)
+      assert(/安全拦截（仅沙箱、未同步真工程）/.test(body), '结论须有安全拦截段')
+      assert(/`\.env`/.test(body) || body.includes('.env'), '结论须点名 .env')
+      assert(!/打开沙箱根目录确认 \.env/.test(body), '须去掉引导去沙箱验 .env 的步骤')
+      assert(/确认真工程没有新增\/改写敏感文件/.test(body), '验收须改为以真工程为准')
+      assert(!/新增 \.env 并改了 README/.test(body), '改动段不得再把 .env 说成已交付')
+    } finally {
+      saveConfig({ dataRoot: prevRoot })
+    }
+    console.log('ok: held sensitive conclusion note')
   }
 
   // 开发需求仍交给本插件。启动/重启按项目命令拉起；其它开发操作才进 Cursor SDK。宿主不得自己动手
@@ -1648,6 +2169,29 @@ async function main() {
       assert(emptyBody.indexOf('写码空跑已拦截') >= 0, 'failed 空跑须标注拦截')
       assert(emptyBody.indexOf('同步文件数：0') >= 0, '空跑须写明 0 同步')
       assert(emptyBody.indexOf('已补路由与菜单') < 0, '空跑不得把 Cursor 改动话术当已落盘')
+      assert(emptyBody.indexOf('硬配置拦截') < 0, '普通空跑不得套硬配置话术')
+    }
+    {
+      // config 硬闸：有范围外变更、0 同步 → 明示硬配置拦截，不套空跑
+      const gated = createJob({ workspace, requirement: '硬配置拦截结论' })
+      patchJob(gated.id, {
+        write_scope_source: 'config',
+        write_scope: ['frontend/src/views/home/'],
+        changed_files: ['backend/app/main.py'],
+        deferred_files: ['backend/app/main.py'],
+        review_deferred: ['backend/app/main.py'],
+        synced_files: [],
+        last_synced_files: [],
+        assistant_text: '## 说明方案\n**结论**\n已在沙箱追加注释\n',
+        detail: '写码已结束；变更均在写范围外未同步（1）。',
+      })
+      setStatus(loadJob(gated.id)!, 'succeeded', '写码已结束；变更均在写范围外未同步（1）。')
+      const gatedBody = formatChatConclusion(loadJob(gated.id)!)
+      assert(gatedBody.indexOf('硬配置拦截，未同步') >= 0, 'config+仅 deferred 须写硬配置拦截')
+      assert(gatedBody.indexOf('writeScope') >= 0 || gatedBody.indexOf('硬边界') >= 0, '须提示硬边界')
+      assert(gatedBody.indexOf('backend/app/main.py') >= 0, '须列出范围外文件')
+      assert(gatedBody.indexOf('写码空跑已拦截') < 0, '硬闸不得写成空跑拦截')
+      assert(gatedBody.indexOf('沙箱相对开工快照无可同步变更') < 0, '硬闸不得套空跑原因话术')
     }
     {
       assert(

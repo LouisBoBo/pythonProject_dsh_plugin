@@ -523,7 +523,7 @@ export function normalizeStatusDisplay(message: string): string {
 export function preferredConclusionAssistantText(assistant: string, maxLen = 3500): string {
   const asst = String(assistant || '').trim()
   if (!asst) return ''
-  const markers = ['## 说明方案', '## 本轮结论']
+  const markers = ['## 说明方案', '## 本轮结论', '## Git 交付结论']
   let start = -1
   for (const m of markers) {
     const i = asst.lastIndexOf(m)
@@ -532,10 +532,10 @@ export function preferredConclusionAssistantText(assistant: string, maxLen = 350
   let body = start >= 0 ? asst.slice(start).trim() : asst
   // 同一终稿被模型刷两遍时去重
   if (start >= 0) {
-    const first = body
     const again = body.indexOf('## 说明方案', 3)
     const again2 = body.indexOf('## 本轮结论', 3)
-    const second = [again, again2].filter((i) => i > 0).sort((a, b) => a - b)[0]
+    const again3 = body.indexOf('## Git 交付结论', 3)
+    const second = [again, again2, again3].filter((i) => i > 0).sort((a, b) => a - b)[0]
     if (second != null && second > 0) {
       const a = body.slice(0, second).trim()
       const b = body.slice(second).trim()

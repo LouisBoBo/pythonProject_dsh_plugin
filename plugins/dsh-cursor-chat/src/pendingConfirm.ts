@@ -7,11 +7,16 @@ import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { readJsonFile, storeDir, withFileLock, writeJsonAtomic } from './diskStore.js'
 import type { ChatImageRef } from './images.js'
+import type { GitDeliverPlan } from './gitDeliver.js'
 
 export type PendingConfirm = {
   id: string
   workspace: string
   requirement: string
+  /** coding=写码开工（遗留）；git_deliver=Git 交付人审 */
+  kind?: 'coding' | 'git_deliver'
+  /** Git 交付计划快照（仅 kind=git_deliver） */
+  git_plan?: GitDeliverPlan
   /** 随确认卡携带的截图（落盘引用） */
   images?: ChatImageRef[]
   parent_job_id?: string
@@ -82,6 +87,8 @@ function readAll(): PendingDisk {
 export function createPendingConfirm(opts: {
   workspace: string
   requirement: string
+  kind?: 'coding' | 'git_deliver'
+  git_plan?: GitDeliverPlan
   images?: ChatImageRef[]
   parent_job_id?: string
   call_id?: string
@@ -95,6 +102,9 @@ export function createPendingConfirm(opts: {
     created_at: Date.now(),
     status: 'waiting',
   }
+  if (opts.kind === 'git_deliver') row.kind = 'git_deliver'
+  else if (opts.kind === 'coding') row.kind = 'coding'
+  if (opts.git_plan) row.git_plan = opts.git_plan
   if (opts.images && opts.images.length) row.images = opts.images.slice(0, 8)
   if (opts.parent_job_id) row.parent_job_id = String(opts.parent_job_id).trim()
   if (opts.call_id) row.call_id = String(opts.call_id).trim()
@@ -161,6 +171,22 @@ export function bindPendingJob(id: string, jobId: string): PendingConfirm | null
   })
 }
 
+/**
+ * Git 交付：挂上 job_id 但仍保持 waiting，以便确认卡签发 HITL。
+ * 不得用于写码 confirm（写码认领后须 started）。
+ */
+export function bindPendingJobAwaitConfirm(id: string, jobId: string): PendingConfirm | null {
+  return mutate((map) => {
+    const row = map[String(id || '').trim()]
+    if (!row) return null
+    row.job_id = String(jobId || '').trim()
+    row.status = 'waiting'
+    delete row.claiming_at
+    map[row.id] = row
+    return { ...row }
+  })
+}
+
 /** 按 DSH 工具调用节点取确认单（含已开工：同一张卡刷新后对账） */
 export function findPendingForCall(callId: string): PendingConfirm | null {
   const id = String(callId || '').trim()
@@ -212,6 +238,19 @@ export function cancelPendingConfirm(id: string): void {
     row.status = 'cancelled'
     map[row.id] = row
   })
+}
+
+/** 按已绑定 job_id 找回 Git 交付确认单（取消时 UI 可能缺 confirm_token） */
+export function findPendingByJobId(jobId: string): PendingConfirm | null {
+  const jid = String(jobId || '').trim()
+  if (!jid) return null
+  let best: PendingConfirm | null = null
+  for (const row of Object.values(readAll())) {
+    if (!row || row.job_id !== jid) continue
+    if (row.kind !== 'git_deliver') continue
+    if (!best || row.created_at > best.created_at) best = row
+  }
+  return best ? { ...best } : null
 }
 
 /** 测试用 */

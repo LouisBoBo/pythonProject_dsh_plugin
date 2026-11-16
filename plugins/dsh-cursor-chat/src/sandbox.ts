@@ -658,6 +658,59 @@ export function snapshotSandbox(sandbox: string): Map<string, string> {
   return map
 }
 
+/**
+ * 快照故意跳过敏感文件，但 Cursor 仍可能在沙箱里写出 .env 等。
+ * 找出「沙箱有、且相对真工程为新增/改写」的敏感路径，供结论标明：仅沙箱、未同步真工程。
+ * 不参与同步清单，不影响 write_scope / deferred。
+ */
+export function listHeldSensitiveRels(
+  sandbox: string,
+  workspace: string,
+  maxItems = 20,
+): string[] {
+  const sbRoot = resolve(sandbox)
+  const wsRoot = resolve(workspace)
+  if (!sbRoot || !wsRoot || !existsSync(sbRoot)) return []
+  const out: string[] = []
+  const stack = [sbRoot]
+  let visited = 0
+  const maxVisit = 4000
+  while (stack.length && out.length < maxItems && visited < maxVisit) {
+    const dir = stack.pop()!
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const ent of entries) {
+      if (out.length >= maxItems || visited >= maxVisit) break
+      const name = String(ent.name)
+      const full = join(dir, name)
+      if (ent.isDirectory()) {
+        if (shouldSkipDirname(name)) continue
+        stack.push(full)
+        continue
+      }
+      if (!ent.isFile()) continue
+      visited += 1
+      const rel = relative(sbRoot, full).split(sep).join('/')
+      const relN = normalizeRel(rel)
+      if (!relN || !isSensitiveRel(relN)) continue
+      const target = join(wsRoot, relN)
+      let held = false
+      try {
+        if (!existsSync(target) || !statSync(target).isFile()) held = true
+        else if (fingerprintFile(full) !== fingerprintFile(target)) held = true
+      } catch {
+        held = true
+      }
+      if (held) out.push(relN)
+    }
+  }
+  return out
+}
+
 /** 按写范围给真工程做指纹快照（目录会展开）。 */
 export function snapshotScope(root: string, scope: string[]): Map<string, string> {
   const map = new Map<string, string>()

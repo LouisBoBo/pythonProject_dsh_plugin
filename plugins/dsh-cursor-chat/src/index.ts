@@ -25,6 +25,7 @@ import { loadPendingConfirm } from './pendingConfirm.js'
 import { decideCodingGate, extractSessionEvents } from './clarifyFlow.js'
 import { looksLikeFollowUp } from './requirementGate.js'
 import { launchCodingJob } from './launchJob.js'
+import { runGitDeliverWithHitl } from './launchGitDeliver.js'
 import {
   extractImagesFromExec,
   filterStoredImageRefs,
@@ -65,6 +66,7 @@ const CODING_ROUTE_SECTION =
   '返回后三段式结论已在 chat_body，禁止再写短复述盖掉正文。' +
   '禁止 bash/sleep 空等；一般不必再调 zr_cchat_wait/finish（仅 begin 超时未出结论时才用）。' +
   '只有用户明确只想了解代码（在哪、什么意思、帮我解释）且不需要改动、也不需要跑服务或排障时，才使用只读工具。' +
+  '用户明确要求「提交代码 / commit / 开 PR / 提 MR / 推上去让人审」时：调用 zr_cchat_git_deliver（不要用 begin 代替，也不要自己 git commit）。普通改码默认同步工作区，不自动提交。' +
   '用户贴了截图时，把图片绝对路径放进 images。' +
   '已命中 ESC/MES 专用技能时按该技能流程走。'
 
@@ -511,8 +513,19 @@ function asToolValue(value: unknown): Record<string, unknown> | null {
 /** 终态三段式结论只由 client hoist 展示，避免工具正文/通用卡再渲一份 */
 function isConclusionBody(body: string): boolean {
   const t = String(body || '')
-  return t.includes('本轮结论') || t.includes('结果：') || t.includes('任务结果')
+  return (
+    t.includes('本轮结论') ||
+    t.includes('Git 交付结论') ||
+    t.includes('结果：') ||
+    t.includes('任务结果')
+  )
 }
+
+/** Git 交付：结论只由 turnTail 挂一次；禁止模型再写写码式「本轮结论/任务结果」 */
+const GIT_DELIVER_MODEL_STOP =
+  '【硬停止】Git 交付结论已在工具正文（标题为「Git 交付结论」），由界面挂载唯一一份。' +
+  '禁止再写任何结论段落（含本轮结论 / Git 交付结论 / 任务结果 / 具体行为 / 如何继续 / 结果：）。' +
+  '禁止再出选择题，禁止 ask_user_question，禁止再调工具或自行 git。回复留空。'
 
 /**
  * 聊天正文门禁：确认卡/进度过程中正文为空；
@@ -1416,8 +1429,199 @@ export function apply(ctx: Context) {
     }),
   )
 
+  ctx.tools.register(
+    defineTool({
+      name: 'zr_cchat_git_deliver',
+      description:
+        '【Cursor 写码·Git 交付出口】仅当用户明确要提交代码 / commit / 开 PR / 提 MR / 推上去让人审时调用。' +
+        '读取当前工作区未提交改动，出绿色确认卡（默认展示当前仓库地址与分支）；本工具阻塞等人审，用户点确认后才 commit → push → 尝试开 PR 并返回结论。' +
+        '推送遇网络瞬断会在工具内自动重试；重试耗尽后结论已在 chat_body，禁止再出「推送失败如何处理」等选择题。' +
+        '普通改码/续改请用 zr_cchat_begin/continue，禁止用本工具代替写码，禁止自行 bash git commit。' +
+        '进度卡会展示确认 UI；禁止复述仓库/分支清单，禁止写「已生成确认卡」，确认前不要再调其它工具。',
+      parameters: {
+        workspace: {
+          type: 'string',
+          required: true,
+          description: '当前工作区绝对路径（与侧栏工程一致）',
+        },
+        message: {
+          type: 'string',
+          description: '用户原话或提交说明草稿；可空',
+        },
+        commit_message: {
+          type: 'string',
+          description: '可选：预填 commit message',
+        },
+        branch: {
+          type: 'string',
+          description: '可选：目标分支名；默认在主干上新建 dsh/…，已在功能分支则沿用当前分支',
+        },
+        base_branch: {
+          type: 'string',
+          description: '可选：PR 基线分支；默认 main/master',
+        },
+        create_pr: {
+          type: 'string',
+          description: '是否尝试开 PR，默认 true；传 false 则只 push',
+        },
+      },
+      timeoutMs: 30 * 60 * 1000,
+      output: {
+        schema: JSON_OUTPUT_SCHEMA,
+        render: chatBodyRender,
+        presentationMeta: ccPresentationMeta,
+      },
+      presentResult: ccPresentResult as never,
+      finalizeContent: finalizeChatBody,
+      async execute(args, exec) {
+        await startServer()
+        if (isCircuitBreakerActive()) return circuitBreakerError()
+        const workspace = String((args && (args as { workspace?: string }).workspace) || '').trim()
+        if (!workspace) {
+          return asJson({
+            ok: false,
+            show_error: true,
+            detail: '缺少 workspace',
+            chat_body: '缺少工作区路径。请先在侧栏打开工程。',
+          })
+        }
+        const message = String((args && (args as { message?: string }).message) || '').trim()
+        const commitMessage = String(
+          (args && (args as { commit_message?: string }).commit_message) || '',
+        ).trim()
+        const branch = String((args && (args as { branch?: string }).branch) || '').trim()
+        const baseBranch = String((args && (args as { base_branch?: string }).base_branch) || '').trim()
+        const createPrRaw = String((args && (args as { create_pr?: string }).create_pr) || 'true')
+          .trim()
+          .toLowerCase()
+        const create_pr = !(createPrRaw === '0' || createPrRaw === 'false' || createPrRaw === 'no')
+        const abs = expandWorkspace(workspace)
+        const base = getListenAddr()
+        const reqText = message || commitMessage || '提交当前工作区改动并开 PR'
+        const out = await runGitDeliverWithHitl({
+          workspace: abs,
+          requirement: reqText,
+          commit_message: commitMessage || message,
+          target_branch: branch || undefined,
+          base_branch: baseBranch || undefined,
+          create_pr,
+          sessionId: execSessionId(exec),
+          callId: execCallId(exec),
+          signal: exec?.signal,
+        })
+        const job = out.job
+        const plan = out.plan
+        const uiPlan = plan
+          ? {
+              remote_url: plan.remote_url,
+              current_branch: plan.current_branch,
+              target_branch: plan.target_branch,
+              base_branch: plan.base_branch,
+              commit_message: plan.commit_message,
+              create_pr: plan.create_pr,
+              selected_files: plan.selected_files,
+              held_sensitive_files: plan.held_sensitive_files,
+              entries: plan.entries,
+            }
+          : null
+        if (!out.ok) {
+          const cancelled = out.cancelled === true
+          const detailText = String(out.detail || '')
+          const pushExhausted =
+            !cancelled &&
+            (job?.git_deliver?.stage === 'push' ||
+              /已提交但推送失败|已重试\s*\d+\s*次/.test(detailText))
+          return asJson({
+            ok: false,
+            started: true,
+            done: true,
+            // 推送已自动重试耗尽：结论即终态，勿标成可交互错误去诱出选择题
+            show_error: !cancelled && !pushExhausted,
+            cancelled,
+            push_exhausted: pushExhausted || undefined,
+            // 会话 finalize 不落全文：只由 client turnTail 挂「Git 交付结论」，避免与模型复述双份
+            suppress_conclusion: true,
+            job_id: job?.id || '',
+            confirm_token: out.confirm_token || '',
+            status: job?.status || (cancelled ? 'cancelled' : 'failed'),
+            detail: out.detail,
+            chat_body: out.conclusion,
+            source: 'cursor_chat',
+            model_next: GIT_DELIVER_MODEL_STOP,
+            cursor_chat_ui: {
+              kind: 'git_deliver',
+              job_id: job?.id || '',
+              workspace: abs,
+              requirement: reqText,
+              confirm_token: out.confirm_token || '',
+              service: base,
+              status: job?.status || (cancelled ? 'cancelled' : 'failed'),
+              git_plan: uiPlan,
+            },
+          })
+        }
+        // 无改动可提交：友好成功，禁止模型改写成「未完成/失败」
+        if (out.idle) {
+          return asJson({
+            ok: true,
+            started: true,
+            done: true,
+            idle: true,
+            show_error: false,
+            suppress_conclusion: true,
+            job_id: out.job.id,
+            status: 'succeeded',
+            detail: out.detail || '当前没有可提交的改动',
+            synced_files: [],
+            chat_body: out.conclusion,
+            source: 'cursor_chat',
+            model_next: GIT_DELIVER_MODEL_STOP,
+            cursor_chat_ui: {
+              kind: 'git_deliver',
+              job_id: out.job.id,
+              workspace: abs,
+              requirement: reqText,
+              confirm_token: '',
+              service: base,
+              status: 'succeeded',
+              review_gate: null,
+              git_plan: null,
+            },
+          })
+        }
+        return asJson({
+          ok: true,
+          started: true,
+          done: true,
+          confirm_token: out.confirm_token || '',
+          job_id: out.job.id,
+          status: out.job.status || 'succeeded',
+          detail: (out.result && out.result.detail) || '',
+          // 禁止填 synced_files：否则宿主会出写码「已编辑」卡；提交清单只在 chat_body
+          synced_files: [],
+          committed_files: (out.result && out.result.committed_files) || [],
+          suppress_conclusion: true,
+          chat_body: out.conclusion,
+          source: 'cursor_chat',
+          model_next: GIT_DELIVER_MODEL_STOP,
+          cursor_chat_ui: {
+            kind: 'git_deliver',
+            job_id: out.job.id,
+            workspace: abs,
+            requirement: reqText,
+            confirm_token: out.confirm_token || '',
+            service: base,
+            status: out.job.status || 'succeeded',
+            review_gate: null,
+            git_plan: uiPlan,
+          },
+        })
+      },
+    }),
+  )
+
   console.log(
-    '[cursor-chat] 插件已加载：zr_cchat_begin/continue/finish/apply（进度卡 + 正文结论）',
+    '[cursor-chat] 插件已加载：zr_cchat_begin/continue/git_deliver/finish/apply（进度卡 + 正文结论）',
   )
 }
 

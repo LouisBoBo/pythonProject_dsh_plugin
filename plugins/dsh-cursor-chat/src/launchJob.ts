@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 import { loadConfig } from './config.js'
 import { createJob, findLatestJobByCallId, listJobs, loadJob, setStatus } from './jobs.js'
 import { runJobBackground } from './orchestrator/runJob.js'
+import { normalizeWriteScope } from './pathScope.js'
 import { expandWriteScopeWithCompanions } from './scopeCompanions.js'
 import { bindPendingJob, createPendingConfirm } from './pendingConfirm.js'
 import type { ChatImageRef } from './images.js'
@@ -94,7 +95,9 @@ export function launchCodingJob(input: LaunchJobInput): LaunchJobResult {
       parent_job_id: parentJobId,
       dsh_session_id: input.sessionId || null,
       dsh_call_id: input.callId || null,
+      // 写范围在 runJob 开工时按画像/配置解析；此处先占位，避免创建时误用空配置当终态
       write_scope: expandWriteScopeWithCompanions(cfg.writeScope),
+      write_scope_source: normalizeWriteScope(cfg.writeScope).length ? 'config' : null,
       continue_count: parentJobId ? (loadJob(parentJobId)?.continue_count || 0) + 1 : 0,
       work_kind: workKind,
     })

@@ -135,7 +135,7 @@ window.__ModuleLoader__.load({
 
     function stripFinalPlanSectionClient(text) {
       var t = String(text || '')
-      var markers = [/##\s*说明方案/, /##\s*本轮结论/, /【本轮结论】/]
+      var markers = [/##\s*说明方案/, /##\s*本轮结论/, /##\s*Git\s*交付结论/, /【本轮结论】/]
       var cut = -1
       for (var i = 0; i < markers.length; i++) {
         var m = t.match(markers[i])
@@ -174,7 +174,15 @@ window.__ModuleLoader__.load({
       t = stripFinalPlanSectionClient(t)
       if (!t) return ''
       if (looksLikeFinalPlanBodyClient(t)) return ''
-      if (/##\s*说明方案/.test(t) || /##\s*本轮结论/.test(t) || /【本轮结论】/.test(t)) return ''
+      if (
+        /##\s*说明方案/.test(t) ||
+        /##\s*本轮结论/.test(t) ||
+        /##\s*Git\s*交付结论/.test(t) ||
+        /【本轮结论】/.test(t)
+      )
+        return ''
+      // 模型复述写码/Git 三段式（任务结果+具体行为）时整段丢掉，避免与 turnTail 结论双份
+      if (/任务结果/.test(t) && /具体行为|如何继续|和上一轮的关联/.test(t)) return ''
       return t
     }
 
@@ -392,15 +400,49 @@ window.__ModuleLoader__.load({
       if (!job) return ''
       var ready = String(job.chat_conclusion || '').trim()
       if (!ready) return ''
-      return normalizeConclusionMd(ready)
+      return concludeMdForWorkKind(ready, job.work_kind)
     }
 
-    /** 同一段 md 里若被刷了两遍「## 本轮结论」，只留第一份完整三段式 */
+    /** 写码停止兜底：永远「本轮结论」，禁止套 Git 文案 */
+    function codingStoppedConclusionMd() {
+      return '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+    }
+
+    /** 提交代码停止兜底：永远「Git 交付结论」，禁止套写码文案 */
+    function gitStoppedConclusionMd() {
+      return '## Git 交付结论\n\n结果：⏹ 已取消 Git 交付。工作区改动仍在，未执行 commit。\n\n说明：\n• 用户停止\n'
+    }
+
+    function stoppedConclusionMd(workKind) {
+      return String(workKind || '') === 'git_deliver'
+        ? gitStoppedConclusionMd()
+        : codingStoppedConclusionMd()
+    }
+
+    /**
+     * 按 work_kind 钉死结论标题：写码/ops → 本轮结论；git_deliver → Git 交付结论。
+     * 禁止两套结论标题互相冒充。
+     */
+    function concludeMdForWorkKind(md, workKind) {
+      var t = normalizeConclusionMd(String(md || '').trim())
+      if (!t) return ''
+      var git = String(workKind || '') === 'git_deliver'
+      if (git) {
+        if (/##\s*Git\s*交付结论/.test(t)) return t
+        if (/##\s*本轮结论/.test(t)) return t.replace(/##\s*本轮结论/, '## Git 交付结论')
+        return '## Git 交付结论\n\n' + t
+      }
+      if (/##\s*本轮结论/.test(t)) return t
+      if (/##\s*Git\s*交付结论/.test(t)) return t.replace(/##\s*Git\s*交付结论/, '## 本轮结论')
+      return t
+    }
+
+    /** 同一段 md 里若被刷了两遍结论标题，只留一份；写码认「本轮结论」，Git 认「Git 交付结论」 */
     function normalizeConclusionMd(md) {
       var t = String(md || '').trim()
       if (!t) return ''
       // 不用 \b：中文后 word-boundary 在 JS 不可靠
-      var parts = t.split(/\n(?=##\s*本轮结论)/)
+      var parts = t.split(/\n(?=##\s*(?:本轮结论|Git\s*交付结论))/)
       if (parts.length <= 1) return t
       var best = parts[0]
       var bestScore = 0
@@ -411,6 +453,7 @@ window.__ModuleLoader__.load({
         if (/结果：/.test(p)) score += 2
         if (/改动：/.test(p)) score += 2
         if (/验收：/.test(p)) score += 2
+        if (/Git\s*交付结论/.test(p)) score += 1
         // 偏好干净三段式，惩罚模型乱表/管道符长文
         if ((p.match(/\|/g) || []).length > 4) score -= 3
         if (score > bestScore || (score === bestScore && p.length < best.length)) {
@@ -440,6 +483,29 @@ window.__ModuleLoader__.load({
       if (s === 'syncing') return '自动同步中'
       if (s === 'running' || s === 'queued') return '写码中'
       return s || ''
+    }
+
+    /** 已确认后的 Git 进度文案：禁止再显示「写码中」；跟 SSE/账本 detail 动态刷新 */
+    function gitPostConfirmLabel(detail, fallback) {
+      var d = String(detail || '').replace(/\s+/g, ' ').trim()
+      if (/推送失败（网络瞬断）|准备重试|秒后重试/.test(d)) return '推送遇网络瞬断，准备重试…'
+      if (/正在重试推送|重试推送/.test(d)) return '正在重试推送…'
+      if (/正在推送到远端|正在推送/.test(d)) {
+        return d.length > 48 ? d.slice(0, 48) + '…' : d
+      }
+      if (/正在创建 commit|本地已提交|正在暂存/.test(d)) {
+        return d.length > 48 ? d.slice(0, 48) + '…' : d
+      }
+      if (/正在切换|正在创建分支|已在目标分支|正在核对|正在重新读取|正在尝试开 PR/.test(d)) {
+        return d.length > 48 ? d.slice(0, 48) + '…' : d
+      }
+      if (/^已推送\b/.test(d)) return d.length > 56 ? d.slice(0, 56) + '…' : d
+      if (/^Commit：/.test(d) || /^PR：/.test(d) || /^本地已提交/.test(d)) {
+        return d.length > 56 ? d.slice(0, 56) + '…' : d
+      }
+      var fb = String(fallback || '').trim()
+      if (fb && fb !== '写码中' && !/确认|待审|读取 Git/.test(fb)) return fb
+      return '正在 commit / push…'
     }
 
     function sessionCacheKey(jid) {
@@ -485,8 +551,64 @@ window.__ModuleLoader__.load({
       } catch (e) {}
     }
 
+    /**
+     * 取用户头像底色：优先读壳里头像节点 computed background，再退主题变量。
+     * 产品壳本机头像默认 #1aa6a6（AccountMenu local avatar）。
+     */
+    function resolveAvatarAccent() {
+      if (typeof document === 'undefined') return '#1aa6a6'
+      try {
+        var nodes = document.querySelectorAll(
+          '[data-avatar-status], [class*="avatar"], [class*="Avatar"]',
+        )
+        for (var i = 0; i < nodes.length && i < 12; i++) {
+          var bg = ''
+          try {
+            bg = String(window.getComputedStyle(nodes[i]).backgroundColor || '').trim()
+          } catch (e0) {
+            bg = ''
+          }
+          if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') continue
+          // 跳过近白/近透明底，避免读到容器而不是头像色块
+          if (/^rgba?\(\s*255\s*,\s*255\s*,\s*255/.test(bg)) continue
+          return bg
+        }
+      } catch (e1) {}
+      try {
+        var root = window.getComputedStyle(document.documentElement)
+        var keys = [
+          '--dsw-alias-brand-primary',
+          '--wb-palette-brand-8',
+          '--wb-brand',
+          '--color-primary',
+        ]
+        for (var k = 0; k < keys.length; k++) {
+          var v = String(root.getPropertyValue(keys[k]) || '').trim()
+          if (v) return v
+        }
+      } catch (e2) {}
+      return '#1aa6a6'
+    }
+
+    function applyGitAccentVars(host) {
+      var accent = resolveAvatarAccent()
+      try {
+        if (typeof document !== 'undefined' && document.documentElement) {
+          document.documentElement.style.setProperty('--cc-avatar-accent', accent)
+        }
+      } catch (e0) {}
+      if (host && host.style) {
+        try {
+          host.style.setProperty('--cc-avatar-accent', accent)
+          host.style.setProperty('--cc-git-accent', accent)
+        } catch (e1) {}
+      }
+      return accent
+    }
+
     function ensureCss() {
       if (typeof document === 'undefined') return
+      applyGitAccentVars(null)
       var style = document.getElementById('cc-set-css')
       var css =
         '.cc-set{max-width:720px;padding:4px 2px 24px;font-size:13px;line-height:1.5;color:var(--color-text,inherit)}' +
@@ -598,6 +720,33 @@ window.__ModuleLoader__.load({
         '.cc-user-choice .opt:hover{border-color:rgba(47,111,237,.45);background:rgba(47,111,237,.08)}' +
         '.cc-user-choice .opt:disabled{opacity:.55;cursor:wait}' +
         '.cc-user-choice .hint{margin:8px 0 0;font-size:11px;opacity:.65}' +
+        '/* git-accent-v4：隐藏原生勾，自绘白钩（Electron accentColor 会出黑钩） */' +
+        '.cc-git-deliver{--cc-git-accent:var(--cc-avatar-accent,#1aa6a6);margin:10px 0 12px;padding:12px 14px;border-radius:12px;border:1px solid color-mix(in srgb,var(--cc-git-accent) 35%,transparent);background:color-mix(in srgb,var(--cc-git-accent) 8%,transparent)}' +
+        '.cc-git-deliver .cc-git-title{font-size:13px;font-weight:600;margin:0 0 8px}' +
+        '.cc-git-deliver .cc-git-row{display:flex;gap:8px;align-items:flex-start;margin:0 0 8px;font-size:12px;line-height:1.45}' +
+        '.cc-git-deliver .cc-git-lab{flex:0 0 72px;opacity:.7}' +
+        '.cc-git-deliver .cc-git-val{flex:1;word-break:break-all}' +
+        '.cc-git-deliver input[type=text],.cc-git-deliver textarea{width:100%;box-sizing:border-box;padding:7px 10px;border-radius:8px;border:1px solid rgba(0,0,0,.12);font-size:12.5px}' +
+        '.cc-git-deliver textarea{min-height:56px;resize:vertical}' +
+        '.cc-git-deliver .cc-git-files{max-height:160px;overflow:auto;margin:6px 0 10px;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.03)}' +
+        '.cc-git-deliver .cc-git-file{display:flex;gap:8px;align-items:flex-start;font-size:12px;margin:0 0 4px;cursor:pointer}' +
+        '.cc-git-deliver .cc-git-file input[type=checkbox]{' +
+        'position:absolute;opacity:0;width:1px;height:1px;margin:0;padding:0;overflow:hidden;clip:rect(0,0,0,0);' +
+        'appearance:none;-webkit-appearance:none;accent-color:transparent;pointer-events:none}' +
+        '.cc-git-deliver .cc-git-file .cc-git-tick{' +
+        'flex:0 0 auto;width:14px;height:14px;margin-top:2px;box-sizing:border-box;border-radius:3px;' +
+        'border:1.5px solid color-mix(in srgb,var(--cc-git-accent) 55%,#888);background:#fff;position:relative}' +
+        '.cc-git-deliver .cc-git-file input[type=checkbox]:checked + .cc-git-tick{' +
+        'border-color:var(--cc-git-accent);background:var(--cc-git-accent)}' +
+        '.cc-git-deliver .cc-git-file input[type=checkbox]:checked + .cc-git-tick::after{' +
+        'content:\"\";position:absolute;left:3.5px;top:0.5px;width:4px;height:8px;' +
+        'border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}' +
+        '.cc-git-deliver .cc-git-file input[type=checkbox]:focus-visible + .cc-git-tick{' +
+        'outline:2px solid color-mix(in srgb,var(--cc-git-accent) 55%,transparent);outline-offset:2px}' +
+        '.cc-git-deliver .cc-git-file.sens{opacity:.55;cursor:not-allowed}' +
+        '.cc-git-deliver .cc-git-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px}' +
+        '.cc-git-deliver .cc-set-btn.primary{background:var(--cc-git-accent);border-color:transparent;color:#fff}' +
+        '.cc-git-deliver .cc-set-btn.primary:hover{filter:brightness(1.05)}' +
 
         '.cc-bubble.tool-group .cc-tool-line .path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.72;color:inherit}' +
         /* Cursor Diff：强制深色（!important 防宿主浅色主题冲掉） */ +
@@ -753,6 +902,8 @@ window.__ModuleLoader__.load({
         port: '18791',
         cursorApiKey: '',
         cursorKeyConfigured: false,
+        gitHostToken: '',
+        gitHostTokenConfigured: false,
         writeScopeText: '',
         dataRoot: '',
       })
@@ -806,6 +957,8 @@ window.__ModuleLoader__.load({
               port: String(c.port || 18791),
               cursorApiKey: c.cursorKeyConfigured ? SECRET_MASK : '',
               cursorKeyConfigured: Boolean(c.cursorKeyConfigured),
+              gitHostToken: c.gitHostTokenConfigured ? SECRET_MASK : '',
+              gitHostTokenConfigured: Boolean(c.gitHostTokenConfigured),
               writeScopeText: c.writeScopeText || '',
               dataRoot: c.dataRoot || '',
             })
@@ -827,6 +980,7 @@ window.__ModuleLoader__.load({
         setMsg('')
         rememberEndpoint()
         var key = String(draft.cursorApiKey || '').trim()
+        var gitTok = String(draft.gitHostToken || '').trim()
         var body = {
           listen: '127.0.0.1',
           port: draft.port,
@@ -834,6 +988,9 @@ window.__ModuleLoader__.load({
         }
         if (key && key !== SECRET_MASK && !/^•+$/.test(key)) {
           body.cursorApiKey = key
+        }
+        if (gitTok && gitTok !== SECRET_MASK && !/^•+$/.test(gitTok)) {
+          body.gitHostToken = gitTok
         }
         fetch(base() + '/api/config', {
           method: 'PUT',
@@ -853,6 +1010,8 @@ window.__ModuleLoader__.load({
               port: String(c.port || 18791),
               cursorApiKey: c.cursorKeyConfigured ? SECRET_MASK : '',
               cursorKeyConfigured: Boolean(c.cursorKeyConfigured),
+              gitHostToken: c.gitHostTokenConfigured ? SECRET_MASK : '',
+              gitHostTokenConfigured: Boolean(c.gitHostTokenConfigured),
               writeScopeText: c.writeScopeText || '',
               dataRoot: c.dataRoot || '',
             })
@@ -965,11 +1124,11 @@ window.__ModuleLoader__.load({
         h(
           'p',
           { className: 'cc-set-lead' },
-          '独立插件：立刻开工出进度卡（无确认卡）→ Cursor 流式改码 → 同步 → 正文结论。',
+          '独立插件：立刻开工出进度卡（无确认卡）→ Cursor 流式改码 → 同步 → 正文结论。提交代码开 PR 可在下方填写 Git Token。',
         ),
         h(
           'div',
-          { className: 'cc-set-card' },
+          { className: 'cc-set-card', 'data-cc-settings': 'cursor-key' },
           h('h3', null, '1 · Cursor API Key（硬性）'),
           field(
             'Cursor API Key',
@@ -984,6 +1143,30 @@ window.__ModuleLoader__.load({
             true,
           ),
           h('p', { className: 'cc-set-hint' }, '密钥只存本机 ~/.zhongruan/cursor-chat/config.json（权限 600），不进项目仓库。'),
+        ),
+        h(
+          'div',
+          { className: 'cc-set-card', 'data-cc-settings': 'git-token' },
+          h('h3', null, '2 · Git 托管 Token（开 PR，可选）'),
+          field(
+            'GitHub / Gitee Token',
+            {
+              type: 'password',
+              value: draft.gitHostToken || '',
+              placeholder: draft.gitHostTokenConfigured
+                ? '已配置，留空保存则保持不变'
+                : '可选：填了才能自动开 PR；不填则 push 后给手动链接',
+              onChange: function (e) {
+                setDraft(Object.assign({}, draft, { gitHostToken: e.target.value }))
+              },
+            },
+            false,
+          ),
+          h(
+            'p',
+            { className: 'cc-set-hint' },
+            '与 Cursor Key 同页、同文件保存。不必装 GitHub CLI；无 Token 时「提交代码」仍会 push，结论里给 Compare 开 PR 链接。',
+          ),
         ),
         h(
           'div',
@@ -1055,6 +1238,12 @@ window.__ModuleLoader__.load({
       var o = toolArgsRawObject(block)
       if (!o) return ''
       return String(o.message || o.requirement || '').trim()
+    }
+
+    /** 工具名：用于 Git 交付卡在结果返回前就切到正确 UI */
+    function toolBlockName(block) {
+      if (!block || typeof block !== 'object') return ''
+      return String(block.name || block.toolName || block.tool_name || '').trim()
     }
 
     /** wait/begin 入参里的 job_id */
@@ -1529,10 +1718,25 @@ window.__ModuleLoader__.load({
       var conclusionInit = String(
         (cache0 && cache0.chat_conclusion) || result0.chatBody || '',
       ).trim()
+      var gitTool0 =
+        toolBlockName(block0) === 'zr_cchat_git_deliver' || String((ui && ui.kind) || '') === 'git_deliver'
+      var gitPlan0 = ui && ui.git_plan && typeof ui.git_plan === 'object' ? ui.git_plan : null
       // 与 cardBootstrap.resolveCardBoot 同口径（改一处必须改两处 + 自测）
       var boot = (function () {
         if (abortedInit) {
           return { phase: 'done', statusLabel: '已停止', sealedStatus: 'cancelled', cancelled: true }
+        }
+        // Git 交付：工具已返回确认卡计划时，即使宿主 turn 已停，也必须停在确认相位
+        if (
+          gitTool0 &&
+          (gitPlan0 || String((ui && ui.status) || statusInit || '') === 'pending_review')
+        ) {
+          return {
+            phase: 'review',
+            statusLabel: '确认 Git 交付',
+            sealedStatus: '',
+            cancelled: false,
+          }
         }
         if (!jobIdInit && settledInit) {
           return { phase: 'done', statusLabel: '已结束', sealedStatus: 'cancelled', cancelled: true }
@@ -1553,7 +1757,7 @@ window.__ModuleLoader__.load({
             statusLabel:
               (cache0 && cache0.statusLabel) ||
               labelFromJobStatus(statusInit) ||
-              (p === 'review' ? '待审同步' : '写码中'),
+              (p === 'review' ? (gitTool0 ? '确认 Git 交付' : '待审同步') : gitTool0 ? '读取 Git 中' : '写码中'),
             sealedStatus: '',
             cancelled: false,
           }
@@ -1562,7 +1766,12 @@ window.__ModuleLoader__.load({
           return { phase: 'done', statusLabel: '已停止', sealedStatus: 'cancelled', cancelled: true }
         }
         if (viewPhase0 === 'start' || viewPhase0 === 'preparing') {
-          return { phase: 'running', statusLabel: '写码中', sealedStatus: '', cancelled: false }
+          return {
+            phase: 'running',
+            statusLabel: gitTool0 ? '读取 Git 中' : '写码中',
+            sealedStatus: '',
+            cancelled: false,
+          }
         }
         return { phase: 'form', statusLabel: '', sealedStatus: '', cancelled: false }
       })()
@@ -1593,9 +1802,20 @@ window.__ModuleLoader__.load({
       var statusLabelState = useState(boot.statusLabel)
       var statusLabel = statusLabelState[0]
       var setStatusLabel = statusLabelState[1]
-      var workKindState = useState('')
+      var toolName0 = toolBlockName(props && props.block)
+      var workKindState = useState(
+        toolName0 === 'zr_cchat_git_deliver' || (ui && ui.kind) === 'git_deliver' ? 'git_deliver' : '',
+      )
       var workKind = workKindState[0]
       var setWorkKind = workKindState[1]
+      var gitDeliverState = useState(gitPlan0)
+      var gitDeliver = gitDeliverState[0]
+      var setGitDeliver = gitDeliverState[1]
+      // 点确认后立刻收起确认卡（勿等工具返回）；防 SSE 短暂 pending_review 又把卡刷回来
+      var gitSubmittedState = useState(false)
+      var gitSubmitted = gitSubmittedState[0]
+      var setGitSubmitted = gitSubmittedState[1]
+      var gitSubmittedRef = useRef(false)
       var conclusionState = useState(conclusionInit)
       var conclusionMd = conclusionState[0]
       var setConclusionMd = conclusionState[1]
@@ -1661,6 +1881,124 @@ window.__ModuleLoader__.load({
       var emptyDonePullRef = useRef('')
       var jobIdRef = useRef(jobIdInit)
       jobIdRef.current = jobId
+      var confirmTokenRef = useRef(confirmToken)
+      confirmTokenRef.current = confirmToken
+
+      /** 取消/确认前兜底：从 awaiting / jobs-by-call / pending-latest 回填 token+jobId */
+      function recoverGitDeliverHandles() {
+        var baseUrl = base()
+        var callId = String(
+          (props && props.callId) ||
+            (props && props.block && (props.block.callId || props.block.toolCallId || props.block.tool_call_id)) ||
+            '',
+        ).trim()
+        var sid = String((props && props.sessionId) || '').trim()
+        var ws = String(resolveDshCwd(props) || workspace || '').trim()
+        var steps = []
+        if (sid) {
+          steps.push(
+            fetch(baseUrl + '/api/cursor-chat/git-deliver/awaiting?session_id=' + encodeURIComponent(sid))
+              .then(function (r) {
+                return r.json()
+              })
+              .then(function (d) {
+                var items = (d && d.items) || []
+                var hit = null
+                for (var i = 0; i < items.length; i++) {
+                  var it = items[i]
+                  if (!it || !it.confirm_token) continue
+                  if (callId && it.dsh_call_id && String(it.dsh_call_id) !== callId) continue
+                  hit = it
+                  break
+                }
+                if (!hit && items.length) hit = items[0]
+                return hit
+                  ? {
+                      token: String(hit.confirm_token || ''),
+                      jobId: String(hit.job_id || ''),
+                      plan: hit.git_plan || null,
+                    }
+                  : null
+              })
+              .catch(function () {
+                return null
+              }),
+          )
+        }
+        if (callId) {
+          steps.push(
+            fetch(baseUrl + '/api/cursor-chat/jobs-by-call?call_id=' + encodeURIComponent(callId))
+              .then(function (r) {
+                return r.json()
+              })
+              .then(function (d) {
+                if (!d || !d.found || !d.job_id) return null
+                return fetch(baseUrl + '/api/cursor-chat/jobs/' + encodeURIComponent(d.job_id) + '?view=card')
+                  .then(function (r2) {
+                    return r2.json()
+                  })
+                  .then(function (pack) {
+                    var job = pack && pack.job ? pack.job : pack
+                    var g = (job && job.git_deliver) || {}
+                    return {
+                      token: String(g.confirm_token || ''),
+                      jobId: String((job && job.id) || d.job_id || ''),
+                      plan: g.remote_url ? g : null,
+                    }
+                  })
+              })
+              .catch(function () {
+                return null
+              }),
+          )
+        }
+        if (ws && callId) {
+          steps.push(
+            fetch(
+              baseUrl +
+                '/api/cursor-chat/pending-latest?workspace=' +
+                encodeURIComponent(ws) +
+                '&call_id=' +
+                encodeURIComponent(callId),
+            )
+              .then(function (r) {
+                return r.json()
+              })
+              .then(function (d) {
+                var p = d && d.pending
+                if (!p) return null
+                return {
+                  token: String(p.confirm_token || ''),
+                  jobId: String(p.job_id || ''),
+                  plan: p.git_plan || null,
+                }
+              })
+              .catch(function () {
+                return null
+              }),
+          )
+        }
+        return Promise.all(steps).then(function (rows) {
+          var out = { token: '', jobId: '', plan: null }
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i]
+            if (!row) continue
+            if (!out.token && row.token) out.token = row.token
+            if (!out.jobId && row.jobId) out.jobId = row.jobId
+            if (!out.plan && row.plan) out.plan = row.plan
+          }
+          if (out.token) {
+            confirmTokenRef.current = out.token
+            setConfirmToken(out.token)
+          }
+          if (out.jobId) {
+            jobIdRef.current = out.jobId
+            setJobId(out.jobId)
+          }
+          if (out.plan) hydrateGitDeliver(out.plan)
+          return out
+        })
+      }
 
       function hardResetToConfirm(nextReq) {
         try {
@@ -1675,6 +2013,9 @@ window.__ModuleLoader__.load({
         sealedStatusRef.current = ''
         emptyDonePullRef.current = ''
         jobIdRef.current = ''
+        confirmTokenRef.current = ''
+        gitSubmittedRef.current = false
+        setGitSubmitted(false)
         setJobId('')
         setPhase('form')
         setBusy(false)
@@ -1684,6 +2025,7 @@ window.__ModuleLoader__.load({
         setTranscript([])
         setStatusLabel('')
         setWorkKind('')
+        setGitDeliver(null)
         setConclusionMd('')
         setReview({ inScope: [], deleted: [], deferred: [] })
         setSelected({})
@@ -1838,6 +2180,22 @@ window.__ModuleLoader__.load({
           }
         },
         [props && props.cwd, props && props.sessionId],
+      )
+
+      // Git 确认卡：工具结果里已带 git_plan 时立刻灌表，不等 SSE
+      useEffect(
+        function () {
+          var plan = (ui && ui.git_plan) || gitPlan0
+          if (!plan || typeof plan !== 'object') return
+          setWorkKind('git_deliver')
+          if (ui && ui.confirm_token) setConfirmToken(String(ui.confirm_token))
+          hydrateGitDeliver(plan)
+          if (String((ui && ui.status) || '') === 'pending_review' || plan.remote_url) {
+            setPhase('review')
+            setStatusLabel('确认 Git 交付')
+          }
+        },
+        [ui && ui.confirm_token, ui && ui.status, ui && ui.git_plan && ui.git_plan.remote_url],
       )
 
       useEffect(function () {
@@ -2130,17 +2488,75 @@ window.__ModuleLoader__.load({
           if (!callId) return
           var ws = String(resolveDshCwd(props) || workspace || '').trim()
           var stopped = false
-          function attach(jid) {
+          function attach(jid, hint) {
             if (!jid || stopped) return
             setJobId(String(jid))
-            setPhase('running')
-            setStatusLabel('写码中')
+            var isGit =
+              (hint && hint.work_kind === 'git_deliver') ||
+              workKind === 'git_deliver' ||
+              toolBlockName(props && props.block) === 'zr_cchat_git_deliver'
+            if (isGit) {
+              setWorkKind('git_deliver')
+              // 已有计划时直接进人审相位，禁止 attach 把确认卡打回「读取中」
+              setPhase(function (prev) {
+                return prev === 'review' ? prev : 'running'
+              })
+              setStatusLabel(function (prev) {
+                return prev === '确认 Git 交付' ? prev : '读取 Git 中'
+              })
+            } else {
+              setPhase('running')
+              setStatusLabel('写码中')
+            }
             reconcileJob(String(jid))
             if (!esRef.current) openStream(String(jid))
           }
+          function hydrateGitPending(pending) {
+            if (!pending) return
+            if (pending.call_id && String(pending.call_id) !== callId) return
+            if (pending.confirm_token) setConfirmToken(String(pending.confirm_token))
+            if (pending.kind === 'git_deliver') {
+              setWorkKind('git_deliver')
+              if (pending.git_plan) {
+                hydrateGitDeliver(pending.git_plan)
+                setPhase('review')
+                setStatusLabel('确认 Git 交付')
+              }
+            }
+            if (pending.job_id) attach(String(pending.job_id), { work_kind: pending.kind || '' })
+          }
+          function pullPending() {
+            if (stopped || !ws) return Promise.resolve(null)
+            return fetch(
+              serviceBase() +
+                '/api/cursor-chat/pending-latest?workspace=' +
+                encodeURIComponent(ws) +
+                '&call_id=' +
+                encodeURIComponent(callId),
+            )
+              .then(function (r2) {
+                return r2.json()
+              })
+              .then(function (d2) {
+                if (stopped || !d2 || !d2.pending) return null
+                hydrateGitPending(d2.pending)
+                return d2
+              })
+              .catch(function () {
+                return null
+              })
+          }
           function pull() {
-            if (stopped || jobIdRef.current) return
+            if (stopped) return
             var base = serviceBase()
+            // 已挂 job 时：写码停拉；Git 仍要继续拉 pending，否则 jobs-by-call 抢先挂上会永远灌不进确认卡
+            var isGitTool =
+              workKind === 'git_deliver' || toolBlockName(props && props.block) === 'zr_cchat_git_deliver'
+            if (jobIdRef.current && !isGitTool) return
+            if (jobIdRef.current && isGitTool) {
+              pullPending()
+              return
+            }
             fetch(base + '/api/cursor-chat/jobs-by-call?call_id=' + encodeURIComponent(callId))
               .then(function (r) {
                 return r.json().then(function (d) {
@@ -2148,28 +2564,16 @@ window.__ModuleLoader__.load({
                 })
               })
               .then(function (pack) {
-                if (stopped || jobIdRef.current) return null
+                if (stopped || jobIdRef.current) return pullPending()
                 var d = pack && pack.d
                 if (d && d.found && d.job_id) {
-                  attach(String(d.job_id))
+                  if (d.work_kind === 'git_deliver') setWorkKind('git_deliver')
+                  attach(String(d.job_id), { work_kind: d.work_kind || '' })
+                  // Git：必须再拉 pending 拿 confirm_token + git_plan（jobs-by-call 不含计划）
+                  if (d.work_kind === 'git_deliver') return pullPending()
                   return null
                 }
-                // 404/未知路径 → pending-latest
-                if (!ws) return null
-                return fetch(
-                  base +
-                    '/api/cursor-chat/pending-latest?workspace=' +
-                    encodeURIComponent(ws) +
-                    '&call_id=' +
-                    encodeURIComponent(callId),
-                ).then(function (r2) {
-                  return r2.json()
-                })
-              })
-              .then(function (d2) {
-                if (!d2 || !d2.pending || !d2.pending.job_id) return
-                if (d2.pending.call_id && String(d2.pending.call_id) !== callId) return
-                attach(String(d2.pending.job_id))
+                return pullPending()
               })
               .catch(function () {})
           }
@@ -2220,9 +2624,7 @@ window.__ModuleLoader__.load({
         setPhase('done')
         setStatusLabel('已取消')
         setConclusionMd(function (prev) {
-          return String(prev || '').trim()
-            ? prev
-            : '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+          return String(prev || '').trim() ? prev : stoppedConclusionMd(workKind)
         })
         dialogPinRef.current = false
         stickBottomRef.current = false
@@ -2288,6 +2690,27 @@ window.__ModuleLoader__.load({
             return postCancel(id)
           })
           .catch(function () {})
+        // Git 交付阻塞在 wait：停止时须同时取消确认等待，否则工具永不返回
+        if (workKind === 'git_deliver') {
+          var gToken = String(
+            confirmToken ||
+              (gitDeliver && gitDeliver.confirm_token) ||
+              (ui && ui.confirm_token) ||
+              '',
+          ).trim()
+          var gJob = String(jobId || (ui && ui.job_id) || '').trim()
+          if (gToken || gJob) {
+            fetch(base() + '/api/cursor-chat/git-deliver/cancel', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                confirm_token: gToken,
+                job_id: gJob,
+                reason: '用户停止',
+              }),
+            }).catch(function () {})
+          }
+        }
       }
 
       useEffect(
@@ -2313,8 +2736,8 @@ window.__ModuleLoader__.load({
                     null,
                 )
                 var body0 = String(payload0.chatBody || '').trim()
-                if (body0) return normalizeConclusionMd(body0)
-                return '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+                if (body0) return concludeMdForWorkKind(body0, workKind)
+                return stoppedConclusionMd(workKind)
               })
             }
             return
@@ -2408,8 +2831,12 @@ window.__ModuleLoader__.load({
             setConclusionMd(function (prev) {
               return String(prev || '').trim()
                 ? prev
-                : '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+                : stoppedConclusionMd(job.work_kind || workKind)
             })
+          }
+          // Git 停止：清空候选文件列表，避免结论下仍挂「已编辑 N 个文件」
+          if (job.work_kind === 'git_deliver') {
+            setChangedFiles({ synced: [], deleted: [] })
           }
           dialogPinRef.current = false
           stickBottomRef.current = false
@@ -2420,26 +2847,50 @@ window.__ModuleLoader__.load({
         var reviewGate = job.review_gate || null
         var nextPhase = phaseFromJobStatus(st, detail, inScopeLen, reviewGate)
         var nextLabel = labelFromJobStatus(st, detail, inScopeLen, reviewGate)
-        if (job.work_kind === 'ops' || job.work_kind === 'code') {
+        if (job.work_kind === 'ops' || job.work_kind === 'code' || job.work_kind === 'git_deliver') {
           setWorkKind(function (prev) {
             return prev === job.work_kind ? prev : job.work_kind
           })
         }
+        if (job.work_kind === 'git_deliver' && job.git_deliver) {
+          hydrateGitDeliver(job.git_deliver)
+        }
         if (TERMINAL_JOB[st]) sealedStatusRef.current = st
         var phaseOut = nextPhase
         var labelOut = nextLabel
+        var isGitJob = job.work_kind === 'git_deliver'
+        if (
+          isGitJob &&
+          !gitSubmittedRef.current &&
+          /已确认|正在 commit|正在推送|重试推送|正在重试推送/.test(detail)
+        ) {
+          gitSubmittedRef.current = true
+          setGitSubmitted(true)
+        }
         if (nextPhase === 'done') {
           phaseOut = 'done'
           labelOut = nextLabel || '已完成'
           dialogPinRef.current = false
           stickBottomRef.current = false
-        } else if (nextPhase === 'review') {
-          phaseOut = 'review'
-          labelOut = nextLabel || '待审同步'
+        } else if (
+          isGitJob &&
+          gitSubmittedRef.current &&
+          (st === 'pending_review' || st === 'running' || st === 'queued' || st === 'syncing')
+        ) {
+          // 已点确认：禁止再回人审卡；文案用 commit/push，禁止「写码中」
+          phaseOut = 'running'
+          labelOut = gitPostConfirmLabel(detail, nextLabel)
           dialogPinRef.current = true
           stickBottomRef.current = true
           beAutoArmedRef.current = true
-          if (job.review_in_scope || job.review_deferred) {
+        } else if (nextPhase === 'review' || (isGitJob && st === 'pending_review')) {
+          // Git 人审：pending_review 一律进人审卡，禁止被「待审同步/自动同步」文案带跑
+          phaseOut = 'review'
+          labelOut = isGitJob ? '确认 Git 交付' : nextLabel || '待审同步'
+          dialogPinRef.current = true
+          stickBottomRef.current = true
+          beAutoArmedRef.current = true
+          if (!isGitJob && (job.review_in_scope || job.review_deferred)) {
             enterReview({
               in_scope: job.review_in_scope || [],
               deleted: job.review_deleted || [],
@@ -2454,7 +2905,13 @@ window.__ModuleLoader__.load({
           beAutoArmedRef.current = true
         } else if (st === 'running' || st === 'queued' || st === 'syncing') {
           phaseOut = 'running'
-          labelOut = st === 'syncing' ? '自动同步中' : nextLabel || '写码中'
+          if (isGitJob && gitSubmittedRef.current) {
+            labelOut = gitPostConfirmLabel(detail, nextLabel)
+          } else {
+            labelOut =
+              st === 'syncing' ? '自动同步中' : nextLabel || (isGitJob ? '读取 Git 中' : '写码中')
+            if (isGitJob && labelOut === '写码中') labelOut = '读取 Git 中'
+          }
           dialogPinRef.current = true
           stickBottomRef.current = true
           beAutoArmedRef.current = true
@@ -2480,13 +2937,18 @@ window.__ModuleLoader__.load({
         }
         var conc = conclusionFromJob(job)
         if (conc) setConclusionMd(conc)
-        var syncedNow = job.synced_files || job.last_synced_files || job.review_in_scope || []
-        var deletedNow = job.deleted_files || job.review_deleted || []
+        // Git 交付：进度卡不挂写码「已编辑」列表（成功文件只在结论正文）
+        var syncedNow = isGitJob
+          ? []
+          : job.synced_files || job.last_synced_files || job.review_in_scope || []
+        var deletedNow = isGitJob ? [] : job.deleted_files || job.review_deleted || []
         if ((syncedNow && syncedNow.length) || (deletedNow && deletedNow.length)) {
           setChangedFiles({
             synced: Array.isArray(syncedNow) ? syncedNow : [],
             deleted: Array.isArray(deletedNow) ? deletedNow : [],
           })
+        } else if (isGitJob) {
+          setChangedFiles({ synced: [], deleted: [] })
         }
         if (job.backend_restart && job.backend_restart.offered) {
           setBeRestart(function (prev) {
@@ -2628,6 +3090,422 @@ window.__ModuleLoader__.load({
         setStatusLabel('待审同步')
       }
 
+      function hydrateGitDeliver(raw) {
+        if (!raw || typeof raw !== 'object') return
+        var entries = Array.isArray(raw.entries) ? raw.entries : null
+        var selectedFiles = Array.isArray(raw.selected_files) ? raw.selected_files : []
+        var held = Array.isArray(raw.held_sensitive_files) ? raw.held_sensitive_files : []
+        var nextSel = {}
+        if (entries && entries.length) {
+          entries.forEach(function (e) {
+            if (!e || !e.rel) return
+            nextSel[e.rel] = e.sensitive ? false : e.selected !== false
+          })
+        } else {
+          selectedFiles.forEach(function (p) {
+            nextSel[p] = true
+          })
+          held.forEach(function (p) {
+            nextSel[p] = false
+          })
+        }
+        setSelected(function (prev) {
+          return Object.keys(nextSel).length ? nextSel : prev
+        })
+        var tok = String(raw.confirm_token || '').trim()
+        if (tok) {
+          confirmTokenRef.current = tok
+          setConfirmToken(tok)
+        }
+        setGitDeliver({
+          remote_url: String(raw.remote_url || ''),
+          current_branch: String(raw.current_branch || ''),
+          target_branch: String(raw.target_branch || raw.current_branch || ''),
+          base_branch: String(raw.base_branch || 'main'),
+          commit_message: String(raw.commit_message || ''),
+          create_pr: raw.create_pr !== false,
+          selected_files: selectedFiles,
+          held_sensitive_files: held,
+          confirm_token: tok || confirmTokenRef.current || undefined,
+          entries: entries,
+        })
+      }
+
+      function onGitDeliverConfirm() {
+        setErr('')
+        setBusy(true)
+        var g0 = gitDeliver || {}
+        Promise.resolve()
+          .then(function () {
+            var token0 = String(
+              confirmTokenRef.current ||
+                confirmToken ||
+                g0.confirm_token ||
+                (ui && ui.confirm_token) ||
+                '',
+            ).trim()
+            if (token0) return { token: token0, jobId: String(jobIdRef.current || jobId || ''), plan: null }
+            return recoverGitDeliverHandles()
+          })
+          .then(function (ids) {
+            var token = String((ids && ids.token) || '').trim()
+            if (!token) throw new Error('确认令牌未就绪，请稍候再点。')
+            var g = Object.assign({}, g0, ids && ids.plan ? ids.plan : {})
+            var files = Object.keys(selected || {}).filter(function (p) {
+              return selected[p]
+            })
+            if (!files.length) throw new Error('请至少勾选一个非敏感文件。')
+            return fetch(base() + '/api/hitl/issue', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'cursor-chat.git-deliver',
+                confirm_token: token,
+                workspace: workspace,
+              }),
+            })
+              .then(function (r) {
+                return r.json()
+              })
+              .then(function (issued) {
+                if (!issued || !issued.ok || !issued.nonce) {
+                  throw new Error((issued && issued.detail) || '签发 HITL 失败')
+                }
+                return fetch(base() + '/api/cursor-chat/git-deliver/confirm', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    confirm_token: token,
+                    nonce: issued.nonce,
+                    selected_files: files,
+                    commit_message: String(g.commit_message || ''),
+                    target_branch: String(g.target_branch || ''),
+                    base_branch: String(g.base_branch || ''),
+                    create_pr: g.create_pr !== false,
+                  }),
+                }).then(function (r2) {
+                  return r2.json().then(function (d) {
+                    return { status: r2.status, data: d }
+                  })
+                })
+              })
+          })
+          .then(function (out) {
+            if (!out || !out.data || !out.data.ok) {
+              throw new Error((out && out.data && out.data.detail) || '确认失败')
+            }
+            var jid = out.data.job_id ? String(out.data.job_id) : ''
+            if (jid) {
+              jobIdRef.current = jid
+              setJobId(jid)
+            }
+            if (out.data.waiting_tool || out.data.accepted) {
+              // 确认成功：立刻收起确认卡，只留进度
+              gitSubmittedRef.current = true
+              setGitSubmitted(true)
+              sealedStatusRef.current = ''
+              setPhase('running')
+              setStatusLabel('正在 commit / push…')
+              if (jid) {
+                reconcileJob(jid)
+                if (!esRef.current) openStream(jid)
+              }
+              return
+            }
+            gitSubmittedRef.current = true
+            setGitSubmitted(true)
+            var conc = String((out.data && out.data.conclusion) || '').trim()
+            if (conc) setConclusionMd(normalizeConclusionMd(conc))
+            sealedStatusRef.current = out.data.ok === false ? 'failed' : 'succeeded'
+            setPhase('done')
+            setStatusLabel(out.data.ok === false ? '失败' : '已完成')
+            if (jid) reconcileJob(jid)
+          })
+          .catch(function (e) {
+            setErr(String(e && e.message ? e.message : e))
+          })
+          .finally(function () {
+            setBusy(false)
+          })
+      }
+
+      function onGitDeliverCancel() {
+        setErr('')
+        setBusy(true)
+        Promise.resolve()
+          .then(function () {
+            var token0 = String(
+              confirmTokenRef.current ||
+                confirmToken ||
+                (gitDeliver && gitDeliver.confirm_token) ||
+                (ui && ui.confirm_token) ||
+                '',
+            ).trim()
+            var jid0 = String(jobIdRef.current || jobId || (ui && ui.job_id) || '').trim()
+            if (token0 || jid0) return { token: token0, jobId: jid0, plan: null }
+            return recoverGitDeliverHandles()
+          })
+          .then(function (ids) {
+            var token = String((ids && ids.token) || '').trim()
+            var jid = String((ids && ids.jobId) || '').trim()
+            if (!token && !jid) throw new Error('确认令牌未就绪，请稍候再点取消')
+            return fetch(base() + '/api/cursor-chat/git-deliver/cancel', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                confirm_token: token,
+                job_id: jid,
+                reason: '用户取消 Git 交付',
+              }),
+            }).then(function (r) {
+              return r.json()
+            })
+          })
+          .then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.detail) || '取消失败')
+            cancelOnceRef.current = true
+            sealedStatusRef.current = 'cancelled'
+            setPhase('done')
+            setStatusLabel('已取消')
+            var conc = String((d && d.conclusion) || '').trim()
+            if (conc) setConclusionMd(normalizeConclusionMd(conc))
+            else {
+              setConclusionMd(
+                '## Git 交付结论\n\n结果：⏹ 已取消 Git 交付。工作区改动仍在，未执行 commit。\n\n说明：\n• 用户取消 Git 交付\n',
+              )
+            }
+            if (d.job_id) {
+              jobIdRef.current = String(d.job_id)
+              reconcileJob(String(d.job_id))
+            }
+          })
+          .catch(function (e) {
+            setErr(String(e && e.message ? e.message : e))
+          })
+          .finally(function () {
+            setBusy(false)
+          })
+      }
+
+      function renderGitDeliverPanel() {
+        if (workKind !== 'git_deliver') return null
+        var g = gitDeliver || {}
+        var sealed = String(sealedStatusRef.current || '')
+        var closed =
+          phase === 'done' ||
+          !!TERMINAL_JOB[sealed] ||
+          statusLabel === '已取消' ||
+          statusLabel === '已停止' ||
+          statusLabel === '失败' ||
+          statusLabel === '已完成'
+        if (closed) {
+          var stopLike = sealed === 'cancelled' || statusLabel === '已取消' || statusLabel === '已停止'
+          var idleLike =
+            /没有可提交|无需 Git|没有未提交改动|没有可安全提交/.test(
+              String(conclusionMd || '') + String(statusLabel || ''),
+            ) ||
+            (sealed === 'succeeded' &&
+              /没有未提交|无需 Git|没有可安全提交/.test(String(statusLabel || '')))
+          return h(
+            'div',
+            { className: 'cc-git-deliver', 'data-cc-git-deliver': '1' },
+            h('p', { className: 'cc-git-title' }, 'Git 交付'),
+            h(
+              'p',
+              { className: 'cc-note' },
+              stopLike
+                ? (statusLabel === '已停止' ? '已停止' : '已取消') +
+                    '：未执行 commit，工作区改动仍在。'
+                : idleLike
+                  ? '当前没有可提交的改动，无需交付。'
+                  : statusLabel === '失败'
+                    ? '交付未完成，详见下方 Git 交付结论。'
+                    : statusLabel || '已结束',
+            ),
+          )
+        }
+        // 点确认后：确认卡整卡消失（进度只看下方 transcript，禁止再露「写码中」壳）
+        if (gitSubmitted || gitSubmittedRef.current) {
+          return null
+        }
+        // 计划已灌入即出确认卡；不卡死在 phase===review（SSE 曾漏带 git_deliver 时会永远转圈）
+        var hasPlan = !!(
+          g.remote_url ||
+          g.current_branch ||
+          (g.selected_files && g.selected_files.length) ||
+          (g.entries && g.entries.length)
+        )
+        if (!hasPlan) {
+          return h(
+            'div',
+            { className: 'cc-git-deliver', 'data-cc-git-deliver': '1' },
+            h('p', { className: 'cc-git-title' }, 'Git 交付进行中'),
+            h(
+              'div',
+              { className: 'cc-hold' },
+              h('span', { className: 'cc-spin', 'aria-hidden': 'true' }),
+              h('span', null, statusLabel || '正在读取仓库地址、当前分支与未提交改动…'),
+            ),
+            h('p', { className: 'cc-note' }, '确认卡就绪后可勾选文件并提交；在此之前不会 commit。'),
+          )
+        }
+        var fileKeys = Object.keys(selected || {})
+        if (!fileKeys.length && Array.isArray(g.entries)) {
+          fileKeys = g.entries.map(function (e) {
+            return e.rel
+          })
+        }
+        if (!fileKeys.length && Array.isArray(g.selected_files)) {
+          fileKeys = g.selected_files.slice()
+          ;(g.held_sensitive_files || []).forEach(function (p) {
+            if (fileKeys.indexOf(p) < 0) fileKeys.push(p)
+          })
+        }
+        var heldSet = {}
+        ;(g.held_sensitive_files || []).forEach(function (p) {
+          heldSet[p] = true
+        })
+        if (Array.isArray(g.entries)) {
+          g.entries.forEach(function (e) {
+            if (e && e.sensitive) heldSet[e.rel] = true
+          })
+        }
+        var accent = resolveAvatarAccent()
+        var tokNow = String(
+          confirmTokenRef.current || confirmToken || g.confirm_token || (ui && ui.confirm_token) || '',
+        ).trim()
+        var jidNow = String(jobIdRef.current || jobId || (ui && ui.job_id) || '').trim()
+        return h(
+          'div',
+          {
+            className: 'cc-git-deliver',
+            'data-cc-git-deliver': '1',
+            'data-cc-confirm-token': tokNow,
+            'data-cc-job-id': jidNow,
+            style: { ['--cc-git-accent']: accent, ['--cc-avatar-accent']: accent },
+            ref: function (el) {
+              if (el) applyGitAccentVars(el)
+            },
+          },
+          h('p', { className: 'cc-git-title' }, '确认 Git 交付（人审）'),
+          h(
+            'div',
+            { className: 'cc-git-row' },
+            h('span', { className: 'cc-git-lab' }, '仓库'),
+            h('span', { className: 'cc-git-val' }, g.remote_url || '（未配置 remote）'),
+          ),
+          h(
+            'div',
+            { className: 'cc-git-row' },
+            h('span', { className: 'cc-git-lab' }, '当前分支'),
+            h('span', { className: 'cc-git-val' }, g.current_branch || '—'),
+          ),
+          h(
+            'div',
+            { className: 'cc-git-row' },
+            h('span', { className: 'cc-git-lab' }, '提交分支'),
+            h('input', {
+              type: 'text',
+              value: String(g.target_branch || ''),
+              onChange: function (ev) {
+                var v = ev && ev.target ? ev.target.value : ''
+                setGitDeliver(function (prev) {
+                  return Object.assign({}, prev || {}, { target_branch: v })
+                })
+              },
+            }),
+          ),
+          h(
+            'div',
+            { className: 'cc-git-row' },
+            h('span', { className: 'cc-git-lab' }, 'PR 基线'),
+            h('input', {
+              type: 'text',
+              value: String(g.base_branch || ''),
+              onChange: function (ev) {
+                var v = ev && ev.target ? ev.target.value : ''
+                setGitDeliver(function (prev) {
+                  return Object.assign({}, prev || {}, { base_branch: v })
+                })
+              },
+            }),
+          ),
+          h(
+            'div',
+            { className: 'cc-git-row' },
+            h('span', { className: 'cc-git-lab' }, '说明'),
+            h('textarea', {
+              value: String(g.commit_message || ''),
+              onChange: function (ev) {
+                var v = ev && ev.target ? ev.target.value : ''
+                setGitDeliver(function (prev) {
+                  return Object.assign({}, prev || {}, { commit_message: v })
+                })
+              },
+            }),
+          ),
+          h('p', { className: 'cc-note' }, '将纳入提交的文件（敏感文件默认不勾选，禁止提交）'),
+          h(
+            'div',
+            { className: 'cc-git-files' },
+            fileKeys.length
+              ? fileKeys.map(function (p) {
+                  var sens = !!heldSet[p]
+                  return h(
+                    'label',
+                    { key: p, className: 'cc-git-file' + (sens ? ' sens' : '') },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: !!selected[p],
+                      disabled: sens || busy,
+                      onChange: function (ev) {
+                        if (sens) return
+                        var on = !!(ev && ev.target && ev.target.checked)
+                        setSelected(function (prev) {
+                          var next = Object.assign({}, prev)
+                          next[p] = on
+                          return next
+                        })
+                      },
+                    }),
+                    h('span', { className: 'cc-git-tick', 'aria-hidden': 'true' }),
+                    h('span', null, p + (sens ? '（敏感·已排除）' : '')),
+                  )
+                })
+              : h('span', { className: 'cc-note' }, '暂无文件列表'),
+          ),
+          err ? h('p', { className: 'cc-set-msg err' }, err) : null,
+          h(
+            'div',
+            {
+              className: 'cc-git-actions',
+              style: { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '10px' },
+            },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'cc-set-btn',
+                disabled: busy,
+                onClick: onGitDeliverCancel,
+              },
+              '取消',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'cc-set-btn primary',
+                disabled: busy,
+                style: { background: accent, borderColor: 'transparent', color: '#fff' },
+                onClick: onGitDeliverConfirm,
+              },
+              busy ? '提交中…' : '确认提交并开 PR',
+            ),
+          ),
+        )
+      }
+
       function openStream(jid) {
         if (esRef.current && typeof esRef.current.close === 'function') {
           try {
@@ -2646,6 +3524,8 @@ window.__ModuleLoader__.load({
                 id: jid,
                 status: data.status,
                 detail: data.detail,
+                work_kind: data.work_kind,
+                git_deliver: data.git_deliver,
                 assistant_text: data.assistant_text,
                 chat_conclusion: data.chat_conclusion,
                 synced_files: data.synced_files,
@@ -2668,6 +3548,18 @@ window.__ModuleLoader__.load({
                 review_deferred: data.review_deferred,
                 review_gate: data.review_gate,
               })
+              // Git 人审：SSE 带计划则立刻进人审卡，禁止停在「待审同步」转圈
+              if (
+                (data.work_kind === 'git_deliver' || data.git_deliver) &&
+                data.status === 'pending_review' &&
+                data.git_deliver
+              ) {
+                setWorkKind('git_deliver')
+                hydrateGitDeliver(data.git_deliver)
+                setPhase('review')
+                setStatusLabel('确认 Git 交付')
+                return
+              }
               if (data.status === 'pending_review') {
                 var inN = Array.isArray(data.review_in_scope) ? data.review_in_scope.length : 0
                 var snapPhase = phaseFromJobStatus(
@@ -2676,6 +3568,14 @@ window.__ModuleLoader__.load({
                   inN,
                   data.review_gate,
                 )
+                if (data.work_kind === 'git_deliver') {
+                  setWorkKind('git_deliver')
+                  if (snapPhase === 'review' || data.review_gate === 'await_user') {
+                    setPhase('review')
+                    setStatusLabel('确认 Git 交付')
+                  }
+                  return
+                }
                 if (snapPhase === 'done') {
                   setPhase('done')
                   setStatusLabel('已完成·有范围外文件')
@@ -2819,7 +3719,34 @@ window.__ModuleLoader__.load({
               return
             }
             if (data.type === 'error') appendStream('错误：' + (data.message || ''))
-            if (data.type === 'status') appendStream(data.message || '')
+            if (data.type === 'status') {
+              var statusMsg = String(data.message || '').trim()
+              appendStream(statusMsg)
+              // Git 交付：SSE 进度必须立刻刷到灰条（不能等 5s reconcile），否则会钉死在「已确认」
+              if (
+                statusMsg &&
+                (workKind === 'git_deliver' || gitSubmittedRef.current) &&
+                !/【本轮结论】|^##\s*本轮结论|^##\s*Git\s*交付结论|说明方案/.test(statusMsg)
+              ) {
+                setTranscript(function (prev) {
+                  var items = Array.isArray(prev) ? prev.slice() : []
+                  var last = items.length ? items[items.length - 1] : null
+                  if (last && last.kind === 'status' && String(last.text || '').trim() === statusMsg) {
+                    return prev
+                  }
+                  items.push({
+                    id: 'git-live-' + Date.now() + '-' + items.length,
+                    kind: 'status',
+                    at: new Date().toISOString(),
+                    text: statusMsg,
+                  })
+                  return items.slice(-80)
+                })
+                if (gitSubmittedRef.current) {
+                  setStatusLabel(gitPostConfirmLabel(statusMsg, ''))
+                }
+              }
+            }
           } catch (e) {
             appendStream(String(ev.data || ''))
           }
@@ -2830,18 +3757,19 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 运行中低频对账即可（SSE 已推）；过勤会跟 snapshot 打架闪烁
+      // 运行中低频对账即可（SSE 已推）；Git 确认后略加密，避免灰条长时间不刷新
       useEffect(
         function () {
           if (phase !== 'running' || !jobId) return
+          var ms = workKind === 'git_deliver' || gitSubmittedRef.current ? 2000 : 5000
           var t = setInterval(function () {
             reconcileJob(jobId)
-          }, 5000)
+          }, ms)
           return function () {
             clearInterval(t)
           }
         },
-        [phase, jobId],
+        [phase, jobId, workKind, gitSubmitted],
       )
 
       // 权威 status 已是终态时，把 React phase 对齐（不依赖 SSE / 宿主是否更新 kind）
@@ -3366,18 +4294,30 @@ window.__ModuleLoader__.load({
           : statusLabel
       // 已废除确认卡：标题永远是进度，禁止再出现「· 确认」造成一闪即失的假确认卡
       var opsCard = serviceRunCard(requirement, workKind)
-      var title = opsCard
+      var gitCard = workKind === 'git_deliver' || kind === 'git_deliver'
+      var title = gitCard
         ? phase === 'done' || visiblePhase === 'done'
-          ? 'Cursor 开发操作 · 本轮结论'
-          : 'Cursor 开发操作 · 进度'
-        : parentJobId || kind === 'continue'
-          ? 'Cursor 对话写码 · 续改进度'
-          : phase === 'done' || visiblePhase === 'done'
-            ? 'Cursor 对话写码 · 本轮结论'
-            : 'Cursor 对话写码 · 进度'
+          ? 'Cursor Git 交付 · 交付结论'
+          : phase === 'review'
+            ? 'Cursor Git 交付 · 确认提交'
+            : 'Cursor Git 交付 · 进度'
+        : opsCard
+          ? phase === 'done' || visiblePhase === 'done'
+            ? 'Cursor 开发操作 · 本轮结论'
+            : 'Cursor 开发操作 · 进度'
+          : parentJobId || kind === 'continue'
+            ? 'Cursor 对话写码 · 续改进度'
+            : phase === 'done' || visiblePhase === 'done'
+              ? 'Cursor 对话写码 · 本轮结论'
+              : 'Cursor 对话写码 · 进度'
 
       var statusZh = (function () {
         var s = String(visibleLabel || '')
+        if (gitCard) {
+          if (s === 'pending_review' || s === '确认 Git 交付' || phase === 'review') return '确认 Git 交付'
+          if (s === '读取 Git 中' || s === '提交推送中') return s
+          if (s === 'running' || s === 'queued' || s === '写码中') return '读取 Git 中'
+        }
         if ((s === 'running' || s === 'queued' || s === '写码中') && opsCard) return '处理中'
         if (s === 'running' || s === 'queued') return '写码中'
         if (s === 'pending_review' || s === '待审同步') return '待审同步'
@@ -3420,11 +4360,11 @@ window.__ModuleLoader__.load({
           setConclusionMd(function (prev) {
             if (String(prev || '').trim()) return prev
             var body = String(resultFields.chatBody || '').trim()
-            if (body) return normalizeConclusionMd(body)
-            return '## 本轮结论\n\n结果：⏹ 已停止。用户停止了本轮任务。\n\n改动：\n• 本轮未继续写码\n'
+            if (body) return concludeMdForWorkKind(body, workKind)
+            return stoppedConclusionMd(workKind)
           })
         },
-        [phase, visiblePhase, statusZh, toolCancelledNow, resultFields.chatBody],
+        [phase, visiblePhase, statusZh, toolCancelledNow, resultFields.chatBody, workKind],
       )
 
       // 三段式结论只挂过程组外一次；文件列表只用底座原生卡（禁止自绘）
@@ -3438,7 +4378,13 @@ window.__ModuleLoader__.load({
             !!TERMINAL_JOB[String(sealedStatusRef.current || '')]
           var md = normalizeConclusionMd(String(conclusionMd || '').trim())
           if (!doneNow || !md) return
-          if (md.indexOf('本轮结论') < 0 && md.indexOf('结果：') < 0 && md.indexOf('任务结果') < 0) return
+          if (
+            md.indexOf('本轮结论') < 0 &&
+            md.indexOf('Git 交付结论') < 0 &&
+            md.indexOf('结果：') < 0 &&
+            md.indexOf('任务结果') < 0
+          )
+            return
           ensureCss()
           var cardId =
             'cc-card-' + String(identity || jobId || confirmToken || (ui && ui.confirm_token) || 'x').trim()
@@ -4324,7 +5270,7 @@ window.__ModuleLoader__.load({
           }
           if (it.kind === 'status') {
             var msg = normalizeStatusDisplayClient(it.text || '')
-            if (/【本轮结论】|^##\s*本轮结论|说明方案/.test(msg)) return
+            if (/【本轮结论】|^##\s*本轮结论|^##\s*Git\s*交付结论|说明方案/.test(msg)) return
             if (!msg) return
             // 沙箱/启动细节：进行中改写为友好占位，禁止静默丢掉导致大块空白
             if (
@@ -4338,7 +5284,12 @@ window.__ModuleLoader__.load({
             // 仅展示去重：连续多条改写成同一句时只留一条，不改 transcript 账本
             if (msg === lastStatusShown) return
             lastStatusShown = msg
-            var busy = streamActive && /同步|请稍候|失败|错误|准备|连接/i.test(msg)
+            // Git commit/push 过程条也要转圈，禁止静默钉死无反馈
+            var busy =
+              streamActive &&
+              /同步|请稍候|失败|错误|准备|连接|commit|push|推送|重试|暂存|分支|核对|读取 Git|已确认|等待/i.test(
+                msg,
+              )
             nodes.push(
               h(
                 'div',
@@ -4411,14 +5362,22 @@ window.__ModuleLoader__.load({
                         statusZh === '失败'
                       var md = String(conclusionMd || resultFields.chatBody || '').trim()
                       if (md) {
-                        return h('p', { className: 'cc-note' }, '本轮结论见下方正文')
+                        return h(
+                          'p',
+                          { className: 'cc-note' },
+                          gitCard ? 'Git 交付结论见下方正文' : '本轮结论见下方正文',
+                        )
                       }
                       // 已终态/已停止：禁止「正在汇总」转圈（结论可能已在下方 hoist）
                       if (stopped) {
                         return h('p', { className: 'cc-note' }, '本轮已停止。')
                       }
                       if (terminal) {
-                        return h('p', { className: 'cc-note' }, '本轮结论见下方正文')
+                        return h(
+                          'p',
+                          { className: 'cc-note' },
+                          gitCard ? 'Git 交付结论见下方正文' : '本轮结论见下方正文',
+                        )
                       }
                       return h(
                         'div',
@@ -4427,9 +5386,11 @@ window.__ModuleLoader__.load({
                         h(
                           'span',
                           null,
-                          serviceRunCard(requirement, workKind)
-                            ? '处理已结束，正在汇总本轮结论…'
-                            : '写码已结束，正在汇总本轮结论…',
+                          gitCard
+                            ? 'Git 交付已结束，正在汇总交付结论…'
+                            : serviceRunCard(requirement, workKind)
+                              ? '处理已结束，正在汇总本轮结论…'
+                              : '写码已结束，正在汇总本轮结论…',
                         ),
                       )
                     })(),
@@ -4538,6 +5499,7 @@ window.__ModuleLoader__.load({
                   )
                 : null,
               renderUserChoicePanel(),
+              renderGitDeliverPanel(),
               // 写码终态仍铺过程。开发操作保持折叠，避免终端流水把结论顶走。
               !isDoneView || !opsCard
                 ? h(
@@ -4565,7 +5527,7 @@ window.__ModuleLoader__.load({
                       ),
                     )
                   : null,
-              showLiveChrome
+              showLiveChrome && workKind !== 'git_deliver'
                 ? h(
                     'div',
                     { className: 'cc-plan' },
@@ -4573,7 +5535,7 @@ window.__ModuleLoader__.load({
                     h('span', null, planLabel),
                   )
                 : null,
-              phase === 'review'
+              phase === 'review' && workKind !== 'git_deliver'
                 ? h(
                     'div',
                     { className: 'cc-review' },
@@ -4856,7 +5818,7 @@ window.__ModuleLoader__.load({
       return false
     }
 
-    /** 最小块：同时含「本轮结论」和「结果：」，且不再套一层同样的块。过程卡内部不算。 */
+    /** 最小块：含「本轮结论」或「Git 交付结论」且含「结果：」；过程卡内部不算。 */
     function findConclusionLeaves(root) {
       if (!root || !root.querySelectorAll) return []
       var hits = []
@@ -4869,7 +5831,7 @@ window.__ModuleLoader__.load({
           if (el.closest && el.closest('[data-cc-dup-conclusion-hidden="1"]')) continue
           var t = String(el.textContent || '')
           if (t.length > 8000 || t.length < 12) continue
-          if (!/本轮结论/.test(t)) continue
+          if (!/本轮结论|Git\s*交付结论/.test(t)) continue
           if (!/结果：/.test(t)) continue
           hits.push(el)
         }
@@ -5231,7 +6193,7 @@ window.__ModuleLoader__.load({
 
     /**
      * 当前底座把 turnTail 声明为 list 槽（select 被忽略）；新版宿主改为 chain，
-     * 注册同时带 select 可兼容两版。只认已闭合、有起止时间的轮次。
+     * 注册同时带 select 可兼容两版。结论只认已闭合轮次。
      */
     function selectConclusionTurn(owner) {
       var turn = owner && owner.turn
@@ -5239,6 +6201,18 @@ window.__ModuleLoader__.load({
       var end = Number(turn && turn.end && turn.end.time) || 0
       if (!start || !end) return null
       return { start: start, end: end }
+    }
+
+    /**
+     * Git 确认卡：进行中也要挂（工具阻塞等人审时 turn 尚未闭合）。
+     * 已闭合轮次同样挂，作 toolview 收起后的兜底。
+     */
+    function selectGitDeliverTurn(owner) {
+      var turn = owner && owner.turn
+      var start = Number(turn && turn.start && turn.start.time) || 0
+      if (!start) return null
+      var end = Number(turn && turn.end && turn.end.time) || 0
+      return { start: start, end: end || Date.now() + 120000 }
     }
 
     /** 服务端返回 items（每轮一条）；旧服务端只有顶层单条。 */
@@ -5267,6 +6241,361 @@ window.__ModuleLoader__.load({
         }
       }
       return best
+    }
+
+    /**
+     * Git 交付确认卡（对话区 turnTail）：不依赖 toolview 是否挂上。
+     * 工具返回后宿主常把 tool 收进「已调用工具」，用户必须在正文区看到可点的确认卡。
+     */
+    function GitDeliverConfirmTurnTail(props) {
+      ensureCss()
+      var sessionId = String((props && props.sessionId) || '').trim()
+      var turn = props && props.turn
+      var turnStart = Number(turn && turn.start && turn.start.time) || 0
+      var turnEnd = Number(turn && turn.end && turn.end.time) || 0
+      var itemState = useState(null)
+      var item = itemState[0]
+      var setItem = itemState[1]
+      var planState = useState(null)
+      var plan = planState[0]
+      var setPlan = planState[1]
+      var selectedState = useState({})
+      var selected = selectedState[0]
+      var setSelected = selectedState[1]
+      var busyState = useState(false)
+      var busy = busyState[0]
+      var setBusy = busyState[1]
+      var errState = useState('')
+      var err = errState[0]
+      var setErr = errState[1]
+      var doneState = useState('')
+      var doneMsg = doneState[0]
+      var setDoneMsg = doneState[1]
+
+      useEffect(
+        function () {
+          var stopped = false
+          function pick(items) {
+            if (!Array.isArray(items) || !items.length) return null
+            var best = null
+            var bestTs = -1
+            var fallback = null
+            var fallbackTs = -1
+            for (var i = 0; i < items.length; i++) {
+              var it = items[i]
+              if (!it || !it.confirm_token || !it.git_plan) continue
+              if (sessionId && it.dsh_session_id && String(it.dsh_session_id) !== sessionId) continue
+              var ts = Date.parse(String(it.updated_at || it.created_at || '')) || 0
+              if (ts > 0 && Date.now() - ts > 30 * 60 * 1000) continue
+              if (ts >= fallbackTs) {
+                fallback = it
+                fallbackTs = ts
+              }
+              // 优先落在本轮时间窗
+              if (turnStart && turnEnd) {
+                if (ts < turnStart - 5000 || ts > turnEnd + 180000) continue
+              }
+              if (ts >= bestTs) {
+                best = it
+                bestTs = ts
+              }
+            }
+            // 时间窗对不齐时：本会话最近 30 分钟内的待确认仍要露出，禁止只剩文案
+            return best || fallback
+          }
+          function pull() {
+            var base = serviceBase()
+            if (!base || !sessionId) return
+            // 须带 session_id：服务端不再返回跨会话 confirm_token
+            var url =
+              base +
+              '/api/cursor-chat/git-deliver/awaiting?session_id=' +
+              encodeURIComponent(sessionId)
+            fetch(url)
+              .then(function (r) {
+                return r.json()
+              })
+              .then(function (d) {
+                if (stopped) return
+                var hit = pick(d && d.items)
+                if (!hit) {
+                  setItem(null)
+                  return
+                }
+                setItem(hit)
+                var g = hit.git_plan || {}
+                setPlan({
+                  remote_url: String(g.remote_url || ''),
+                  current_branch: String(g.current_branch || ''),
+                  target_branch: String(g.target_branch || g.current_branch || ''),
+                  base_branch: String(g.base_branch || 'main'),
+                  commit_message: String(g.commit_message || ''),
+                  create_pr: g.create_pr !== false,
+                  selected_files: Array.isArray(g.selected_files) ? g.selected_files : [],
+                  held_sensitive_files: Array.isArray(g.held_sensitive_files)
+                    ? g.held_sensitive_files
+                    : [],
+                  entries: Array.isArray(g.entries) ? g.entries : null,
+                })
+                var next = {}
+                var files = Array.isArray(g.selected_files) ? g.selected_files : []
+                var held = Array.isArray(g.held_sensitive_files) ? g.held_sensitive_files : []
+                files.forEach(function (p) {
+                  next[p] = true
+                })
+                held.forEach(function (p) {
+                  next[p] = false
+                })
+                if (Array.isArray(g.entries)) {
+                  g.entries.forEach(function (e) {
+                    if (!e || !e.rel) return
+                    next[e.rel] = e.sensitive ? false : e.selected !== false
+                  })
+                }
+                setSelected(next)
+              })
+              .catch(function () {})
+          }
+          pull()
+          var t = setInterval(pull, 1500)
+          return function () {
+            stopped = true
+            clearInterval(t)
+          }
+        },
+        [sessionId, turnStart, turnEnd],
+      )
+
+      if (doneMsg) {
+        return h(
+          'div',
+          { className: 'cc-git-deliver', 'data-cc-git-deliver-tail': '1' },
+          h('p', { className: 'cc-git-title' }, 'Git 交付'),
+          h('p', { className: 'cc-note' }, doneMsg),
+        )
+      }
+      if (!item || !plan) return null
+
+      var heldSet = {}
+      ;(plan.held_sensitive_files || []).forEach(function (p) {
+        heldSet[p] = true
+      })
+      var fileKeys = Object.keys(selected || {})
+      if (!fileKeys.length) {
+        fileKeys = (plan.selected_files || []).concat(plan.held_sensitive_files || [])
+      }
+
+      function onConfirm() {
+        setErr('')
+        var token = String(item.confirm_token || '').trim()
+        if (!token) {
+          setErr('确认令牌缺失，请再说一次「提交代码」')
+          return
+        }
+        var files = Object.keys(selected || {}).filter(function (p) {
+          return selected[p] && !heldSet[p]
+        })
+        if (!files.length) {
+          setErr('请至少勾选一个非敏感文件')
+          return
+        }
+        setBusy(true)
+        var base = serviceBase()
+        fetch(base + '/api/hitl/issue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'cursor-chat.git-deliver',
+            confirm_token: token,
+            workspace: item.workspace,
+          }),
+        })
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (issued) {
+            if (!issued || !issued.ok || !issued.nonce) {
+              throw new Error((issued && issued.detail) || '签发失败')
+            }
+            return fetch(base + '/api/cursor-chat/git-deliver/confirm', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                confirm_token: token,
+                nonce: issued.nonce,
+                selected_files: files,
+                commit_message: plan.commit_message,
+                target_branch: plan.target_branch,
+                base_branch: plan.base_branch,
+                create_pr: plan.create_pr !== false,
+              }),
+            }).then(function (r2) {
+              return r2.json()
+            })
+          })
+          .then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.detail) || '提交失败')
+            if (d.waiting_tool || d.accepted) {
+              // 确认后整卡消失，进度只看 transcript
+              setItem(null)
+              setPlan(null)
+              setDoneMsg('')
+              return
+            }
+            setDoneMsg(d.detail || '已提交')
+            setItem(null)
+          })
+          .catch(function (e) {
+            setErr(String(e && e.message ? e.message : e))
+          })
+          .finally(function () {
+            setBusy(false)
+          })
+      }
+
+      function onCancel() {
+        setBusy(true)
+        var token = String(item.confirm_token || '').trim()
+        var jid = String(item.job_id || '').trim()
+        fetch(serviceBase() + '/api/cursor-chat/git-deliver/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            confirm_token: token,
+            job_id: jid,
+            reason: '用户取消 Git 交付',
+          }),
+        })
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.detail) || '取消失败')
+            setDoneMsg('已取消 Git 交付。工作区改动仍在。')
+            setItem(null)
+          })
+          .catch(function (e) {
+            setErr(String(e && e.message ? e.message : e))
+          })
+          .finally(function () {
+            setBusy(false)
+          })
+      }
+
+      return h(
+        'div',
+        { className: 'cc-git-deliver', 'data-cc-git-deliver-tail': '1' },
+        h('p', { className: 'cc-git-title' }, '确认 Git 交付（人审）'),
+        h(
+          'div',
+          { className: 'cc-git-row' },
+          h('span', { className: 'cc-git-lab' }, '仓库'),
+          h('span', { className: 'cc-git-val' }, plan.remote_url || '—'),
+        ),
+        h(
+          'div',
+          { className: 'cc-git-row' },
+          h('span', { className: 'cc-git-lab' }, '当前分支'),
+          h('span', { className: 'cc-git-val' }, plan.current_branch || '—'),
+        ),
+        h(
+          'div',
+          { className: 'cc-git-row' },
+          h('span', { className: 'cc-git-lab' }, '提交分支'),
+          h('input', {
+            type: 'text',
+            value: String(plan.target_branch || ''),
+            onChange: function (ev) {
+              var v = ev && ev.target ? ev.target.value : ''
+              setPlan(function (prev) {
+                return Object.assign({}, prev || {}, { target_branch: v })
+              })
+            },
+          }),
+        ),
+        h(
+          'div',
+          { className: 'cc-git-row' },
+          h('span', { className: 'cc-git-lab' }, 'PR 基线'),
+          h('input', {
+            type: 'text',
+            value: String(plan.base_branch || ''),
+            onChange: function (ev) {
+              var v = ev && ev.target ? ev.target.value : ''
+              setPlan(function (prev) {
+                return Object.assign({}, prev || {}, { base_branch: v })
+              })
+            },
+          }),
+        ),
+        h(
+          'div',
+          { className: 'cc-git-row' },
+          h('span', { className: 'cc-git-lab' }, '说明'),
+          h('textarea', {
+            value: String(plan.commit_message || ''),
+            onChange: function (ev) {
+              var v = ev && ev.target ? ev.target.value : ''
+              setPlan(function (prev) {
+                return Object.assign({}, prev || {}, { commit_message: v })
+              })
+            },
+          }),
+        ),
+        h('p', { className: 'cc-note' }, '将纳入提交的文件（敏感文件默认不勾选）'),
+        h(
+          'div',
+          { className: 'cc-git-files' },
+          fileKeys.map(function (p) {
+            var sens = !!heldSet[p]
+            return h(
+              'label',
+              { key: p, className: 'cc-git-file' + (sens ? ' sens' : '') },
+              h('input', {
+                type: 'checkbox',
+                checked: !!selected[p],
+                disabled: sens || busy,
+                onChange: function (ev) {
+                  if (sens) return
+                  var on = !!(ev && ev.target && ev.target.checked)
+                  setSelected(function (prev) {
+                    var next = Object.assign({}, prev)
+                    next[p] = on
+                    return next
+                  })
+                },
+              }),
+              h('span', { className: 'cc-git-tick', 'aria-hidden': 'true' }),
+              h('span', null, p + (sens ? '（敏感·已排除）' : '')),
+            )
+          }),
+        ),
+        err ? h('p', { className: 'cc-set-msg err' }, err) : null,
+        h(
+          'div',
+          {
+            className: 'cc-git-actions',
+            ref: function (el) {
+              if (el) applyGitAccentVars(el.closest ? el.closest('.cc-git-deliver') || el : el)
+            },
+          },
+          h(
+            'button',
+            { type: 'button', className: 'cc-set-btn', disabled: busy, onClick: onCancel },
+            '取消',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'cc-set-btn primary',
+              disabled: busy,
+              onClick: onConfirm,
+            },
+            busy ? '提交中…' : '确认提交并开 PR',
+          ),
+        ),
+      )
     }
 
     /**
@@ -5304,16 +6633,20 @@ window.__ModuleLoader__.load({
       var beHintText = item ? String(item.backend_restart_hint || '').trim() : ''
       var jidTail = item ? String(item.id || '').trim() : ''
       var turnRecent = turnEnd > 0 && Date.now() - turnEnd < 180000
-      var syncedList = item
-        ? [].concat(item.synced_files || [], item.files || []).filter(function (p, i, arr) {
-            var s = String(p || '').trim()
-            if (!s) return false
-            // files 可能已含 synced+deleted，下面 deleted 再补；此处先去重
-            return arr.indexOf(p) === i
-          })
-        : []
+      // Git 交付：不走写码「已编辑」卡（成功/失败/取消一律；文件清单只在结论正文）
+      var hideGitChangesList = item && String(item.work_kind || '') === 'git_deliver'
+      var syncedList =
+        hideGitChangesList || !item
+          ? []
+          : [].concat(item.synced_files || [], item.files || []).filter(function (p, i, arr) {
+              var s = String(p || '').trim()
+              if (!s) return false
+              // files 可能已含 synced+deleted，下面 deleted 再补；此处先去重
+              return arr.indexOf(p) === i
+            })
       // files 里可能混了删除项；仍以 deleted_files 为准展示删除标记
-      var deletedList = item && Array.isArray(item.deleted_files) ? item.deleted_files : []
+      var deletedList =
+        hideGitChangesList || !item || !Array.isArray(item.deleted_files) ? [] : item.deleted_files
       if (deletedList.length && syncedList.length) {
         var delSet = {}
         for (var di = 0; di < deletedList.length; di++) {
@@ -5452,19 +6785,42 @@ window.__ModuleLoader__.load({
             setSkipNative(false)
             return
           }
+          var hideGit = item && String(item.work_kind || '') === 'git_deliver'
+          // Git 交付：底座若误出写码「已编辑」卡一律藏掉（成功文件清单只在结论正文）
+          if (hideGit) {
+            var nativeHide = findSiblingNativeChangesCard(host)
+            if (nativeHide && nativeHide.setAttribute) {
+              nativeHide.setAttribute('data-cc-git-cancel-hide', '1')
+              nativeHide.style.display = 'none'
+            }
+            setSkipNative(true)
+            return
+          }
           // 仅当同级已有底座原生卡时跳过兜底；误判会永久吃掉文件列表，禁止扫正文模糊匹配
           var native = findSiblingNativeChangesCard(host)
           setSkipNative(Boolean(native))
         },
-        [jidTail, syncedList.length, deletedList.length, md],
+        [jidTail, syncedList.length, deletedList.length, md, item && item.work_kind, item && item.status],
       )
 
       if (!payload || !item) return null
-      if (!md || md.indexOf('本轮结论') < 0) return null
+      // 按 work_kind 分流：写码只挂「本轮结论」，提交代码只挂「Git 交付结论」
+      var kindTail = String(item.work_kind || '')
+      md = concludeMdForWorkKind(md, kindTail)
+      if (!md) return null
+      if (kindTail === 'git_deliver') {
+        if (md.indexOf('Git 交付结论') < 0) return null
+      } else if (md.indexOf('本轮结论') < 0) {
+        return null
+      }
       ensureCss()
+      // Git 交付：永不套写码「已编辑」卡（不影响 code/ops）
+      var hideGitChanges = kindTail === 'git_deliver'
       // 路径清单不进正文：优先底座原生「已编辑」卡；沙箱写码通常无原生 deliverables，结论下必须兜底
       var showChangesFallback =
-        !skipNative && (syncedList.length > 0 || deletedList.length > 0)
+        !hideGitChanges &&
+        !skipNative &&
+        (syncedList.length > 0 || deletedList.length > 0)
 
       function runTailRestartManual() {
         if (!jidTail || !beOffer || beOffer.started_at || beBusy) return
@@ -6044,7 +7400,18 @@ window.__ModuleLoader__.load({
           CursorCodingSettingsSection,
         )
       })
-      // 「已完成」下方、原生改动卡之前：挂回本轮结论（不改宿主 DOM）
+      // 「已完成」下方：Git 确认卡（先于结论），再挂本轮结论
+      ctx.slots.inject('conversation.chat.turnTail', function () {
+        return ctx.slots.register(
+          {
+            name: 'conversation.chat.turnTail',
+            id: '@zhongruan/dsh-cursor-chat/git-deliver',
+            order: -30,
+            select: selectGitDeliverTurn,
+          },
+          GitDeliverConfirmTurnTail,
+        )
+      })
       ctx.slots.inject('conversation.chat.turnTail', function () {
         return ctx.slots.register(
           {
@@ -6056,8 +7423,8 @@ window.__ModuleLoader__.load({
           ConclusionTurnTail,
         )
       })
-      // 只挂 begin/continue：wait 用宿主通用行展示 chat_body，禁止再挂 form「正在开工」卡
-      ;['zr_cchat_begin', 'zr_cchat_continue'].forEach(function (toolKey) {
+      // 写码/续改/Git 交付共用进度卡；用 select 兼容 key 匹配失败的宿主
+      ;['zr_cchat_begin', 'zr_cchat_continue', 'zr_cchat_git_deliver'].forEach(function (toolKey) {
         ctx.slots.inject('tool.call.toolview', function () {
           return ctx.slots.register(
             { name: 'tool.call.toolview', key: toolKey },
@@ -6065,7 +7432,25 @@ window.__ModuleLoader__.load({
           )
         })
       })
-      console.log('[cursor-chat] 已注册设置页 + 写码进度卡 + turnTail 结论')
+      ctx.slots.inject('tool.call.toolview', function () {
+        return ctx.slots.register(
+          {
+            name: 'tool.call.toolview',
+            id: '@zhongruan/dsh-cursor-chat/git-deliver-view',
+            order: -5,
+            select: function (props) {
+              var n = ''
+              try {
+                var b = props && props.block
+                n = String((b && (b.name || b.toolName || b.tool_name)) || (props && props.key) || '').trim()
+              } catch (e0) {}
+              return n === 'zr_cchat_git_deliver' || /zr_cchat_git_deliver$/.test(n)
+            },
+          },
+          CursorCodingBeginCard,
+        )
+      })
+      console.log('[cursor-chat] 已注册设置页 + 写码进度卡 + Git 交付确认 + turnTail 结论')
     }
 
     module.exports = { inject: ['slots'], apply: apply }
