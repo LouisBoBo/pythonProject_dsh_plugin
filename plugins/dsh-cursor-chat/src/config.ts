@@ -20,7 +20,16 @@ function emptyConfig(): CursorCodingConfig {
     gitHostToken: '',
     writeScope: [],
     model: 'composer-2.5',
+    gitDeliverReviewBackend: 'embedded',
   }
+}
+
+function asReviewBackend(v: unknown): CursorCodingConfig['gitDeliverReviewBackend'] {
+  const s = String(v || '')
+    .trim()
+    .toLowerCase()
+  if (s === 'workbuddy' || s === 'embedded' || s === 'off') return s
+  return 'embedded'
 }
 
 function configPath(dataRoot?: string): string {
@@ -79,6 +88,9 @@ export function loadConfig(): CursorCodingConfig {
       asString(disk.gitHostToken, base.gitHostToken),
     writeScope: asStringArray(disk.writeScope),
     model: env.CURSOR_CHAT_MODEL || asString(disk.model, base.model) || 'composer-2.5',
+    gitDeliverReviewBackend: asReviewBackend(
+      env.CURSOR_CHAT_GIT_REVIEW_BACKEND || disk.gitDeliverReviewBackend || base.gitDeliverReviewBackend,
+    ),
   }
   ensureDataDirs(cfg)
   return cfg
@@ -87,7 +99,14 @@ export function loadConfig(): CursorCodingConfig {
 export type ConfigPatch = Partial<
   Pick<
     CursorCodingConfig,
-    'listen' | 'port' | 'dataRoot' | 'cursorApiKey' | 'gitHostToken' | 'writeScope' | 'model'
+    | 'listen'
+    | 'port'
+    | 'dataRoot'
+    | 'cursorApiKey'
+    | 'gitHostToken'
+    | 'writeScope'
+    | 'model'
+    | 'gitDeliverReviewBackend'
   >
 >
 
@@ -107,6 +126,7 @@ export function saveConfig(partial: ConfigPatch): CursorCodingConfig {
     gitHostToken: next.gitHostToken,
     writeScope: next.writeScope,
     model: next.model,
+    gitDeliverReviewBackend: next.gitDeliverReviewBackend,
   }
   const path = configPath(next.dataRoot)
   writeFileSync(path, JSON.stringify(toDisk, null, 2) + '\n', {

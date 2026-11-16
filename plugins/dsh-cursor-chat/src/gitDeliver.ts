@@ -54,6 +54,9 @@ export type GitDeliverResult = {
   pr_url: string
   pr_manual_hint: string
   committed_files: string[]
+  /** 开 PR 后贴审码评论的结果（可选） */
+  pr_comment_ok?: boolean
+  pr_comment_detail?: string
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -711,6 +714,76 @@ async function createPrWithGhCli(opts: {
   })
 }
 
+/** 从 PR URL 解析序号（GitHub/Gitee /pull/N 或 /pulls/N） */
+export function parsePrNumberFromUrl(prUrl: string): number {
+  const m = String(prUrl || '').match(/\/pulls?\/(\d+)\b/i)
+  if (!m) return 0
+  const n = Number(m[1])
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/**
+ * 把审码报告贴到已开 PR 的评论区（Issue Comment）。
+ * 需要 Token；失败不回滚 PR。只认权威 Token 配置，不扫正文。
+ */
+export async function postPrReviewComment(opts: {
+  remoteUrl: string
+  prUrl: string
+  body: string
+}): Promise<{ ok: boolean; detail: string }> {
+  const body = String(opts.body || '').trim()
+  if (!body) return { ok: false, detail: '审码评论正文为空' }
+  const prNumber = parsePrNumberFromUrl(opts.prUrl)
+  if (!prNumber) return { ok: false, detail: '无法从 PR 链接解析编号' }
+  const parsed = parseGitHosting(opts.remoteUrl)
+  if (!parsed || parsed.kind === 'unknown') {
+    return { ok: false, detail: '未能识别托管平台，无法贴 PR 评论' }
+  }
+  try {
+    const { loadConfig, gitHostTokenReady } = await import('./config.js')
+    const cfg = loadConfig()
+    if (!gitHostTokenReady(cfg)) {
+      return { ok: false, detail: '未配置 Git Token，跳过 PR 审码评论' }
+    }
+    const token = cfg.gitHostToken.trim()
+    if (parsed.kind === 'github') {
+      const res = await fetch(
+        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${prNumber}/comments`,
+        {
+          method: 'POST',
+          headers: {
+            Accept: 'application/vnd.github+json',
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'dsh-cursor-chat',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+          body: JSON.stringify({ body: body.slice(0, 60_000) }),
+        },
+      )
+      if (res.ok) return { ok: true, detail: '已写入 PR 评论' }
+      const raw = await res.text()
+      return { ok: false, detail: `GitHub 评论失败：${raw.slice(0, 200)}` }
+    }
+    const res = await fetch(
+      `https://gitee.com/api/v5/repos/${parsed.owner}/${parsed.repo}/pulls/${prNumber}/comments`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'dsh-cursor-chat' },
+        body: JSON.stringify({
+          access_token: token,
+          body: body.slice(0, 60_000),
+        }),
+      },
+    )
+    if (res.ok) return { ok: true, detail: '已写入 PR 评论' }
+    const raw = await res.text()
+    return { ok: false, detail: `Gitee 评论失败：${raw.slice(0, 200)}` }
+  } catch (e) {
+    return { ok: false, detail: `贴 PR 评论异常：${String((e as Error)?.message || e).slice(0, 180)}` }
+  }
+}
+
 /**
  * 开 PR 优先级：设置页 Git Token（产品主路径）→ 本机 gh（可选）→ 手动 Compare 链接。
  * 失败不回滚 push。
@@ -770,16 +843,35 @@ export function isGitDeliverIdleDetail(detail: string, code?: string): boolean {
 }
 
 export function formatGitDeliverConclusion(opts: {
-  status: 'succeeded' | 'failed' | 'cancelled' | 'idle'
+  status: 'succeeded' | 'failed' | 'cancelled' | 'idle' | 'paused'
   plan?: GitDeliverPlan | null
   result?: GitDeliverResult | null
   cancelDetail?: string
   /** 空结果/自定义说明；有则优先生效，避免固定失败模板误导 */
   detail?: string
   code?: string
+  /** 审码闸暂停时的高危摘要 */
+  riskSummary?: string
+  highTitles?: string[]
 }): string {
   // 与写码「## 本轮结论」区分：Git 专用标题，避免结论区叠两套模板
   const lines: string[] = ['## Git 交付结论', '']
+  if (opts.status === 'paused') {
+    // 极简终态：说明固定为「用户选择暂停」，禁止拼引擎/URL/恢复建议（会诱使模型追问）
+    lines.push(`结果：⏸ 已暂停提交。工作区改动仍在，未执行 commit / push。`)
+    lines.push(``)
+    lines.push(`说明：`)
+    lines.push(`• 用户选择暂停提交`)
+    const titles = opts.highTitles || []
+    if (titles.length) {
+      lines.push(`• 高危项：`)
+      for (const t of titles.slice(0, 8)) lines.push(`  - ${t}`)
+      if (titles.length > 8) lines.push(`  - …共 ${titles.length} 项`)
+    }
+    lines.push(``)
+    lines.push(`本轮已结束。`)
+    return lines.join('\n') + '\n'
+  }
   if (opts.status === 'cancelled') {
     lines.push(`结果：⏹ 已取消 Git 交付。工作区改动仍在，未执行 commit。`)
     lines.push(``)
@@ -869,6 +961,8 @@ export function formatGitDeliverConclusion(opts: {
   }
   if (result.pr_url) lines.push(`• PR：${result.pr_url}`)
   else if (result.pr_manual_hint) lines.push(`• ${result.pr_manual_hint}`)
+  if (result.pr_comment_ok) lines.push(`• 审码报告已写入 PR 评论`)
+  else if (result.pr_comment_detail) lines.push(`• 审码评论：${result.pr_comment_detail}`)
   lines.push(``)
   lines.push(`请你验收：`)
   lines.push(`1. 在托管平台核对分支与 commit。`)

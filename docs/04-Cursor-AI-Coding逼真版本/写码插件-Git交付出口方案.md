@@ -1,16 +1,17 @@
 # 写码插件 · Git 交付出口方案
 
-> **日期**：2026-11-16  
-> **状态**：产品口径已定；**v1 已实现**（`zr_cchat_git_deliver` + **中间件阻塞人审**；默认同步主路径不动）  
+> **日期**：2026-11-16（v1.1：提交前本批审码闸）  
+> **状态**：产品口径已定；**v1 已实现**；**v1.1 审码闸按本文实施**（仅 `git_deliver` 车道；写码 begin/continue / 默认同步主路径不动）  
 > **包**：`@zhongruan/dsh-cursor-chat`  
-> **关联**：[对标企业级AI-Coding-差距与排期.md](./对标企业级AI-Coding-差距与排期.md)、[Cursor写码插件-主流程冻结.md](./Cursor写码插件-主流程冻结.md)
+> **关联**：[对标企业级AI-Coding-差距与排期.md](./对标企业级AI-Coding-差距与排期.md)、[Cursor写码插件-主流程冻结.md](./Cursor写码插件-主流程冻结.md)  
+> **演进（B）**：本机 WorkBuddy `:8000` 不可依赖、禁止 Cursor 自审 → 见 [Git交付-本批审码引擎内嵌-B方案立项.md](./Git交付-本批审码引擎内嵌-B方案立项.md)（旁路包 + 仅接 `git_deliver`；默认开关安全）
 
 ---
 
 ## 0. 一句话
 
 **平时改码：默认同步到工作区（现状不动）。**  
-**仅当用户明确要「提交代码 / 开 PR」时**：再走 **分支 → 人审确认 → commit → push → 开 PR**。  
+**仅当用户明确要「提交代码 / 开 PR」时**：再走 **确认卡 → 本批审码闸 →（无高危）commit / push / 开 PR**。  
 不是每一次写码都强制 PR。
 
 ---
@@ -38,19 +39,20 @@
 Git 出口（按需，本方案）
   用户明确「提交 / 开 PR」
     → 读工作区 git 状态（含此前多轮已同步未提交改动）
-    → 新建分支（若需要）
     → 确认卡：将提交文件清单 + 说明（人审）
     → 用户确认（HITL nonce）
-    → git add / commit
-    → push
-    → 开 PR/MR
-    → 结论给出分支名、commit、PR 链接
+    → 【v1.1】只审本批勾选文件（WorkBuddy /api/code-review，带 files）
+         → 无高危：commit → push → 开 PR → 报告贴 PR 评论（有 Token 时）
+         → 有高危：停下问用户
+              → 修：仅修本批高危 → 再审 → 通过才继续（最多 2 轮）
+              → 不修：暂停提交（不 commit、不 push）
+    → 结论给出分支名、commit、PR 链接 / 或暂停原因
 ```
 
 | 出口 | 触发 | 结果 |
 | --- | --- | --- |
 | **工作区同步** | 普通写码 / 续改 | 真工程文件已改，git 未动 |
-| **Git 交付** | 明确提交意图 | 分支 + 人审确认 + commit + PR |
+| **Git 交付** | 明确提交意图 | 确认 + **本批审码闸** + commit + PR |
 
 组织写权限、强制全员 PR：**后置**，不进本方案 v1。
 
@@ -79,25 +81,38 @@ Git 出口（按需，本方案）
 
 ---
 
-## 4. 人审（v1）
+## 4. 人审与审码闸
 
-v1 的「代码审核」= **确认卡人审**，不是自动 Reviewer SubAgent。
+### 4.1 确认卡人审（v1，保留）
 
 实现口径（与 `ask_user_choice` 同级中间件，**不改写码 begin/continue**）：
 
-1. `zr_cchat_git_deliver` **prepare 后阻塞** `waitForGitDeliverConfirm`，工具不提前返回（提前返回会导致宿主收起 toolview，确认卡一闪即失）  
+1. `zr_cchat_git_deliver` **prepare 后阻塞** `waitForGitDeliverConfirm`，工具不提前返回  
 2. 进度卡经 `jobs-by-call` / `pending-latest` / SSE 水合绿色确认 UI  
-3. 用户点确认 → HITL nonce → 唤醒 waiter → 工具进程内 `commit` / `push` / 开 PR → 再返回结论  
+3. 用户点确认 → HITL nonce → 唤醒 waiter → **先审码闸，再**（通过后）`commit` / `push` / 开 PR  
 
-确认卡至少展示：
+确认卡至少展示：仓库 / 分支 / 勾选文件 / 说明 / 基线；按钮：确认提交并开 PR / 取消。
 
-- 目标仓库 / 当前分支 → 将创建的分支名  
-- 将纳入提交的文件列表（来自 `git status`，可勾选）  
-- 提交说明草稿（可改）  
-- 目标 PR 基线分支（默认 `main`/`master`，可配置）  
-- 按钮：确认提交并开 PR / 取消  
+### 4.2 本批审码闸（v1.1）
 
-自动审码 / PR 评论机器人：**后置**。
+| 点 | 口径 |
+| --- | --- |
+| 时机 | **确认卡通过之后、commit 之前**（高危不得进本地提交叙事） |
+| 范围 | **仅本批勾选待提交文件**（`files=` 传引擎）；不是全仓扫 |
+| 引擎 | 现有 WorkBuddy `POST /api/code-review/list` → `run`（结构化 `findings` / `high_count` / `ok`） |
+| 高危定义 | 只认权威字段：`severity ∈ {critical,high}` 计数，或引擎 `high_count` / `blocker_count` / `ok===false` 且带 findings；**禁止**用报告正文正则猜「高危」 |
+| 无高危 | 继续 commit → push → 开 PR；有 Token 时把审码摘要/报告贴到 **PR 评论** |
+| 有高危 | 停：二次人审卡「修复高危 / 暂停提交」 |
+| 修 | 开独立写码 Job（无二次写码确认卡；`write_scope` 收窄到本批相关文件）→ 同步后 **再审本批** → 通过才继续；最多 **2** 轮 |
+| 不修 | **暂停**：不 commit、不 push；结论写明高危摘要；工作区改动保留 |
+| 引擎不可用 / 审码技术失败 | **二次人审**：卡上说明不可达；可选「仍继续提交」或「暂停」——**禁止**静默吞掉整次交付；有高危时仍不可跳过 |
+| 与 remote-review | **不叠跑**：本闸在聊天 Git 交付内；Hook/push→飞书仍归 `dsh-remote-review` |
+| 隔离 | 只改 `work_kind=git_deliver`；写码 / ops / 默认同步路径零改动 |
+
+二次人审卡按钮（权威字段 `decision=fix|pause`，HITL `cursor-chat.git-deliver-risk`）：
+
+- **修复高危**  
+- **暂停提交**
 
 ---
 
@@ -115,15 +130,16 @@ v1 的「代码审核」= **确认卡人审**，不是自动 Reviewer SubAgent�
 
 ## 6. 建议执行顺序（实现时）
 
-1. 校验：目录是 git 仓；工作区干净冲突可解析；有可提交变更  
-2. `git checkout -b dsh/…`（或用户指定分支名；已在功能分支可配置「不新建」）  
-3. 列出候选文件 → 确认卡  
-4. 用户确认 → `git add`（仅勾选）→ `git commit`  
-5. `git push -u`  
-6. 调用托管方开 PR（GitHub / Gitee）：优先读 **设置 → AI写码** 同页的 Git 托管 Token（与 Cursor Key 同文件 `~/.zhongruan/cursor-chat/config.json`）；其次本机 `gh`（可选）；均无则 push 成功 + 结论给 Compare 手动开 PR 链接——**不在插件推送页再要一套密钥，也不要求用户装 CLI**  
-7. 结论：分支、commit short sha、PR URL  
+1. 校验：目录是 git 仓；有可提交变更  
+2. 列出候选文件 → 确认卡  
+3. 用户确认 → **本批审码闸**（list + run，`files=勾选`）  
+4. 有高危 → 二次人审：修（写码 Job→再审，≤2 轮）/ 暂停  
+5. 无高危 → `git add`（仅勾选）→ `git commit` → 建分支（若需要）  
+6. `git push -u`  
+7. 开 PR（Token → gh → Compare）；有 PR 时贴审码报告评论  
+8. 结论：分支、commit、PR / 或暂停+高危摘要  
 
-失败分级：分支已建未提交 / 已提交未推 / 已推未开 PR — 结论写清停在哪一步。
+失败分级：审码闸暂停 / 分支已建未提交 / 已提交未推 / 已推未开 PR — 结论写清停在哪一步。
 
 ---
 
@@ -132,18 +148,22 @@ v1 的「代码审核」= **确认卡人审**，不是自动 Reviewer SubAgent�
 | 用例 | 期望 |
 | --- | --- |
 | 普通改文案 | 只同步工作区；无 commit / PR |
-| 「把当前改动提交并开 PR」 | 确认卡 → 确认后有分支、commit、PR（或 push 成功 + 手动开 PR 说明） |
-| 无 git / 无改动 | 失败结论，工作区不被乱改 |
-| 勾选排除某文件 | 该文件不进 commit |
-| `.env` 在未跟踪里 | 不得被 add |
+| 「提交并开 PR」且无高危 | 确认 → 审码 → commit/push/PR；PR 可有审码评论 |
+| 本批有高危 → 暂停 | 不 commit；结论含高危摘要 |
+| 本批有高危 → 修复后通过 | 修码 → 再审通过 → 才 commit/PR |
+| 写码主路径 | begin/continue / 默认同步行为不变 |
+| 勾选排除 / `.env` | 不进 commit；审码也不带敏感未勾选文件 |
 
 ---
 
-## 8. 明确不做（本方案 v1）
+## 8. 明确不做
 
 - 每次写码强制开 PR  
-- 扫正文猜「提交」当控制信号  
+- 扫正文猜「提交」或「高危」当控制信号  
 - 让 Cursor 在写码轮次里自行 commit/push  
+- 全仓审码当提交闸（本闸只审本批）  
+- 高危静默自动修完再推（必须二次人审）  
+- 与 `dsh-remote-review` 同一次推送叠两套审  
 - 组织强制「必须 PR」策略（后置）  
 - 完整 IDE Diff / 第二套 Git GUI  
 

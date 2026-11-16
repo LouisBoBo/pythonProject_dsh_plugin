@@ -527,6 +527,13 @@ const GIT_DELIVER_MODEL_STOP =
   '禁止再写任何结论段落（含本轮结论 / Git 交付结论 / 任务结果 / 具体行为 / 如何继续 / 结果：）。' +
   '禁止再出选择题，禁止 ask_user_question，禁止再调工具或自行 git。回复留空。'
 
+/** 暂停提交：任务已终态；禁止再调工具 / 出选择题（否则会出现「提交被卡住」卡） */
+const GIT_DELIVER_MODEL_STOP_PAUSED =
+  GIT_DELIVER_MODEL_STOP +
+  '本次用户已选择暂停提交，任务已结束（未 commit）。' +
+  '禁止再调用 zr_cchat_git_deliver，禁止 ask_user_question，禁止出任何选择题或「要怎么处理」。' +
+  '禁止排查审码引擎、禁止建议跳过审码。须等用户发新消息明确要求提交后再调。回复留空。'
+
 /**
  * 聊天正文门禁：确认卡/进度过程中正文为空；
  * begin/continue/finish 在 done=true 时输出「本轮结论」（凡写码必有结论）。
@@ -535,6 +542,10 @@ const GIT_DELIVER_MODEL_STOP =
 function chatBodyRender(_args: unknown, value: unknown) {
   const v = asToolValue(value)
   if (!v) return textBlocks('')
+  // 暂停终态：模型必须看见硬停止正文（空返回/只靠 model_next 仍会追问选择题）
+  if (v.paused === true) {
+    return textBlocks(GIT_DELIVER_MODEL_STOP_PAUSED)
+  }
   // 须澄清：模型必须看见下一步（否则空返回会编造「已发出确认卡」）；聊天卡由 toolview 藏掉
   if (v.need_clarify === true) {
     const hint =
@@ -1436,6 +1447,7 @@ export function apply(ctx: Context) {
         '【Cursor 写码·Git 交付出口】仅当用户明确要提交代码 / commit / 开 PR / 提 MR / 推上去让人审时调用。' +
         '读取当前工作区未提交改动，出绿色确认卡（默认展示当前仓库地址与分支）；本工具阻塞等人审，用户点确认后才 commit → push → 尝试开 PR 并返回结论。' +
         '推送遇网络瞬断会在工具内自动重试；重试耗尽后结论已在 chat_body，禁止再出「推送失败如何处理」等选择题。' +
+        '若返回 paused=true（用户点了暂停提交）：任务已结束，禁止 ask_user_question，禁止出选择题，禁止再调本工具或排查审码引擎，回复留空。' +
         '普通改码/续改请用 zr_cchat_begin/continue，禁止用本工具代替写码，禁止自行 bash git commit。' +
         '进度卡会展示确认 UI；禁止复述仓库/分支清单，禁止写「已生成确认卡」，确认前不要再调其它工具。',
       parameters: {
@@ -1524,6 +1536,37 @@ export function apply(ctx: Context) {
               entries: plan.entries,
             }
           : null
+        // 暂停=用户选择的终态成功收口，禁止 ok:false（否则模型当故障继续追问）
+        if (out.paused === true) {
+          return asJson({
+            ok: true,
+            paused: true,
+            cancelled: true,
+            started: true,
+            done: true,
+            show_error: false,
+            suppress_conclusion: true,
+            job_id: job?.id || '',
+            confirm_token: out.confirm_token || '',
+            status: 'cancelled',
+            // 模型可见 detail 不得含引擎地址 / 恢复建议
+            detail: '用户已暂停提交，任务已结束（未 commit）',
+            // 用户结论仍给 turnTail；render 对 paused 只吐硬停止文案
+            chat_body: out.conclusion,
+            source: 'cursor_chat',
+            model_next: GIT_DELIVER_MODEL_STOP_PAUSED,
+            cursor_chat_ui: {
+              kind: 'git_deliver',
+              job_id: job?.id || '',
+              workspace: abs,
+              requirement: reqText,
+              confirm_token: out.confirm_token || '',
+              service: base,
+              status: 'cancelled',
+              git_plan: null,
+            },
+          })
+        }
         if (!out.ok) {
           const cancelled = out.cancelled === true
           const detailText = String(out.detail || '')

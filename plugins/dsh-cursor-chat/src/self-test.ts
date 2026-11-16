@@ -264,8 +264,11 @@ async function main() {
       isTransientGitNetworkError,
       isGitDeliverIdleDetail,
     } = await import('./gitDeliver.js')
-    const { _resetGitDeliverWaitForTests, waitForGitDeliverConfirm, confirmGitDeliverWait } =
+    const { _resetGitDeliverWaitForTests, waitForGitDeliverConfirm, confirmGitDeliverWait, decideGitDeliverRisk, waitForGitDeliverRisk } =
       await import('./gitDeliverWait.js')
+    const { evaluateBatchReviewPayload, isHighSeverity, countHighFindings } =
+      await import('./gitDeliverReview.js')
+    const { parsePrNumberFromUrl } = await import('./gitDeliver.js')
     const { runJobBackground } = await import('./orchestrator/runJob.js')
     const { createJob, loadJob } = await import('./jobs.js')
 
@@ -310,6 +313,82 @@ async function main() {
     assert(!/❌/.test(idleConc), '无改动不得打红叉')
     assert(!/停在：检视/.test(idleConc), '无改动不得写停在检视')
     assert(!/冲突\/鉴权/.test(idleConc), '无改动不得套冲突鉴权验收')
+
+    // 本批审码闸：只认结构化 severity / high_count
+    assert(isHighSeverity('critical') && isHighSeverity('high') && isHighSeverity('P0'), 'critical/high/P0 须认高危')
+    assert(!isHighSeverity('medium') && !isHighSeverity('low'), '中低危不得当高危')
+    const passJudge = evaluateBatchReviewPayload({
+      ok: true,
+      high_count: 0,
+      medium_count: 1,
+      findings: [{ file: 'a.ts', severity: 'medium', title: 'x' }],
+    })
+    assert(passJudge.passed && passJudge.high_count === 0, '无高危须放行')
+    const blockJudge = evaluateBatchReviewPayload({
+      ok: false,
+      high_count: 2,
+      findings: [
+        { file: 'a.ts', severity: 'high', title: '注入' },
+        { file: 'b.ts', severity: 'critical', title: '越权' },
+        { file: 'c.ts', severity: 'low', title: '命名' },
+      ],
+    })
+    assert(!blockJudge.passed && blockJudge.high_count >= 2, '有高危须挡')
+    assert(countHighFindings(blockJudge.findings) === 2, '高危计数只认 critical/high')
+    assert(parsePrNumberFromUrl('https://github.com/o/r/pull/42') === 42, 'PR 号解析')
+    const pausedConc = formatGitDeliverConclusion({
+      status: 'paused',
+      detail: '存在 2 处高危，用户选择暂停',
+      riskSummary: '高危 2',
+      highTitles: ['a.ts — 注入'],
+    })
+    assert(/已暂停提交/.test(pausedConc) && /未执行 commit/.test(pausedConc), '暂停结论须明确未 commit')
+    assert(/a\.ts — 注入/.test(pausedConc), '暂停结论须列高危项')
+    assert(!/接下来你可以/.test(pausedConc), '暂停结论禁止「接下来你可以」诱出选择题')
+    assert(/本轮已结束/.test(pausedConc), '暂停结论须声明本轮已结束')
+    assert(!/仍继续提交|审码引擎|8000|WorkBuddy|fetch failed/i.test(pausedConc), '暂停结论禁止引擎/恢复诱因')
+    const pausedEngineConc = formatGitDeliverConclusion({
+      status: 'paused',
+      detail: '用户选择暂停提交（审码引擎不可用）http://127.0.0.1:8000：fetch failed',
+    })
+    assert(
+      /用户选择暂停提交/.test(pausedEngineConc) &&
+        !/127\.0\.0\.1|审码引擎|fetch|8000|不可用/i.test(pausedEngineConc),
+      '暂停结论说明须固定为用户暂停，不透传引擎细节',
+    )
+    _resetGitDeliverWaitForTests()
+    const riskP = waitForGitDeliverRisk({ confirmToken: 'pcf-risk-test', ttlMs: 60_000 })
+    const riskDecided = decideGitDeliverRisk('pcf-risk-test', 'pause', '自测暂停')
+    assert(riskDecided.ok, '风险决策须可落盘')
+    const riskOut = await riskP
+    assert(riskOut.ok === false && riskOut.decision === 'pause', '风险等待须收到 pause')
+    _resetGitDeliverWaitForTests()
+    {
+      const { findRecentPausedGitDeliver } = await import('./launchGitDeliver.js')
+      const pauseWs = mkdtempSync(join(tmpdir(), 'cc-git-pause-'))
+      const pauseSid = 'session-pause-reentry-test'
+      const pauseJob = createJob({
+        workspace: pauseWs,
+        requirement: '提交代码',
+        work_kind: 'git_deliver',
+        dsh_session_id: pauseSid,
+      })
+      patchJob(pauseJob.id, {
+        status: 'cancelled',
+        detail: '用户选择暂停提交（审码引擎不可用）',
+        assistant_text: '## Git 交付结论\n\n结果：⏸ 已暂停提交',
+        conclusion_delivered: true,
+        git_deliver: { stage: 'paused', risk_kind: 'engine_unavailable' },
+      })
+      const hit = findRecentPausedGitDeliver(pauseSid, pauseWs)
+      assert(hit && hit.id === pauseJob.id, '同会话暂停后须命中重入守卫')
+      assert(findRecentPausedGitDeliver('session-other', pauseWs) === null, '异会话不得误挡')
+      try {
+        rmSync(pauseWs, { recursive: true, force: true })
+      } catch {
+        /* ignore */
+      }
+    }
     const autoMsg = summarizeCommitFromChanges({
       files: ['backend/app/main.py', 'README.md', 'backend/app/schemas.py'],
       entries: [
@@ -464,11 +543,71 @@ async function main() {
     assert(clientSrc.includes('gitPostConfirmLabel'), 'Git 进度文案须专用，禁止写码中')
     assert(clientSrc.includes("=== 'git_deliver'"), 'Git 交付不得套写码已编辑卡')
     assert(clientSrc.includes('hideGitChanges'), 'Git 交付须屏蔽已编辑兜底卡')
+    assert(clientSrc.includes('await_risk'), '高危二次人审卡须认 risk_gate')
+    assert(clientSrc.includes('git-deliver-risk') || clientSrc.includes('risk-decision'), '高危决策须打 risk API')
+    assert(clientSrc.includes('修复高危') && clientSrc.includes('暂停提交'), '高危卡须有修复/暂停按钮')
+    assert(clientSrc.includes('正在审码本批'), '确认后进度须提示审码闸')
+    assert(clientSrc.includes('pickLiveStatusId') || clientSrc.includes('liveStatusId'), '进度条只转最新一条')
+    assert(clientSrc.includes('只转最新一条'), '禁止历史进度条同时转圈')
+    assert(
+      clientSrc.includes("decision === 'pause'") && clientSrc.includes("setPhase('done')"),
+      '点暂停须立刻 phase=done，禁止再转读取 Git',
+    )
+    assert(clientSrc.includes("g.stage === 'paused'"), '面板须认 stage=paused 为已结束')
     const launchSrcEarly = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'launchGitDeliver.ts'),
       'utf8',
     )
     assert(launchSrcEarly.includes('onProgress'), '推送重试须推进度')
+    assert(launchSrcEarly.includes('runBatchCodeReview'), '交付须调用本批审码')
+    assert(launchSrcEarly.includes('waitForGitDeliverRisk'), '高危须二次人审等待')
+    assert(launchSrcEarly.includes('runGitDeliverHighFix'), '高危修复须有独立写码入口')
+    assert(launchSrcEarly.includes('resolveGitDeliverReviewBackend'), '须有审码后端开关')
+    assert(launchSrcEarly.includes("=== 'off'"), '关闸须认 backend=off 并跳过审码')
+    {
+      const { resolveGitDeliverReviewBackend, runBatchCodeReview } = await import(
+        './gitDeliverReview.js',
+      )
+      assert(resolveGitDeliverReviewBackend() === 'embedded', '默认须 embedded（公司网关审码）')
+      const prevBackend = process.env.CURSOR_CHAT_GIT_REVIEW_BACKEND
+      process.env.CURSOR_CHAT_GIT_REVIEW_BACKEND = 'off'
+      try {
+        assert(resolveGitDeliverReviewBackend() === 'off', 'env 可强制 off')
+        const skipped = await runBatchCodeReview({
+          workspace: gitRoot,
+          files: ['a.ts'],
+        })
+        assert(skipped.passed === true && skipped.engine === 'off', 'off 须直接视为通过且不调引擎')
+        assert(skipped.unavailable === false, 'off 不得标 unavailable 进人审卡')
+      } finally {
+        if (prevBackend === undefined) delete process.env.CURSOR_CHAT_GIT_REVIEW_BACKEND
+        else process.env.CURSOR_CHAT_GIT_REVIEW_BACKEND = prevBackend
+      }
+      const reviewSrc = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gitDeliverReview.ts'),
+        'utf8',
+      )
+      assert(reviewSrc.includes('runEmbeddedBatchReview'), 'embedded 须走旁路子进程')
+      assert(reviewSrc.includes('DSH_BATCH_REVIEW_ROOT'), 'embedded 须可配置旁路根目录')
+      assert(!/api\.deepseek\.com/.test(reviewSrc), '写码插件审码适配器禁止写死 DeepSeek 官网')
+    }
+    const fixSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gitDeliverFix.ts'),
+      'utf8',
+    )
+    assert(/dsh_session_id:\s*null/.test(fixSrc), '高危修复 Job 不得绑 session，以免 begin 复用误吃')
+    assert(/dsh_call_id:\s*null/.test(fixSrc), '高危修复 Job 不得绑 call_id')
+    assert(
+      clientSrc.includes("data.work_kind === 'git_deliver' &&\n                data.git_deliver &&\n                data.git_deliver.risk_gate === 'await_risk'") ||
+        /data\.work_kind === 'git_deliver'[\s\S]{0,120}risk_gate === 'await_risk'/.test(clientSrc),
+      'SSE 高危分支须只认 work_kind=git_deliver',
+    )
+    assert(
+      !/data\.work_kind === 'git_deliver' \|\| data\.git_deliver\)[\s\S]{0,80}risk_gate === 'await_risk'/.test(
+        clientSrc,
+      ),
+      '禁止用 git_deliver 字段单独触发高危卡（防误伤写码）',
+    )
     const gitDeliverSrc = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gitDeliver.ts'),
       'utf8',
@@ -540,6 +679,32 @@ async function main() {
     assert(indexSrc.includes('禁止再出「推送失败如何处理」') || indexSrc.includes('推送失败如何处理'), '推送耗尽禁止选择题')
     assert(indexSrc.includes('禁止填 synced_files') || indexSrc.includes('committed_files'), 'Git 成功勿填宿主 synced_files')
     assert(indexSrc.includes('GIT_DELIVER_MODEL_STOP'), 'Git 终态须统一硬停止，禁止模型复述结论')
+    assert(indexSrc.includes('GIT_DELIVER_MODEL_STOP_PAUSED'), '暂停须专用硬停止，禁止立刻再调 git_deliver')
+    assert(indexSrc.includes('out.paused === true') || indexSrc.includes('paused = out.paused'), '暂停须认 out.paused')
+    assert(
+      /if \(out\.paused === true\)[\s\S]{0,200}ok:\s*true/.test(indexSrc),
+      '暂停须 ok:true 终态收口，禁止当失败诱出追问',
+    )
+    assert(
+      indexSrc.includes('v.paused === true') && indexSrc.includes('GIT_DELIVER_MODEL_STOP_PAUSED'),
+      'chatBodyRender 暂停须直接吐硬停止给模型',
+    )
+    assert(indexSrc.includes('paused=true'), '工具描述须声明 paused 后禁止追问')
+    assert(launchSrc.includes('findRecentPausedGitDeliver'), '暂停后须防模型重开确认卡')
+    assert(launchSrc.includes('risk_paused_replay'), '重入须复用暂停结论码')
+    assert(launchSrc.includes('PAUSED_REENTRY_GUARD_MS'), '暂停重入须有时间窗')
+    {
+      const serverSrc = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'server.ts'),
+        'utf8',
+      )
+      const pauseArm = serverSrc.indexOf("if (decision === 'pause')")
+      assert(pauseArm >= 0, 'risk-decision 须有 pause 分支')
+      const pauseBlock = serverSrc.slice(pauseArm, pauseArm + 700)
+      assert(/setStatus\([\s\S]*'cancelled'/.test(pauseBlock), 'risk-decision 暂停须直接 cancelled')
+      assert(!/'已选择暂停提交…'/.test(pauseBlock), '禁止暂停时写 running「已选择暂停提交…」')
+      assert(/stage:\s*'paused'/.test(pauseBlock), '暂停须立刻落 stage=paused')
+    }
     assert(indexSrc.includes("suppress_conclusion: true"), 'Git 结论只走 turnTail，finalize 须 suppress')
     assert(clientSrc.includes('Git 交付结论'), 'client 须认 Git 交付结论标题')
     assert(clientSrc.includes('交付结论'), 'Git 进度卡终态标题须用交付结论')

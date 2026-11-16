@@ -18,6 +18,12 @@ export type CursorCodingConfig = {
   writeScope: string[]
   /** 默认 composer-2.5 */
   model: string
+  /**
+   * Git 交付本批审码后端（调度开关，非业务 Key）：
+   * off=跳过审码直接 commit；workbuddy=HTTP 调本机引擎；embedded=旁路包（默认，公司网关）。
+   * 也可用环境变量 CURSOR_CHAT_GIT_REVIEW_BACKEND。
+   */
+  gitDeliverReviewBackend: 'off' | 'workbuddy' | 'embedded'
 }
 
 export type JobStatus =
@@ -61,6 +67,16 @@ export type CursorCodingJob = {
     pr_url?: string
     stage?: string
     pushed?: boolean
+    /** 本批审码闸：await_risk=等人选；reviewing/fixing/committing 供 UI */
+    risk_gate?: 'await_risk' | null
+    /** high=有高危；engine_unavailable=审码引擎不可达 */
+    risk_kind?: 'high' | 'engine_unavailable' | null
+    high_count?: number
+    medium_count?: number
+    low_count?: number
+    risk_summary?: string
+    report_id?: string
+    high_titles?: string[]
   } | null
   /** 本轮随诉求传入的截图（落盘路径，供 Cursor SDK 多模态） */
   images?: ChatImageRef[]
@@ -196,6 +212,7 @@ export type HitlAction =
   | 'cursor-chat.restart-backend'
   | 'cursor-chat.user-choice'
   | 'cursor-chat.git-deliver'
+  | 'cursor-chat.git-deliver-risk'
 
 export type HitlRecord = {
   action: HitlAction

@@ -1,0 +1,20 @@
+摘要：本批有一处高危。
+
+:::code_review_findings
+[
+  {
+    "file": "frontend/src/api/demo.js",
+    "line": 12,
+    "severity": "high",
+    "title": "示例注入风险",
+    "description": "未校验输入"
+  },
+  {
+    "file": "frontend/src/views/Demo.vue",
+    "line": 3,
+    "severity": "low",
+    "title": "命名可改进",
+    "description": "变量名过短"
+  }
+]
+:::

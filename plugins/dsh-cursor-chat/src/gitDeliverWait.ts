@@ -201,6 +201,170 @@ export function cancelGitDeliverWait(
     w.resolve({ ok: false, cancelled: true, detail: reason })
     return { ok: true }
   }
+  // 同步取消进行中的高危二次人审
+  decideGitDeliverRisk(id, 'pause', reason)
+  return { ok: true, detail: 'decision_persisted' }
+}
+
+// ── 高危二次人审（与确认决策分文件，避免互相覆盖）──
+
+/** fix=修高危；continue=引擎不可用时仍提交；pause=暂停 */
+export type GitDeliverRiskChoice = 'fix' | 'pause' | 'continue'
+
+export type GitDeliverRiskWaitResult =
+  | { ok: true; decision: 'fix' | 'continue' }
+  | { ok: false; decision: 'pause'; detail: string }
+
+type RiskDecision =
+  | { v: 1; kind: 'fix'; at: number }
+  | { v: 1; kind: 'continue'; at: number }
+  | { v: 1; kind: 'pause'; at: number; detail: string }
+
+type RiskWaiter = {
+  resolve: (value: GitDeliverRiskWaitResult) => void
+  timer?: ReturnType<typeof setTimeout>
+  poll?: ReturnType<typeof setInterval>
+}
+
+const riskWaiters = new Map<string, RiskWaiter>()
+
+function riskPath(token: string): string {
+  return join(storeDir('state'), 'git-deliver-risk-decisions', `${String(token || '').trim()}.json`)
+}
+
+function riskLock(token: string): string {
+  return riskPath(token) + '.lock'
+}
+
+function writeRiskDecision(token: string, decision: RiskDecision): void {
+  const id = String(token || '').trim()
+  if (!id) return
+  withFileLock(riskLock(id), () => {
+    writeJsonAtomic(riskPath(id), decision)
+  })
+}
+
+function readRiskDecision(token: string): RiskDecision | null {
+  const id = String(token || '').trim()
+  if (!id) return null
+  const raw = readJsonFile<RiskDecision | null>(riskPath(id), null)
+  if (!raw || raw.v !== 1) return null
+  if (raw.kind !== 'fix' && raw.kind !== 'pause' && raw.kind !== 'continue') return null
+  return raw
+}
+
+function clearRiskDecision(token: string): void {
+  const id = String(token || '').trim()
+  if (!id) return
+  try {
+    withFileLock(riskLock(id), () => {
+      writeJsonAtomic(riskPath(id), null)
+    })
+  } catch {
+    /* ignore */
+  }
+}
+
+function pollRisk(id: string): GitDeliverRiskWaitResult | null {
+  const decision = readRiskDecision(id)
+  if (decision?.kind === 'fix') return { ok: true, decision: 'fix' }
+  if (decision?.kind === 'continue') return { ok: true, decision: 'continue' }
+  if (decision?.kind === 'pause') {
+    return { ok: false, decision: 'pause', detail: decision.detail || '用户选择暂停提交' }
+  }
+  const pending = loadPendingConfirm(id)
+  if (pending?.status === 'cancelled') {
+    return { ok: false, decision: 'pause', detail: '用户取消 Git 交付' }
+  }
+  return null
+}
+
+export function waitForGitDeliverRisk(opts: {
+  confirmToken: string
+  ttlMs?: number
+}): Promise<GitDeliverRiskWaitResult> {
+  const id = String(opts.confirmToken || '').trim()
+  if (!id) {
+    return Promise.resolve({ ok: false, decision: 'pause', detail: '缺少 confirm_token' })
+  }
+  const prev = riskWaiters.get(id)
+  if (prev) {
+    if (prev.timer) clearTimeout(prev.timer)
+    if (prev.poll) clearInterval(prev.poll)
+    prev.resolve({ ok: false, decision: 'pause', detail: '已被新的高危决策等待替换' })
+    riskWaiters.delete(id)
+  }
+  try {
+    clearRiskDecision(id)
+  } catch {
+    /* ignore */
+  }
+  const ttl = Math.max(60_000, Math.min(60 * 60_000, opts.ttlMs ?? DEFAULT_TTL_MS))
+  return new Promise((resolve) => {
+    let settled = false
+    const resolveOnce = (value: GitDeliverRiskWaitResult) => {
+      if (settled) return
+      settled = true
+      const cur = riskWaiters.get(id)
+      if (cur) {
+        if (cur.timer) clearTimeout(cur.timer)
+        if (cur.poll) clearInterval(cur.poll)
+        riskWaiters.delete(id)
+      }
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      resolveOnce({
+        ok: false,
+        decision: 'pause',
+        detail: `用户未在 ${Math.round(ttl / 60000)} 分钟内决定高危处理，已暂停提交`,
+      })
+    }, ttl)
+    const poll = setInterval(() => {
+      const hit = pollRisk(id)
+      if (hit) resolveOnce(hit)
+    }, POLL_MS)
+    riskWaiters.set(id, { resolve: resolveOnce, timer, poll })
+    const early = pollRisk(id)
+    if (early) resolveOnce(early)
+  })
+}
+
+export function decideGitDeliverRisk(
+  confirmToken: string,
+  decision: GitDeliverRiskChoice,
+  detail?: string,
+): { ok: boolean; detail?: string } {
+  const id = String(confirmToken || '').trim()
+  if (!id) return { ok: false, detail: '缺少 confirm_token' }
+  if (decision !== 'fix' && decision !== 'pause' && decision !== 'continue') {
+    return { ok: false, detail: 'decision 须为 fix / continue / pause' }
+  }
+  if (decision === 'fix') {
+    writeRiskDecision(id, { v: 1, kind: 'fix', at: Date.now() })
+  } else if (decision === 'continue') {
+    writeRiskDecision(id, { v: 1, kind: 'continue', at: Date.now() })
+  } else {
+    writeRiskDecision(id, {
+      v: 1,
+      kind: 'pause',
+      at: Date.now(),
+      detail: detail || '用户选择暂停提交（未 commit）',
+    })
+  }
+  const w = riskWaiters.get(id)
+  if (w) {
+    if (decision === 'fix') w.resolve({ ok: true, decision: 'fix' })
+    else if (decision === 'continue') w.resolve({ ok: true, decision: 'continue' })
+    else {
+      w.resolve({
+        ok: false,
+        decision: 'pause',
+        detail: detail || '用户选择暂停提交（未 commit）',
+      })
+    }
+    return { ok: true }
+  }
   return { ok: true, detail: 'decision_persisted' }
 }
 
@@ -211,5 +375,11 @@ export function _resetGitDeliverWaitForTests(): void {
     if (w.poll) clearInterval(w.poll)
     w.resolve({ ok: false, cancelled: true, detail: 'test reset' })
     waiters.delete(id)
+  }
+  for (const [id, w] of [...riskWaiters.entries()]) {
+    if (w.timer) clearTimeout(w.timer)
+    if (w.poll) clearInterval(w.poll)
+    w.resolve({ ok: false, decision: 'pause', detail: 'test reset' })
+    riskWaiters.delete(id)
   }
 }

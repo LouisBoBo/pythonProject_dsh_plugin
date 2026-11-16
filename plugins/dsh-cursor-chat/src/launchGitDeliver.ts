@@ -11,15 +11,24 @@ import {
   executeGitDeliver,
   formatGitDeliverConclusion,
   isGitDeliverIdleDetail,
+  postPrReviewComment,
   prepareGitDeliverPlan,
   type GitDeliverPlan,
   type GitDeliverResult,
 } from './gitDeliver.js'
+import { runGitDeliverHighFix } from './gitDeliverFix.js'
+import {
+  buildPrReviewComment,
+  resolveGitDeliverReviewBackend,
+  runBatchCodeReview,
+  type BatchReviewResult,
+} from './gitDeliverReview.js'
 import {
   cancelGitDeliverWait,
   waitForGitDeliverConfirm,
+  waitForGitDeliverRisk,
 } from './gitDeliverWait.js'
-import { appendEvent, createJob, loadJob, patchJob, setStatus } from './jobs.js'
+import { appendEvent, createJob, listJobs, loadJob, patchJob, setStatus } from './jobs.js'
 import {
   bindPendingJobAwaitConfirm,
   cancelPendingConfirm,
@@ -268,6 +277,7 @@ export type GitDeliverHitlOk = {
   ok: true
   cancelled?: false
   idle?: boolean
+  paused?: boolean
   job: CursorCodingJob
   confirm_token?: string
   plan?: GitDeliverPlan
@@ -280,12 +290,117 @@ export type GitDeliverHitlOk = {
 export type GitDeliverHitlFail = {
   ok: false
   cancelled?: boolean
+  paused?: boolean
   detail: string
   code?: string
   conclusion: string
   job?: CursorCodingJob
   confirm_token?: string
   plan?: GitDeliverPlan
+}
+
+const MAX_RISK_FIX_ROUNDS = 2
+
+/** 暂停后模型常在数秒内再调 git_deliver；此窗内禁止重开确认卡 */
+const PAUSED_REENTRY_GUARD_MS = 90_000
+
+function normWorkspaceKey(ws: string): string {
+  try {
+    return resolve(String(ws || '').trim()).replace(/\\/g, '/').toLowerCase()
+  } catch {
+    return String(ws || '').trim().replace(/\\/g, '/').toLowerCase()
+  }
+}
+
+/**
+ * 同会话+同工作区刚暂停过：复用该结论，禁止再 prepare 出确认卡。
+ * 过窗后用户再说「提交代码」可正常开新卡。
+ */
+export function findRecentPausedGitDeliver(
+  sessionId: string | null | undefined,
+  workspace: string,
+  withinMs = PAUSED_REENTRY_GUARD_MS,
+): CursorCodingJob | null {
+  const sid = String(sessionId || '').trim()
+  const wsKey = normWorkspaceKey(workspace)
+  if (!sid || !wsKey) return null
+  const now = Date.now()
+  const ttl = Math.max(5_000, Math.min(10 * 60_000, withinMs))
+  for (const j of listJobs(40)) {
+    if (j.work_kind !== 'git_deliver') continue
+    if (String(j.dsh_session_id || '').trim() !== sid) continue
+    if (normWorkspaceKey(j.workspace || '') !== wsKey) continue
+    if (String(j.git_deliver?.stage || '') !== 'paused') continue
+    const at = Date.parse(String(j.updated_at || j.created_at || '')) || 0
+    if (!at || now - at < 0 || now - at >= ttl) continue
+    return j
+  }
+  return null
+}
+
+function mergeGitDeliverPatch(
+  jobId: string,
+  patch: NonNullable<CursorCodingJob['git_deliver']>,
+): void {
+  const live = loadJob(jobId)
+  const prev = (live && live.git_deliver) || {}
+  patchJob(jobId, { git_deliver: { ...prev, ...patch } })
+}
+
+function sealPausedGitDeliver(opts: {
+  jobId: string
+  plan: GitDeliverPlan
+  detail: string
+  review?: BatchReviewResult | null
+  confirmToken?: string
+}): { conclusion: string; job: CursorCodingJob | null } {
+  const titles = (opts.review?.high_findings || []).map((f) => {
+    const loc = f.line ? `${f.file}:${f.line}` : f.file
+    return `${loc} — ${f.title}`
+  })
+  const conclusion = formatGitDeliverConclusion({
+    status: 'paused',
+    plan: opts.plan,
+    detail: opts.detail,
+    riskSummary: opts.review?.summary || '',
+    highTitles: titles,
+  })
+  const jobId = String(opts.jobId || '').trim()
+  const job = jobId ? loadJob(jobId) : null
+  const tok = String(opts.confirmToken || '').trim()
+  if (tok) {
+    try {
+      cancelPendingConfirm(tok)
+    } catch {
+      /* pending 清理失败不影响暂停封口 */
+    }
+  }
+  if (job && jobId) {
+    mergeGitDeliverPatch(jobId, {
+      risk_gate: null,
+      stage: 'paused',
+      high_count: opts.review?.high_count,
+      medium_count: opts.review?.medium_count,
+      low_count: opts.review?.low_count,
+      risk_summary: opts.review?.summary || opts.detail,
+      report_id: opts.review?.report_id || '',
+      high_titles: titles.slice(0, 12),
+    })
+    patchJob(jobId, {
+      assistant_text: conclusion,
+      conclusion_delivered: true,
+      conclusion_at: new Date().toISOString(),
+      cancelled: true,
+      review_gate: null,
+      review_in_scope: [],
+      synced_files: [],
+      last_synced_files: [],
+      changed_files: [],
+    })
+    // 暂停 ≠ 业务失败：用 cancelled 态封口工具，但结论用 paused 文案（未 commit）
+    setStatus(loadJob(jobId) || job, 'cancelled', opts.detail)
+  }
+  return { conclusion, job: jobId ? loadJob(jobId) : null }
 }
 
 /**
@@ -295,6 +410,29 @@ export type GitDeliverHitlFail = {
 export async function runGitDeliverWithHitl(
   input: LaunchGitDeliverInput & { signal?: AbortSignal | null },
 ): Promise<GitDeliverHitlOk | GitDeliverHitlFail> {
+  // 暂停后模型常立刻再调：先挡重入，禁止再出确认卡
+  const priorPaused = findRecentPausedGitDeliver(input.sessionId, input.workspace)
+  if (priorPaused) {
+    const detail =
+      String(priorPaused.detail || '').trim() || '用户已选择暂停提交（未 commit）'
+    const conclusion =
+      String(priorPaused.assistant_text || '').trim() ||
+      formatGitDeliverConclusion({
+        status: 'paused',
+        detail,
+        highTitles: priorPaused.git_deliver?.high_titles || [],
+        riskSummary: priorPaused.git_deliver?.risk_summary || '',
+      })
+    return {
+      ok: false,
+      paused: true,
+      cancelled: true,
+      detail,
+      code: 'risk_paused_replay',
+      conclusion,
+      job: priorPaused,
+    }
+  }
   const prepared = await prepareGitDeliverSession(input)
   if (!prepared.ok) {
     return {
@@ -390,7 +528,22 @@ export async function runGitDeliverWithHitl(
     target_branch: waited.payload.target_branch,
     base_branch: waited.payload.base_branch,
     create_pr: waited.payload.create_pr,
+    confirm_token,
+    sessionId: input.sessionId,
+    signal,
   })
+  if (done.paused) {
+    return {
+      ok: false,
+      paused: true,
+      detail: done.result.detail,
+      code: done.code,
+      conclusion: done.conclusion,
+      job: done.job || undefined,
+      confirm_token,
+      plan,
+    }
+  }
   if (!done.ok) {
     return {
       ok: false,
@@ -411,7 +564,10 @@ export async function runGitDeliverWithHitl(
   }
 }
 
-/** 确认卡点确认后：执行 commit/push/PR 并写回 Job。 */
+/**
+ * 确认后：本批审码闸 →（可选修）→ commit/push/PR。
+ * HTTP 兜底与工具人审共用，禁止绕过审码闸。
+ */
 export async function completeGitDeliverFromConfirm(opts: {
   jobId: string
   plan: GitDeliverPlan
@@ -420,13 +576,297 @@ export async function completeGitDeliverFromConfirm(opts: {
   target_branch: string
   base_branch: string
   create_pr: boolean
-}): Promise<{ ok: boolean; result: GitDeliverResult; conclusion: string; job: CursorCodingJob | null }> {
+  confirm_token?: string
+  sessionId?: string | null
+  signal?: AbortSignal | null
+}): Promise<{
+  ok: boolean
+  paused?: boolean
+  code?: string
+  result: GitDeliverResult
+  conclusion: string
+  job: CursorCodingJob | null
+}> {
   const jobId = String(opts.jobId || '').trim()
   const job = loadJob(jobId)
-  if (job) {
-    pushGitProgress(jobId, '已确认，正在 commit / push…', 'running')
+  const confirm_token = String(opts.confirm_token || '').trim()
+  const selected = opts.selected_files
+  let lastReview: BatchReviewResult | null = null
+  let fixRound = 0
+
+  const pausedResult = (detail: string): GitDeliverResult => ({
+    ok: false,
+    stage: 'inspect',
+    detail,
+    remote_url: opts.plan.remote_url,
+    current_branch: opts.plan.current_branch,
+    target_branch: opts.target_branch || opts.plan.target_branch,
+    base_branch: opts.base_branch || opts.plan.base_branch,
+    commit_sha: '',
+    commit_short: '',
+    pushed: false,
+    pr_url: '',
+    pr_manual_hint: '',
+    committed_files: [],
+  })
+
+  while (true) {
+    // 关闸：不进 WorkBuddy HTTP / 不进人审风险卡，直接 commit（仅本函数；写码不动）
+    if (resolveGitDeliverReviewBackend() === 'off') {
+      if (jobId) {
+        pushGitProgress(
+          jobId,
+          '本批审码闸已关闭，跳过审码，直接 commit / push…',
+          'running',
+        )
+        mergeGitDeliverPatch(jobId, {
+          risk_gate: null,
+          stage: 'committing',
+          selected_files: selected,
+          confirm_token: confirm_token || undefined,
+          risk_summary: '审码闸已关闭（跳过）',
+        })
+      }
+      lastReview = null
+      break
+    }
+    if (jobId) {
+      pushGitProgress(
+        jobId,
+        `正在审码本批 ${selected.length} 个文件…`,
+        'running',
+      )
+      mergeGitDeliverPatch(jobId, {
+        risk_gate: null,
+        stage: 'reviewing',
+        selected_files: selected,
+        confirm_token: confirm_token || undefined,
+      })
+    }
+    const review = await runBatchCodeReview({
+      workspace: opts.plan.workspace,
+      files: selected,
+      // 不把 commit message 当 focus，避免 prompt 注入左右审码结论
+      focus: `本批 ${selected.length} 个待提交文件`,
+    })
+    lastReview = review
+    if (review.unavailable || !review.ran) {
+      const detail = review.detail || '审码引擎不可用'
+      if (!confirm_token) {
+        const sealed = sealPausedGitDeliver({
+          jobId,
+          plan: opts.plan,
+          detail,
+          review,
+          confirmToken: confirm_token,
+        })
+        return {
+          ok: false,
+          paused: true,
+          code: 'review_unavailable',
+          result: pausedResult(detail),
+          conclusion: sealed.conclusion,
+          job: sealed.job,
+        }
+      }
+      // 引擎不可达：二次人审（仍继续 / 暂停），禁止静默吞掉整次提交+PR
+      if (jobId) {
+        pushGitProgress(
+          jobId,
+          `${detail}。请选择仍继续提交，或暂停`,
+          'pending_review',
+        )
+        mergeGitDeliverPatch(jobId, {
+          risk_gate: 'await_risk',
+          stage: 'await_risk',
+          risk_kind: 'engine_unavailable',
+          risk_summary: detail,
+          high_count: 0,
+          high_titles: [],
+        })
+        patchJob(jobId, { review_gate: 'await_user' })
+      }
+      const risk = await waitForGitDeliverRisk({ confirmToken: confirm_token })
+      if (jobId) {
+        mergeGitDeliverPatch(jobId, { risk_gate: null, risk_kind: null })
+        patchJob(jobId, { review_gate: null })
+      }
+      if (!risk.ok) {
+        const pauseDetail =
+          risk.detail || `审码引擎不可用，用户选择暂停提交：${detail}`
+        const sealed = sealPausedGitDeliver({
+          jobId,
+          plan: opts.plan,
+          detail: pauseDetail,
+          review,
+          confirmToken: confirm_token,
+        })
+        return {
+          ok: false,
+          paused: true,
+          code: 'review_unavailable',
+          result: pausedResult(pauseDetail),
+          conclusion: sealed.conclusion,
+          job: sealed.job,
+        }
+      }
+      // continue 或误点 fix：均视为跳过审码继续交付（无高危清单可修）
+      if (jobId) {
+        pushGitProgress(jobId, '已选择跳过审码，继续 commit / push…')
+      }
+      lastReview = null
+      break
+    }
+    if (jobId) {
+      mergeGitDeliverPatch(jobId, {
+        high_count: review.high_count,
+        medium_count: review.medium_count,
+        low_count: review.low_count,
+        risk_summary: review.summary || review.detail,
+        report_id: review.report_id,
+        high_titles: review.high_findings.slice(0, 12).map((f) => {
+          const loc = f.line ? `${f.file}:${f.line}` : f.file
+          return `${loc} — ${f.title}`
+        }),
+      })
+    }
+    if (review.passed) {
+      if (jobId) pushGitProgress(jobId, review.detail || '本批审码通过，准备 commit…')
+      break
+    }
+    if (!confirm_token) {
+      const detail = `本批存在 ${review.high_count} 处高危，且确认令牌已失效，已暂停提交`
+      const sealed = sealPausedGitDeliver({
+        jobId,
+        plan: opts.plan,
+        detail,
+        review,
+        confirmToken: confirm_token,
+      })
+      return {
+        ok: false,
+        paused: true,
+        code: 'risk_paused',
+        result: pausedResult(detail),
+        conclusion: sealed.conclusion,
+        job: sealed.job,
+      }
+    }
+    if (jobId) {
+      pushGitProgress(
+        jobId,
+        `本批存在 ${review.high_count} 处高危，请选择修复或暂停提交`,
+        'pending_review',
+      )
+      mergeGitDeliverPatch(jobId, {
+        risk_gate: 'await_risk',
+        stage: 'await_risk',
+        risk_kind: 'high',
+      })
+      patchJob(jobId, { review_gate: 'await_user' })
+    }
+    const risk = await waitForGitDeliverRisk({ confirmToken: confirm_token })
+    if (jobId) {
+      mergeGitDeliverPatch(jobId, { risk_gate: null, risk_kind: null })
+      patchJob(jobId, { review_gate: null })
+    }
+    if (!risk.ok) {
+      const detail = risk.detail || '用户选择暂停提交（保留高危，未 commit）'
+      const sealed = sealPausedGitDeliver({
+        jobId,
+        plan: opts.plan,
+        detail,
+        review,
+        confirmToken: confirm_token,
+      })
+      return {
+        ok: false,
+        paused: true,
+        code: 'risk_paused',
+        result: pausedResult(detail),
+        conclusion: sealed.conclusion,
+        job: sealed.job,
+      }
+    }
+    // 高危场景不允许 continue 跳过；若收到 continue 当暂停（防误放行高危）
+    if (risk.decision === 'continue') {
+      const detail = '本批仍有高危，不能跳过审码直接提交；已暂停'
+      const sealed = sealPausedGitDeliver({
+        jobId,
+        plan: opts.plan,
+        detail,
+        review,
+        confirmToken: confirm_token,
+      })
+      return {
+        ok: false,
+        paused: true,
+        code: 'risk_paused',
+        result: pausedResult(detail),
+        conclusion: sealed.conclusion,
+        job: sealed.job,
+      }
+    }
+    // risk.decision === 'fix'
+    if (fixRound >= MAX_RISK_FIX_ROUNDS) {
+      const detail = `已达高危修复上限（${MAX_RISK_FIX_ROUNDS} 轮）仍未通过，已暂停提交`
+      const sealed = sealPausedGitDeliver({
+        jobId,
+        plan: opts.plan,
+        detail,
+        review,
+        confirmToken: confirm_token,
+      })
+      return {
+        ok: false,
+        paused: true,
+        code: 'risk_fix_exhausted',
+        result: pausedResult(detail),
+        conclusion: sealed.conclusion,
+        job: sealed.job,
+      }
+    }
+    fixRound += 1
+    if (jobId) {
+      mergeGitDeliverPatch(jobId, { stage: 'fixing' })
+      pushGitProgress(jobId, `正在修复高危（第 ${fixRound}/${MAX_RISK_FIX_ROUNDS} 轮）…`, 'running')
+    }
+    const fixed = await runGitDeliverHighFix({
+      workspace: opts.plan.workspace,
+      selectedFiles: selected,
+      highFindings: review.high_findings,
+      sessionId: opts.sessionId,
+      signal: opts.signal || null,
+      onProgress: (m) => {
+        if (jobId) pushGitProgress(jobId, m, 'running')
+      },
+    })
+    if (!fixed.ok) {
+      const detail = fixed.detail || '高危修复失败，已暂停提交'
+      const sealed = sealPausedGitDeliver({
+        jobId,
+        plan: opts.plan,
+        detail,
+        review,
+        confirmToken: confirm_token,
+      })
+      return {
+        ok: false,
+        paused: true,
+        code: 'risk_fix_failed',
+        result: pausedResult(detail),
+        conclusion: sealed.conclusion,
+        job: sealed.job,
+      }
+    }
+    if (jobId) pushGitProgress(jobId, '高危修复完成，重新审码本批…')
   }
-  const result = await executeGitDeliver(
+
+  if (job) {
+    mergeGitDeliverPatch(jobId, { risk_gate: null, stage: 'committing' })
+    pushGitProgress(jobId, '审码已通过，正在 commit / push…', 'running')
+  }
+  let result = await executeGitDeliver(
     opts.plan,
     {
       selected_files: opts.selected_files,
@@ -445,6 +885,22 @@ export async function completeGitDeliverFromConfirm(opts: {
   if (result.pushed) pushGitProgress(jobId, `已推送 ${result.target_branch}`)
   if (result.pr_url) pushGitProgress(jobId, `PR：${result.pr_url}`)
   else if (result.pr_manual_hint) pushGitProgress(jobId, result.pr_manual_hint)
+
+  if (result.ok && result.pr_url && lastReview?.ran) {
+    pushGitProgress(jobId, '正在把本批审码报告写入 PR 评论…')
+    const comment = await postPrReviewComment({
+      remoteUrl: result.remote_url || opts.plan.remote_url,
+      prUrl: result.pr_url,
+      body: buildPrReviewComment(lastReview),
+    })
+    result = {
+      ...result,
+      pr_comment_ok: comment.ok,
+      pr_comment_detail: comment.detail,
+    }
+    if (comment.ok) pushGitProgress(jobId, '审码报告已写入 PR 评论')
+    else if (comment.detail) pushGitProgress(jobId, comment.detail)
+  }
 
   const conclusion = formatGitDeliverConclusion({
     status: result.ok ? 'succeeded' : 'failed',
@@ -474,6 +930,12 @@ export async function completeGitDeliverFromConfirm(opts: {
         pr_url: result.pr_url,
         stage: result.stage,
         pushed: result.pushed,
+        risk_gate: null,
+        high_count: lastReview?.high_count,
+        medium_count: lastReview?.medium_count,
+        low_count: lastReview?.low_count,
+        risk_summary: lastReview?.summary || '',
+        report_id: lastReview?.report_id || '',
       },
     })
     setStatus(loadJob(jobId) || job, result.ok ? 'succeeded' : 'failed', result.detail)

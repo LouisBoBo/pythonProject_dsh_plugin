@@ -66,6 +66,7 @@ import { assertBackendRestartReady, executeBackendRestart } from './backendResta
 import {
   cancelGitDeliverWait,
   confirmGitDeliverWait,
+  decideGitDeliverRisk,
   getGitDeliverWaitPlan,
 } from './gitDeliverWait.js'
 import { completeGitDeliverFromConfirm } from './launchGitDeliver.js'
@@ -405,7 +406,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       action !== 'cursor-chat.cancel' &&
       action !== 'cursor-chat.restart-backend' &&
       action !== 'cursor-chat.user-choice' &&
-      action !== 'cursor-chat.git-deliver'
+      action !== 'cursor-chat.git-deliver' &&
+      action !== 'cursor-chat.git-deliver-risk'
     ) {
       send(
         res,
@@ -413,7 +415,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         {
           ok: false,
           detail:
-            'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend / user-choice / git-deliver',
+            'action 须为 cursor-chat.confirm / apply / steer / cancel / restart-backend / user-choice / git-deliver / git-deliver-risk',
         },
         req,
       )
@@ -481,6 +483,37 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         send(res, 400, { ok: false, detail: 'Git 交付计划已过期，请重新发起', code: 'plan_missing' }, req)
         return
       }
+      const issued = issue({
+        action,
+        workspace: pending.workspace,
+        requirement: pending.requirement,
+        confirm_token: pending.id,
+        job_id: pending.job_id,
+      })
+      send(res, 200, issued, req)
+      return
+    }
+    if (action === 'cursor-chat.git-deliver-risk') {
+      const confirmToken = String(body.confirm_token || '').trim()
+      if (!confirmToken) {
+        send(
+          res,
+          400,
+          {
+            ok: false,
+            code: 'confirm_token_required',
+            detail: '签发 git-deliver-risk 须携带 confirm_token',
+          },
+          req,
+        )
+        return
+      }
+      const pending = loadPendingConfirm(confirmToken)
+      if (!pending || pending.status === 'cancelled' || pending.kind !== 'git_deliver') {
+        send(res, 400, { ok: false, detail: 'Git 交付确认令牌无效', code: 'pending_invalid' }, req)
+        return
+      }
+      // 首次确认后 pending 可能已 started；高危二次人审仍须可签发
       const issued = issue({
         action,
         workspace: pending.workspace,
@@ -791,8 +824,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (pending.job_id) {
       bindPendingJob(confirmToken, pending.job_id)
       const live = loadJob(pending.job_id)
-      if (live && live.status === 'pending_review') {
-        setStatus(live, 'running', '已确认，正在 commit / push…')
+      const st = String(live?.status || '')
+      if (live && st === 'pending_review') {
+        setStatus(live, 'running', '已确认，正在审码本批…')
         send(
           res,
           200,
@@ -800,7 +834,42 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             ok: true,
             accepted: true,
             waiting_tool: true,
-            detail: '已确认，正在提交…',
+            detail: '已确认，正在审码本批…',
+            job_id: pending.job_id || '',
+            confirm_token: confirmToken,
+          },
+          req,
+        )
+        return
+      }
+      // 已有 Job：后续确认一律不再 HTTP 重跑 complete（防并行双 commit/push）
+      const terminal =
+        st === 'succeeded' || st === 'failed' || st === 'cancelled' || st === 'blocked_no_runner'
+      if (live && terminal) {
+        send(
+          res,
+          200,
+          {
+            ok: st === 'succeeded',
+            already_done: true,
+            detail: st === 'succeeded' ? '本批交付已完成' : `本批交付已结束（${st}）`,
+            job_id: pending.job_id || '',
+            confirm_token: confirmToken,
+          },
+          req,
+        )
+        return
+      }
+      if (live) {
+        send(
+          res,
+          200,
+          {
+            ok: true,
+            accepted: true,
+            waiting_tool: true,
+            already_accepted: true,
+            detail: '交付已在进行中，请勿重复确认',
             job_id: pending.job_id || '',
             confirm_token: confirmToken,
           },
@@ -809,8 +878,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         return
       }
     }
-    // 兜底：无进行中的人审 Job（旧会话/工具已返回）→ HTTP 直接执行
-    if (pending.job_id) bindPendingJob(confirmToken, pending.job_id)
+    // 仅无 job_id 的旧路径：HTTP 直接执行（仍过审码闸）
     const done = await completeGitDeliverFromConfirm({
       jobId: pending.job_id || '',
       plan,
@@ -819,18 +887,171 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       target_branch: payload.target_branch,
       base_branch: payload.base_branch,
       create_pr: payload.create_pr,
+      confirm_token: confirmToken,
     })
     send(
       res,
       200,
       {
         ok: done.ok,
+        paused: done.paused || false,
         detail: done.result.detail,
+        code: done.code || '',
         job_id: pending.job_id || '',
         confirm_token: confirmToken,
         conclusion: done.conclusion,
         result: done.result,
         job: done.job,
+      },
+      req,
+    )
+    return
+  }
+
+  if (method === 'POST' && path === '/api/cursor-chat/git-deliver/risk-decision') {
+    if (rejectBadOrigin(req, res)) return
+    let body: Record<string, unknown> = {}
+    try {
+      body = parseJson(await readBody(req))
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const nonce = String(body.nonce || body.hitl_nonce || '').trim()
+    const confirmToken = String(body.confirm_token || '').trim()
+    const decisionRaw = String(body.decision || '').trim().toLowerCase()
+    const decision =
+      decisionRaw === 'fix'
+        ? 'fix'
+        : decisionRaw === 'pause'
+          ? 'pause'
+          : decisionRaw === 'continue'
+            ? 'continue'
+            : ''
+    if (!confirmToken) {
+      send(res, 400, { ok: false, code: 'confirm_token_required', detail: '缺少 confirm_token' }, req)
+      return
+    }
+    if (!decision) {
+      send(
+        res,
+        400,
+        { ok: false, code: 'decision_required', detail: 'decision 须为 fix / continue / pause' },
+        req,
+      )
+      return
+    }
+    const pending = loadPendingConfirm(confirmToken)
+    if (!pending || pending.kind !== 'git_deliver' || pending.status === 'cancelled') {
+      send(res, 400, { ok: false, detail: 'Git 交付确认令牌无效', code: 'pending_invalid' }, req)
+      return
+    }
+    const hitl = consume({
+      nonce,
+      action: 'cursor-chat.git-deliver-risk',
+      workspace: pending.workspace,
+      requirement: pending.requirement,
+      confirm_token: confirmToken,
+      job_id: pending.job_id,
+    })
+    if (!hitl.ok) {
+      send(res, 401, { ok: false, detail: hitl.detail, code: hitl.code }, req)
+      return
+    }
+    const live = pending.job_id ? loadJob(pending.job_id) : null
+    const riskGate = live?.git_deliver?.risk_gate
+    if (riskGate !== 'await_risk') {
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code: 'not_awaiting_risk',
+          detail: '当前不在审码闸决策阶段',
+        },
+        req,
+      )
+      return
+    }
+    const riskKind = live?.git_deliver?.risk_kind || 'high'
+    if (decision === 'continue' && riskKind === 'high') {
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code: 'continue_not_allowed',
+          detail: '本批有高危时不能跳过，请选择修复或暂停',
+        },
+        req,
+      )
+      return
+    }
+    if (decision === 'fix' && riskKind === 'engine_unavailable') {
+      send(
+        res,
+        400,
+        {
+          ok: false,
+          code: 'fix_not_allowed',
+          detail: '审码引擎不可用时请选择仍继续提交或暂停',
+        },
+        req,
+      )
+      return
+    }
+    const pauseDetail =
+      decision === 'pause'
+        ? riskKind === 'engine_unavailable'
+          ? '用户选择暂停提交（审码引擎不可用）'
+          : '用户选择暂停提交（保留高危，未 commit）'
+        : undefined
+    const decided = decideGitDeliverRisk(confirmToken, decision, pauseDetail)
+    if (!decided.ok) {
+      send(res, 400, { ok: false, detail: decided.detail || '写入决策失败' }, req)
+      return
+    }
+    if (pending.job_id) {
+      const j = loadJob(pending.job_id)
+      if (j) {
+        // 暂停是终态：禁止先写 running「已选择暂停…」，否则进度卡会卡在「读取 Git 中」
+        if (decision === 'pause') {
+          const prevGd = j.git_deliver || {}
+          patchJob(j.id, {
+            cancelled: true,
+            review_gate: null,
+            git_deliver: {
+              ...prevGd,
+              risk_gate: null,
+              stage: 'paused',
+              risk_kind: null,
+              risk_summary: pauseDetail || '用户选择暂停提交',
+            },
+          })
+          setStatus(loadJob(j.id) || j, 'cancelled', pauseDetail || '用户选择暂停提交')
+        } else {
+          setStatus(
+            j,
+            'running',
+            decision === 'fix' ? '已选择修复高危…' : '已选择跳过审码，继续提交…',
+          )
+        }
+      }
+    }
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        decision,
+        detail:
+          decision === 'fix'
+            ? '已接受：修复高危'
+            : decision === 'continue'
+              ? '已接受：仍继续提交'
+              : '已接受：暂停提交',
+        job_id: pending.job_id || '',
+        confirm_token: confirmToken,
       },
       req,
     )

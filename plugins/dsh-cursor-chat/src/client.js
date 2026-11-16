@@ -468,7 +468,9 @@ window.__ModuleLoader__.load({
       var s = String(st || '').trim()
       if (s === 'succeeded') return '已完成'
       if (s === 'failed') return '失败'
-      if (s === 'cancelled') return '已取消'
+      if (s === 'cancelled') {
+        return /暂停提交|审码闸|高危/.test(String(detail || '')) ? '已暂停提交' : '已取消'
+      }
       if (s === 'blocked_no_runner') return '无 Runner'
       if (s === 'pending_review') {
         var gate = String(reviewGate || '').trim()
@@ -2854,6 +2856,19 @@ window.__ModuleLoader__.load({
         }
         if (job.work_kind === 'git_deliver' && job.git_deliver) {
           hydrateGitDeliver(job.git_deliver)
+          if (job.git_deliver.stage === 'paused' || st === 'cancelled') {
+            // 暂停/取消终态：禁止再被 risk_gate 或 running 文案带回转圈
+            nextPhase = 'done'
+            nextLabel = job.git_deliver.stage === 'paused' || /暂停提交/.test(detail)
+              ? '已暂停提交'
+              : nextLabel || '已取消'
+          } else if (job.git_deliver.risk_gate === 'await_risk') {
+            nextPhase = 'review'
+            nextLabel =
+              job.git_deliver.risk_kind === 'engine_unavailable'
+                ? '审码引擎不可用'
+                : '本批存在高危，请选择修复或暂停'
+          }
         }
         if (TERMINAL_JOB[st]) sealedStatusRef.current = st
         var phaseOut = nextPhase
@@ -2862,7 +2877,7 @@ window.__ModuleLoader__.load({
         if (
           isGitJob &&
           !gitSubmittedRef.current &&
-          /已确认|正在 commit|正在推送|重试推送|正在重试推送/.test(detail)
+          /已确认|正在审码|正在 commit|正在推送|重试推送|正在重试推送/.test(detail)
         ) {
           gitSubmittedRef.current = true
           setGitSubmitted(true)
@@ -3128,7 +3143,115 @@ window.__ModuleLoader__.load({
           held_sensitive_files: held,
           confirm_token: tok || confirmTokenRef.current || undefined,
           entries: entries,
+          risk_gate: raw.risk_gate === 'await_risk' ? 'await_risk' : null,
+          risk_kind:
+            raw.risk_kind === 'engine_unavailable'
+              ? 'engine_unavailable'
+              : raw.risk_kind === 'high'
+                ? 'high'
+                : null,
+          high_count: Number(raw.high_count || 0) || 0,
+          medium_count: Number(raw.medium_count || 0) || 0,
+          low_count: Number(raw.low_count || 0) || 0,
+          risk_summary: String(raw.risk_summary || ''),
+          report_id: String(raw.report_id || ''),
+          high_titles: Array.isArray(raw.high_titles)
+            ? raw.high_titles.map(function (t) {
+                return String(t || '')
+              }).filter(Boolean)
+            : [],
         })
+      }
+
+      function onGitDeliverRiskDecision(decision) {
+        setErr('')
+        setBusy(true)
+        var g0 = gitDeliver || {}
+        Promise.resolve()
+          .then(function () {
+            var token0 = String(
+              confirmTokenRef.current ||
+                confirmToken ||
+                g0.confirm_token ||
+                (ui && ui.confirm_token) ||
+                '',
+            ).trim()
+            if (token0) return { token: token0, jobId: String(jobIdRef.current || jobId || ''), plan: null }
+            return recoverGitDeliverHandles()
+          })
+          .then(function (ids) {
+            var token = String((ids && ids.token) || '').trim()
+            if (!token) throw new Error('确认令牌未就绪，请稍候再点。')
+            return fetch(base() + '/api/hitl/issue', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'cursor-chat.git-deliver-risk',
+                confirm_token: token,
+                workspace: workspace,
+              }),
+            })
+              .then(function (r) {
+                return r.json()
+              })
+              .then(function (issued) {
+                if (!issued || !issued.ok || !issued.nonce) {
+                  throw new Error((issued && issued.detail) || '签发 HITL 失败')
+                }
+                return fetch(base() + '/api/cursor-chat/git-deliver/risk-decision', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    confirm_token: token,
+                    nonce: issued.nonce,
+                    decision: decision,
+                  }),
+                }).then(function (r2) {
+                  return r2.json()
+                })
+              })
+          })
+          .then(function (d) {
+            if (!d || !d.ok) throw new Error((d && d.detail) || '决策失败')
+            var jid = d.job_id ? String(d.job_id) : String(jobIdRef.current || jobId || '')
+            if (decision === 'pause') {
+              // 暂停=任务结束：立刻封口，禁止再落回「读取 Git 中」转圈
+              sealedStatusRef.current = 'cancelled'
+              gitSubmittedRef.current = true
+              setGitSubmitted(true)
+              setPhase('done')
+              setStatusLabel('已暂停提交')
+              setConclusionMd(function (prev) {
+                return String(prev || '').trim()
+                  ? prev
+                  : '## Git 交付结论\n\n结果：⏸ 已暂停提交（审码闸未放行）。工作区改动仍在，未执行 commit / push。\n\n本轮已结束。\n'
+              })
+              dialogPinRef.current = false
+              stickBottomRef.current = false
+              if (jid) {
+                jobIdRef.current = jid
+                setJobId(jid)
+                reconcileJob(jid)
+              }
+              return
+            }
+            setPhase('running')
+            setStatusLabel(
+              decision === 'fix' ? '正在修复高危…' : '已跳过审码，继续提交…',
+            )
+            if (jid) {
+              jobIdRef.current = jid
+              setJobId(jid)
+              reconcileJob(jid)
+              if (!esRef.current) openStream(jid)
+            }
+          })
+          .catch(function (e) {
+            setErr(String(e && e.message ? e.message : e))
+          })
+          .finally(function () {
+            setBusy(false)
+          })
       }
 
       function onGitDeliverConfirm() {
@@ -3200,12 +3323,12 @@ window.__ModuleLoader__.load({
               setJobId(jid)
             }
             if (out.data.waiting_tool || out.data.accepted) {
-              // 确认成功：立刻收起确认卡，只留进度
+              // 确认成功：收起文件确认卡；进度走审码闸 → 再 commit
               gitSubmittedRef.current = true
               setGitSubmitted(true)
               sealedStatusRef.current = ''
               setPhase('running')
-              setStatusLabel('正在 commit / push…')
+              setStatusLabel('正在审码本批…')
               if (jid) {
                 reconcileJob(jid)
                 if (!esRef.current) openStream(jid)
@@ -3291,15 +3414,28 @@ window.__ModuleLoader__.load({
         if (workKind !== 'git_deliver') return null
         var g = gitDeliver || {}
         var sealed = String(sealedStatusRef.current || '')
+        var pausedNow =
+          g.stage === 'paused' ||
+          statusLabel === '已暂停提交' ||
+          statusLabel === '已暂停提交…' ||
+          /已暂停提交/.test(String(statusLabel || ''))
         var closed =
           phase === 'done' ||
           !!TERMINAL_JOB[sealed] ||
+          pausedNow ||
           statusLabel === '已取消' ||
           statusLabel === '已停止' ||
           statusLabel === '失败' ||
           statusLabel === '已完成'
         if (closed) {
-          var stopLike = sealed === 'cancelled' || statusLabel === '已取消' || statusLabel === '已停止'
+          var stopLike =
+            sealed === 'cancelled' ||
+            pausedNow ||
+            statusLabel === '已取消' ||
+            statusLabel === '已停止'
+          var pausedLike =
+            pausedNow ||
+            /已暂停提交|审码闸|高危/.test(String(conclusionMd || '') + String(statusLabel || ''))
           var idleLike =
             /没有可提交|无需 Git|没有未提交改动|没有可安全提交/.test(
               String(conclusionMd || '') + String(statusLabel || ''),
@@ -3314,7 +3450,9 @@ window.__ModuleLoader__.load({
               'p',
               { className: 'cc-note' },
               stopLike
-                ? (statusLabel === '已停止' ? '已停止' : '已取消') +
+                ? pausedLike
+                  ? '已暂停提交：任务已结束，未执行 commit。'
+                  : (statusLabel === '已停止' ? '已停止' : '已取消') +
                     '：未执行 commit，工作区改动仍在。'
                 : idleLike
                   ? '当前没有可提交的改动，无需交付。'
@@ -3324,7 +3462,86 @@ window.__ModuleLoader__.load({
             ),
           )
         }
-        // 点确认后：确认卡整卡消失（进度只看下方 transcript，禁止再露「写码中」壳）
+        // 审码闸二次人审：确认后仍可出卡（权威字段 risk_gate）
+        if (g.risk_gate === 'await_risk') {
+          var accentRisk = resolveAvatarAccent()
+          var titles = Array.isArray(g.high_titles) ? g.high_titles : []
+          var engineDown = g.risk_kind === 'engine_unavailable'
+          return h(
+            'div',
+            {
+              className: 'cc-git-deliver',
+              'data-cc-git-deliver': '1',
+              'data-cc-risk-gate': 'await_risk',
+              'data-cc-risk-kind': engineDown ? 'engine_unavailable' : 'high',
+              style: { ['--cc-git-accent']: accentRisk, ['--cc-avatar-accent']: accentRisk },
+            },
+            h(
+              'p',
+              { className: 'cc-git-title' },
+              engineDown ? '审码引擎不可用' : '本批审码：发现高危',
+            ),
+            h(
+              'p',
+              { className: 'cc-note' },
+              engineDown
+                ? '未能连接 WorkBuddy 审码引擎，无法完成本批自动审码。可暂停，或仍继续 commit / push（自行承担风险）。'
+                : '高危 ' +
+                    String(g.high_count || titles.length || 0) +
+                    ' · 中危 ' +
+                    String(g.medium_count || 0) +
+                    ' · 低危 ' +
+                    String(g.low_count || 0) +
+                    '。高危未清前不会 commit / push。',
+            ),
+            g.risk_summary
+              ? h('p', { className: 'cc-note' }, String(g.risk_summary))
+              : null,
+            !engineDown && titles.length
+              ? h(
+                  'ul',
+                  { className: 'cc-git-files', style: { margin: '8px 0', paddingLeft: '18px' } },
+                  titles.slice(0, 8).map(function (t, i) {
+                    return h('li', { key: 'ht-' + i }, String(t))
+                  }),
+                )
+              : null,
+            err ? h('p', { className: 'cc-set-msg err' }, err) : null,
+            h(
+              'div',
+              {
+                className: 'cc-git-actions',
+                style: { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '10px' },
+              },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'cc-set-btn',
+                  disabled: busy,
+                  onClick: function () {
+                    onGitDeliverRiskDecision('pause')
+                  },
+                },
+                '暂停提交',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'cc-set-btn primary',
+                  disabled: busy,
+                  style: { background: accentRisk, borderColor: 'transparent', color: '#fff' },
+                  onClick: function () {
+                    onGitDeliverRiskDecision(engineDown ? 'continue' : 'fix')
+                  },
+                },
+                busy ? '处理中…' : engineDown ? '仍继续提交' : '修复高危',
+              ),
+            ),
+          )
+        }
+        // 点确认后：文件确认卡消失（进度看 transcript）；高危卡由 risk_gate 另开
         if (gitSubmitted || gitSubmittedRef.current) {
           return null
         }
@@ -3548,16 +3765,32 @@ window.__ModuleLoader__.load({
                 review_deferred: data.review_deferred,
                 review_gate: data.review_gate,
               })
-              // Git 人审：SSE 带计划则立刻进人审卡，禁止停在「待审同步」转圈
+              // Git 人审 / 高危二次人审：只认 work_kind=git_deliver，禁止靠 git_deliver 字段误伤写码卡
               if (
-                (data.work_kind === 'git_deliver' || data.git_deliver) &&
+                data.work_kind === 'git_deliver' &&
                 data.status === 'pending_review' &&
                 data.git_deliver
               ) {
                 setWorkKind('git_deliver')
                 hydrateGitDeliver(data.git_deliver)
                 setPhase('review')
-                setStatusLabel('确认 Git 交付')
+                if (data.git_deliver.risk_gate === 'await_risk') {
+                  setStatusLabel('本批存在高危，请选择修复或暂停')
+                } else {
+                  setStatusLabel('确认 Git 交付')
+                }
+                return
+              }
+              if (
+                data.work_kind === 'git_deliver' &&
+                data.git_deliver &&
+                data.git_deliver.risk_gate === 'await_risk' &&
+                data.status === 'pending_review'
+              ) {
+                setWorkKind('git_deliver')
+                hydrateGitDeliver(data.git_deliver)
+                setPhase('review')
+                setStatusLabel('本批存在高危，请选择修复或暂停')
                 return
               }
               if (data.status === 'pending_review') {
@@ -4314,6 +4547,7 @@ window.__ModuleLoader__.load({
       var statusZh = (function () {
         var s = String(visibleLabel || '')
         if (gitCard) {
+          if (s === '已暂停提交' || s === '已暂停提交…') return '已暂停提交'
           if (s === 'pending_review' || s === '确认 Git 交付' || phase === 'review') return '确认 Git 交付'
           if (s === '读取 Git 中' || s === '提交推送中') return s
           if (s === 'running' || s === 'queued' || s === '写码中') return '读取 Git 中'
@@ -5061,6 +5295,45 @@ window.__ModuleLoader__.load({
         var richFoldBuf = []
         // 展示层：相邻同文 status 只留一条（多条沙箱进度会改写成同一句）
         var lastStatusShown = ''
+        // 推送心跳「已等待 N 秒」只留最新一条，避免过程区堆一串
+        var skipStatusId = {}
+        ;(function collapsePushWaitHeartbeats() {
+          var prevWait = ''
+          ;(transcript || []).forEach(function (row) {
+            if (!row || row.kind !== 'status') return
+            var m = normalizeStatusDisplayClient(row.text || '')
+            if (!/正在推送到远端.*已等待\s*\d+\s*秒/.test(m)) return
+            if (prevWait) skipStatusId[prevWait] = true
+            prevWait = String(row.id || '')
+          })
+        })()
+        // 进行中只让「当前最新一条」进度转圈；历史步骤静止，避免一大片同时转
+        var liveStatusId = ''
+        ;(function pickLiveStatusId() {
+          var prev = ''
+          ;(transcript || []).forEach(function (row) {
+            if (!row || row.kind !== 'status') {
+              prev = ''
+              return
+            }
+            var id = String(row.id || '')
+            if (id && skipStatusId[id]) return
+            var m = normalizeStatusDisplayClient(row.text || '')
+            if (/【本轮结论】|^##\s*本轮结论|^##\s*Git\s*交付结论|说明方案/.test(m)) return
+            if (!m) return
+            if (
+              /准备沙箱|稀疏拷贝|沙箱就绪|启动 Cursor|正在启动|Mock Cursor|已入队|确认入队|写范围|只读上下文/i.test(
+                m,
+              )
+            ) {
+              if (!streamActive) return
+              m = serviceRunCard(requirement, workKind) ? '正在准备执行，不改代码…' : '正在准备写码环境…'
+            }
+            if (m === prev) return
+            prev = m
+            liveStatusId = id
+          })
+        })()
 
         function noteNonStatusNode() {
           lastStatusShown = ''
@@ -5269,6 +5542,8 @@ window.__ModuleLoader__.load({
             return
           }
           if (it.kind === 'status') {
+            var sid = String(it.id || '')
+            if (sid && skipStatusId[sid]) return
             var msg = normalizeStatusDisplayClient(it.text || '')
             if (/【本轮结论】|^##\s*本轮结论|^##\s*Git\s*交付结论|说明方案/.test(msg)) return
             if (!msg) return
@@ -5284,12 +5559,12 @@ window.__ModuleLoader__.load({
             // 仅展示去重：连续多条改写成同一句时只留一条，不改 transcript 账本
             if (msg === lastStatusShown) return
             lastStatusShown = msg
-            // Git commit/push 过程条也要转圈，禁止静默钉死无反馈
-            var busy =
-              streamActive &&
-              /同步|请稍候|失败|错误|准备|连接|commit|push|推送|重试|暂存|分支|核对|读取 Git|已确认|等待/i.test(
-                msg,
-              )
+            // 只转最新一条；已完成文案即使是最新也不转圈
+            var isLatest = streamActive && liveStatusId && sid === liveStatusId
+            var settled =
+              /^(已|本批)|通过|失败|成功|Commit：|PR：|跳过审码|无需/.test(msg) &&
+              !/正在|请稍候|已等待|重试/.test(msg)
+            var busy = Boolean(isLatest && !settled)
             nodes.push(
               h(
                 'div',
