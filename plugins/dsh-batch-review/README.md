@@ -43,6 +43,6 @@ PYTHONPATH=src python -m pytest tests -q
 
 | 值 | 行为 |
 | --- | --- |
-| `embedded`（**默认**） | 子进程调本包 `review`（公司网关；需 `DSH_BATCH_REVIEW_ROOT` 或开发仓同级目录） |
+| `embedded`（**默认**） | 子进程调本包 `review`（公司网关；插件 `vendor/dsh-batch-review`；Python：macOS/Linux 用 `python3`，Windows 用 `python`，可用 `DSH_BATCH_REVIEW_PYTHON` 覆盖） |
 | `off` | 跳过审码，确认后直接 commit |
 | `workbuddy` | 旧 HTTP 调本机引擎 `:8000` |

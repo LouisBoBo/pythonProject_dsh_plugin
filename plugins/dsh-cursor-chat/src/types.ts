@@ -69,13 +69,19 @@ export type CursorCodingJob = {
     pushed?: boolean
     /** 本批审码闸：await_risk=等人选；reviewing/fixing/committing 供 UI */
     risk_gate?: 'await_risk' | null
-    /** high=有高危；engine_unavailable=审码引擎不可达 */
+    /** high=有高危；engine_unavailable=审码引擎不可达或本批文件未全纳入 */
     risk_kind?: 'high' | 'engine_unavailable' | null
+    /** files_skipped=路径读不到，不是连不上引擎。risk_kind 仍为 engine_unavailable，按钮继续/暂停不变。 */
+    risk_code?: 'files_skipped' | null
     high_count?: number
     medium_count?: number
     low_count?: number
     risk_summary?: string
     report_id?: string
+    /** 工作区相对路径：结论下方可点开预览的审码报告 */
+    review_report_rel?: string
+    /** 已写入宿主 deliverables/presented，原生文件卡负责展示 */
+    review_presented?: boolean
     high_titles?: string[]
   } | null
   /** 本轮随诉求传入的截图（落盘路径，供 Cursor SDK 多模态） */

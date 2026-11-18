@@ -8,6 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
+import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { cursorKeyReady, defaultDataRoot, loadConfig, publicConfigView } from './config.js'
@@ -88,6 +89,58 @@ function execCallId(exec: unknown): string {
   if (!exec || typeof exec !== 'object') return ''
   const e = exec as { callId?: unknown; rootCallId?: unknown; call_id?: unknown }
   return String(e.callId || e.rootCallId || e.call_id || '').trim()
+}
+
+/** 只认插件自己的审码报告，并收成宿主 present 使用的绝对路径。 */
+function reviewReportAbs(workspace: string, rel: string): string | null {
+  const clean = rel.replace(/\\/g, '/').trim()
+  if (!clean.startsWith('.dsh-cursor-chat/reviews/') || clean.includes('..')) return null
+  const abs = join(workspace, clean)
+  if (!existsSync(abs)) return null
+  try {
+    return realpathSync(abs)
+  } catch {
+    return abs
+  }
+}
+
+/**
+ * 把审码报告交给宿主 present。必须在工具返回之前写入：
+ * 原生文件卡只收「收尾那条助手消息」之前的 deliverables/presented，结束后再补不会出现。
+ */
+function presentReviewReport(
+  ctx: { get?: (name: string) => unknown },
+  exec: unknown,
+  workspace: string,
+  rel: string,
+): boolean {
+  const abs = reviewReportAbs(workspace, rel)
+  if (!abs) return false
+  if (!exec || typeof exec !== 'object') return false
+  const e = exec as {
+    callId?: unknown
+    agent?: { session?: { append?: (type: string, data: unknown) => void } }
+  }
+  const session = e.agent?.session
+  if (!session || typeof session.append !== 'function') return false
+  let turn = 0
+  try {
+    const projections = ctx.get?.('sessionProjections') as
+      | { stateOf?: (s: unknown, name: string) => { lastTurn?: number } | undefined }
+      | undefined
+    turn = Number(projections?.stateOf?.(session, 'turnBoundary')?.lastTurn || 0)
+  } catch {
+    turn = 0
+  }
+  if (!Number.isSafeInteger(turn) || turn < 1) return false
+  const callId = String(e.callId || '').trim()
+  if (!callId) return false
+  session.append('deliverables/presented', {
+    turn,
+    callId,
+    files: [{ path: abs, description: '本批审码报告' }],
+  })
+  return true
 }
 
 function execSessionId(exec: unknown): string {
@@ -561,6 +614,15 @@ function chatBodyRender(_args: unknown, value: unknown) {
     const body = v.chat_body.trim()
     // 工具卡内不重复贴全文；正文由 finalizeContent 给出唯一一份
     if (v.done === true && (v.suppress_conclusion === true || isConclusionBody(body))) {
+      const ui = v.cursor_chat_ui
+      const kind =
+        ui && typeof ui === 'object' ? String((ui as { kind?: unknown }).kind || '') : ''
+      // 空 content 会让模型编造「没有返回任何结果」。Git 交付只回事实 + 硬停止，全文仍由 turnTail 挂。
+      if (kind === 'git_deliver') {
+        const fact =
+          (typeof v.detail === 'string' && v.detail.trim()) || 'Git 交付已结束，结论已写入界面。'
+        return textBlocks(`${fact}\n\n${GIT_DELIVER_MODEL_STOP}`)
+      }
       return textBlocks('')
     }
     return textBlocks(body)
@@ -598,7 +660,8 @@ function ccPresentResult(_args: unknown, result: unknown): unknown {
 
 /**
  * 会话日志最终 content：终态结论必须落盘。
- * 此前清空会导致重开会话正文空白；工具卡内仍由 chatBodyRender 藏掉，避免与 turnTail 双份。
+ * 工具卡内由 chatBodyRender 藏掉，避免和 turnTail 叠两份。
+ * 这里不能再清空：清空后切换会话只剩模型短句，结论正文就没了。
  */
 function finalizeChatBody(
   _exec: unknown,
@@ -608,7 +671,6 @@ function finalizeChatBody(
   const v = asToolValue(result.value)
   const body = v && typeof v.chat_body === 'string' ? v.chat_body.trim() : ''
   if (!body) return textBlocks('')
-  if (v && v.suppress_conclusion === true) return textBlocks('')
   return textBlocks(body)
 }
 
@@ -1522,6 +1584,17 @@ export function apply(ctx: Context) {
           signal: exec?.signal,
         })
         const job = out.job
+        if (job?.git_deliver?.review_report_rel && !job.git_deliver.review_presented) {
+          try {
+            if (presentReviewReport(ctx, exec, abs, job.git_deliver.review_report_rel)) {
+              patchJob(job.id, {
+                git_deliver: { ...job.git_deliver, review_presented: true },
+              })
+            }
+          } catch (err) {
+            console.warn('[cursor-chat] 审码报告未写入宿主文件卡', err)
+          }
+        }
         const plan = out.plan
         const uiPlan = plan
           ? {

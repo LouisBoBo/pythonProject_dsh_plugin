@@ -84,10 +84,16 @@ def main(argv: list[str] | None = None) -> int:
             ]
         else:
             files = [x.strip() for x in files_arg.split(",") if x.strip()]
+        def _progress(done: int, total: int) -> None:
+            # 进度只走 stderr，stdout 仍是唯一一份 JSON
+            sys.stderr.write(f"DSH_REVIEW_PROGRESS\t{int(done)}\t{int(total)}\n")
+            sys.stderr.flush()
+
         result = run_batch_review(
             workspace=str(args.workspace),
             files=files,
             focus=str(args.focus or ""),
+            on_progress=_progress,
         )
         # 对外去掉内部调试字段
         result.pop("_high_severity_rows", None)

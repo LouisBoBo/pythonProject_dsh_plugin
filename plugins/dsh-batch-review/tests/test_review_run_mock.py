@@ -205,7 +205,8 @@ def test_run_batch_falls_back_company_when_wb_official(tmp_path: Path, monkeypat
     assert out["unavailable"] is False
 
 
-def test_missing_findings_block_unavailable(tmp_path: Path, monkeypatch):
+def test_missing_findings_block_degrades_not_engine_down(tmp_path: Path, monkeypatch):
+    """催收后仍无机器块：记低危格式异常并 ran，禁止整批标引擎不可用。"""
     (tmp_path / "d.py").write_text("x=1\n", encoding="utf-8")
     monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
     monkeypatch.setattr(
@@ -224,11 +225,57 @@ def test_missing_findings_block_unavailable(tmp_path: Path, monkeypatch):
         files=["d.py"],
         chat_fn=lambda *a, **k: "看起来有注入风险，但我不输出机器块",
     )
-    assert out["unavailable"] is True
-    assert out["passed"] is False
+    assert out["unavailable"] is False
+    assert out["ran"] is True
+    assert out["passed"] is True  # 仅 low，不挡提交
+    titles = [str(f.get("title") or "") for f in (out.get("findings") or [])]
+    assert any("格式异常" in t or "结构化" in t for t in titles)
 
 
-def test_skipped_file_blocks(tmp_path: Path, monkeypatch):
+def test_deleted_file_reads_head_not_engine_down(tmp_path: Path, monkeypatch):
+    """git 已删除的勾选文件须用 HEAD 原文纳入审码，禁止整批报未能纳入。"""
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True, capture_output=True)
+    kept = tmp_path / "keep.py"
+    gone = tmp_path / "gone.py"
+    kept.write_text("a=1\n", encoding="utf-8")
+    gone.write_text("b=2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "keep.py", "gone.py"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    gone.unlink()
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    seen = {"body": ""}
+
+    def chat(_llm, msgs, **_kw):
+        for m in msgs:
+            if m.get("role") == "user":
+                seen["body"] += m.get("content") or ""
+        return ":::code_review_findings\n[]\n:::"
+
+    out = run_batch_review(workspace=str(tmp_path), files=["keep.py", "gone.py"], chat_fn=chat)
+    assert out["unavailable"] is False
+    assert out["ran"] is True
+    assert "gone.py" in (out.get("reviewed_files") or [])
+    assert "已从工作区删除" in seen["body"]
+    assert "b=2" in seen["body"]
+
+
+def test_skipped_file_does_not_block(tmp_path: Path, monkeypatch):
+    """读不到的勾选文件直接放行，读得到的仍审，不拦整批。"""
     (tmp_path / "ok.py").write_text("x=1\n", encoding="utf-8")
     monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
     monkeypatch.setattr(
@@ -247,5 +294,234 @@ def test_skipped_file_blocks(tmp_path: Path, monkeypatch):
         files=["ok.py", "missing.py"],
         chat_fn=lambda *a, **k: ':::code_review_findings\n[]\n:::',
     )
-    assert out["unavailable"] is True
-    assert "未能纳入审码" in str(out.get("detail") or "")
+    assert out["unavailable"] is False
+    assert out["ran"] is True
+    assert out["passed"] is True
+    assert "ok.py" in (out.get("reviewed_files") or [])
+    assert "missing.py" in (out.get("skipped_files") or [])
+    assert out.get("unavailable_code") in (None, "")
+
+
+def test_read_failure_does_not_hide_high(tmp_path: Path, monkeypatch):
+    """读失败放行不得把同批里读到的高危一起放掉。"""
+    (tmp_path / "ok.py").write_text("x=1\n", encoding="utf-8")
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    out = run_batch_review(
+        workspace=str(tmp_path),
+        files=["ok.py", "missing.py"],
+        chat_fn=lambda *a, **k: (
+            ':::code_review_findings\n'
+            '[{"file":"ok.py","line":1,"severity":"high","title":"危险 eval","description":"RCE"}]\n'
+            ':::'
+        ),
+    )
+    assert out["unavailable"] is False
+    assert out["ran"] is True
+    assert out["passed"] is False
+    assert out["high_count"] >= 1
+    assert "missing.py" in (out.get("skipped_files") or [])
+
+
+def test_review_progress_reports_file_counts(tmp_path: Path, monkeypatch):
+    """分片开始和结束都报已审/总数，最后一条必须到齐。"""
+    for i in range(4):
+        (tmp_path / f"f{i}.py").write_text(f"x={i}\n", encoding="utf-8")
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    seen: list[tuple[int, int]] = []
+    out = run_batch_review(
+        workspace=str(tmp_path),
+        files=[f"f{i}.py" for i in range(4)],
+        chat_fn=lambda *a, **k: ":::code_review_findings\n[]\n:::",
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert out["passed"] is True
+    assert seen[0] == (1, 4)
+    assert (3, 4) in seen
+    assert seen[-1] == (4, 4)
+
+
+def test_all_unreadable_passes(tmp_path: Path, monkeypatch):
+    """一个文件都读不到时也放行，不进入审码闸。"""
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+
+    def chat(*_a, **_k):
+        raise AssertionError("没有可读文件时不应调用模型")
+
+    out = run_batch_review(workspace=str(tmp_path), files=["missing.py"], chat_fn=chat)
+    assert out["unavailable"] is False
+    assert out["ran"] is True
+    assert out["passed"] is True
+    assert "missing.py" in (out.get("skipped_files") or [])
+
+
+def test_untracked_dir_expands_not_engine_down(tmp_path: Path, monkeypatch):
+    """``MOM/`` 一类未跟踪目录须展开内文件，禁止整批 unavailable。"""
+    (tmp_path / "ok.py").write_text("x=1\n", encoding="utf-8")
+    mom = tmp_path / "MOM" / "2026-11-09"
+    mom.mkdir(parents=True)
+    (mom / "note.md").write_text("# ok\n", encoding="utf-8")
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    reviewed: list[str] = []
+
+    def chat(_llm, msgs, **_kw):
+        user = msgs[-1]["content"] if msgs else ""
+        reviewed.append(user)
+        return ":::code_review_findings\n[]\n:::"
+
+    out = run_batch_review(
+        workspace=str(tmp_path),
+        files=["ok.py", "MOM"],
+        chat_fn=chat,
+    )
+    assert out["unavailable"] is False
+    assert out["ran"] is True
+    assert out["passed"] is True
+    assert "MOM/2026-11-09/note.md" in (out.get("reviewed_files") or [])
+    assert "ok.py" in (out.get("reviewed_files") or [])
+
+
+def test_missing_block_repairs_once(tmp_path: Path, monkeypatch):
+    """主调用漏机器块时须催收一次，催收成功则放行。"""
+    (tmp_path / "a.py").write_text("x=1\n", encoding="utf-8")
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    calls = {"n": 0}
+
+    def chat(_llm, msgs, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "Long English analysis without fence…"
+        return ":::code_review_findings\n[]\n:::"
+
+    out = run_batch_review(workspace=str(tmp_path), files=["a.py"], chat_fn=chat)
+    assert calls["n"] == 2
+    assert out["unavailable"] is False and out["ran"] is True and out["passed"] is True
+
+
+def test_non_code_passthrough_not_sent_to_llm(tmp_path: Path, monkeypatch):
+    (tmp_path / "a.py").write_text("x=1\n", encoding="utf-8")
+    (tmp_path / "note.md").write_text("# report\n", encoding="utf-8")
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    seen_users: list[str] = []
+
+    def chat(_llm, msgs, **_kw):
+        for m in msgs:
+            if m.get("role") == "user":
+                seen_users.append(m.get("content") or "")
+        return ":::code_review_findings\n[]\n:::"
+
+    out = run_batch_review(
+        workspace=str(tmp_path),
+        files=["a.py", "note.md"],
+        chat_fn=chat,
+    )
+    assert out["unavailable"] is False
+    assert "note.md" in (out.get("reviewed_files") or [])
+    assert all("note.md" not in u or "===== FILE: note.md =====" not in u for u in seen_users)
+
+
+def test_rule_seed_and_official_report(tmp_path: Path, monkeypatch):
+    (tmp_path / "u.sh").write_text('curl http://175.178.238.31/dsh-plugins/plugins.json\n', encoding="utf-8")
+    monkeypatch.setenv("DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY", "1")
+    monkeypatch.setattr(
+        "dsh_batch_review.review_run.load_workbuddy_config",
+        lambda: {
+            "deepseek": {
+                "provider": "openai_compat",
+                "api_key": "sk",
+                "base_url": "http://127.0.0.1:9/v1",
+                "model": "m",
+            }
+        },
+    )
+    seen_system = {"text": ""}
+
+    def chat(_llm, msgs, **_kw):
+        for m in msgs:
+            if m.get("role") == "system":
+                seen_system["text"] = m.get("content") or ""
+        return ":::code_review_findings\n[]\n:::"
+
+    out = run_batch_review(workspace=str(tmp_path), files=["u.sh"], chat_fn=chat)
+    reply = out["reply"]
+    assert out["unavailable"] is False
+    assert out["passed"] is False
+    assert out["high_count"] >= 1
+    assert str(out["report_id"]).startswith("cr-")
+    assert "代码审核汇总报告" in reply
+    assert "审核人：Viprasol + workbuddy-gate-90（Skill `zr-workbuddy-code-review`）" in reply
+    assert "public-ip-http-url" in reply
+    assert "// ❌ 当前代码" in reply
+    assert "一、总体评价" in reply
+    assert "四、审核结论" in reply
+    assert "❌ 审核不通过" in reply
+    assert "Viprasol" in seen_system["text"]
+    from dsh_batch_review.prompt import build_compact_gateway_system_prompt
+
+    compact = build_compact_gateway_system_prompt()
+    assert compact.find(":::code_review_findings") < compact.find("Viprasol")

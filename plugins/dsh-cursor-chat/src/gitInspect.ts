@@ -3,9 +3,12 @@
  * 不执行 commit/push；敏感路径只列、默认不勾选。
  */
 import { execFile } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import { isSensitiveRel, normalizeRel } from './pathScope.js'
+
+/** 未跟踪目录最多展开多少个文件进确认卡 / 审码名单（防巨树拖垮） */
+const MAX_UNTRACKED_DIR_EXPAND = 200
 
 export type GitStatusEntry = {
   rel: string
@@ -26,7 +29,7 @@ export type GitInspectOk = {
   /** 当前检出分支；detached 时为空串并写 head_detached */
   current_branch: string
   head_detached: boolean
-  /** 推断的 PR 基线分支（main/master 等） */
+  /** 合并目标：远端默认分支。PR 是「提交分支 → 这个分支」 */
   base_branch: string
   /** 有 upstream 时的远端跟踪名，如 origin/main */
   upstream: string
@@ -104,6 +107,58 @@ export function displayRemoteUrl(raw: string): string {
   return s
 }
 
+/**
+ * 解开 `git status --porcelain` 的 C 引用路径。
+ * 非 ASCII（如「审码报告.md」）默认是 `"...\345\256\241..."` 字节转义。
+ * 必须先按字节还原成 UTF-8，再交给 normalizeRel。
+ * 若先把 `\` 换成 `/`，八进制会被拆成不存在的目录，审码会误报「未能纳入」。
+ * 未加引号的路径原样返回（Windows 反斜杠仍由 normalizeRel 处理）。
+ */
+export function unquoteGitPath(raw: string): string {
+  const s0 = String(raw || '').trim()
+  if (!(s0.length >= 2 && s0.startsWith('"') && s0.endsWith('"'))) return s0
+  const s = s0.slice(1, -1)
+  const bytes: number[] = []
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch !== '\\') {
+      const c = s.charCodeAt(i)
+      if (c <= 0x7f) bytes.push(c)
+      else for (const b of Buffer.from(ch, 'utf8')) bytes.push(b)
+      continue
+    }
+    const n = s[i + 1]
+    if (n === undefined) break
+    if (n >= '0' && n <= '7') {
+      const oct = s.slice(i + 1, i + 4)
+      if (/^[0-7]{3}$/.test(oct)) {
+        bytes.push(parseInt(oct, 8))
+        i += 3
+        continue
+      }
+    }
+    const simple: Record<string, number> = {
+      '\\': 0x5c,
+      '"': 0x22,
+      n: 0x0a,
+      t: 0x09,
+      r: 0x0d,
+      a: 0x07,
+      b: 0x08,
+      f: 0x0c,
+      v: 0x0b,
+    }
+    if (Object.prototype.hasOwnProperty.call(simple, n)) {
+      bytes.push(simple[n])
+      i += 1
+      continue
+    }
+    bytes.push(n.charCodeAt(0) & 0xff)
+    i += 1
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
+
 /** 解析 `git status --porcelain` 行（非 -z） */
 export function parsePorcelainLines(text: string): { rel: string; code: string }[] {
   const out: { rel: string; code: string }[] = []
@@ -112,14 +167,90 @@ export function parsePorcelainLines(text: string): { rel: string; code: string }
     if (!line || line.length < 4) continue
     const code = line.slice(0, 2)
     let pathPart = line.slice(3)
-    // rename: "R  old -> new"
+    // rename: "R  old -> new"；只取新路径，且先解 C 引用再规范化
     if (pathPart.includes(' -> ')) {
       pathPart = pathPart.split(' -> ').pop() || pathPart
     }
-    const rel = normalizeRel(pathPart.trim().replace(/^"|"$/g, ''))
+    const rel = normalizeRel(unquoteGitPath(pathPart.trim()))
     if (!rel || seen.has(rel)) continue
     seen.add(rel)
     out.push({ rel, code })
+  }
+  return out
+}
+
+function listFilesUnderDir(workspace: string, dirRel: string, limit: number): string[] {
+  const absDir = join(workspace, dirRel)
+  const out: string[] = []
+  const walk = (dir: string) => {
+    if (out.length >= limit) return
+    let names: string[] = []
+    try {
+      names = readdirSync(dir)
+    } catch {
+      return
+    }
+    names.sort()
+    for (const name of names) {
+      if (out.length >= limit) return
+      if (name === '.git' || name === 'node_modules' || name === '__pycache__') continue
+      const full = join(dir, name)
+      let st
+      try {
+        st = statSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!st.isFile()) continue
+      const rel = normalizeRel(relative(workspace, full).replace(/\\/g, '/'))
+      if (rel) out.push(rel)
+    }
+  }
+  walk(absDir)
+  return out
+}
+
+/**
+ * 把 porcelain 里的未跟踪目录（如 ``?? MOM/``）展开为内部文件。
+ * 目录本身不是可审码/可精确勾选的文件；若不展开，审码会因 is_file 失败误报引擎不可用。
+ * 仅展开存在且为目录的路径；空目录丢弃；已是文件的行原样保留。
+ */
+export function expandDirStatusRows(
+  workspace: string,
+  rows: { rel: string; code: string }[],
+): { rel: string; code: string }[] {
+  const abs = String(workspace || '').trim()
+  const out: { rel: string; code: string }[] = []
+  const seen = new Set<string>()
+  const push = (rel: string, code: string) => {
+    const r = normalizeRel(rel)
+    if (!r || seen.has(r)) return
+    seen.add(r)
+    out.push({ rel: r, code })
+  }
+  for (const row of rows) {
+    if (!abs) {
+      push(row.rel, row.code)
+      continue
+    }
+    const full = join(abs, row.rel)
+    let isDir = false
+    try {
+      isDir = existsSync(full) && statSync(full).isDirectory()
+    } catch {
+      isDir = false
+    }
+    if (!isDir) {
+      push(row.rel, row.code)
+      continue
+    }
+    const children = listFilesUnderDir(abs, row.rel, MAX_UNTRACKED_DIR_EXPAND)
+    if (!children.length) continue
+    for (const child of children) push(child, row.code)
   }
   return out
 }
@@ -138,6 +269,12 @@ export function buildStatusEntries(
     else selected_files.push(row.rel)
   }
   return { entries, selected_files, held_sensitive_files }
+}
+
+/** `git ls-remote --symref origin HEAD` 的第一行：`ref: refs/heads/hebo HEAD` */
+export function parseRemoteHeadSymref(stdout: string): string {
+  const m = String(stdout || '').match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD/m)
+  return m ? m[1] : ''
 }
 
 export function pickDefaultBaseBranch(opts: {
@@ -249,12 +386,16 @@ export async function inspectGitWorkspace(workspace: string): Promise<GitInspect
   const upstreamRes = await runGit(abs, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
   const upstream = upstreamRes.ok ? String(upstreamRes.stdout || '').trim() : ''
 
-  const symRes = await runGit(abs, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
-  let remoteHead = ''
-  if (symRes.ok) {
-    remoteHead = String(symRes.stdout || '')
-      .trim()
-      .replace(/^refs\/remotes\/origin\//, '')
+  // 本机 origin/HEAD 可能还停在旧的 main。合并目标以远端当前默认分支为准。
+  const liveHead = await runGit(abs, ['ls-remote', '--symref', remoteName, 'HEAD'], { timeoutMs: 8_000 })
+  let remoteHead = liveHead.ok ? parseRemoteHeadSymref(liveHead.stdout) : ''
+  if (!remoteHead) {
+    const symRes = await runGit(abs, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
+    if (symRes.ok) {
+      remoteHead = String(symRes.stdout || '')
+        .trim()
+        .replace(/^refs\/remotes\/origin\//, '')
+    }
   }
 
   const localBr = await runGit(abs, ['branch', '--format=%(refname:short)'])
@@ -279,7 +420,7 @@ export async function inspectGitWorkspace(workspace: string): Promise<GitInspect
       detail: st.stderr || 'git status 失败',
     }
   }
-  const rows = parsePorcelainLines(st.stdout)
+  const rows = expandDirStatusRows(abs, parsePorcelainLines(st.stdout))
   if (!rows.length) {
     return {
       ok: false,

@@ -3,9 +3,9 @@
  * 这里只读项目里已经写好的命令，在对应目录后台拉起。找不到就不编命令。
  * 后续重启先看 docs/04-Cursor-AI-Coding逼真版本/重启服务方案.md；结构不同时沿用该项目自己的命令。
  */
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { readBackendPortFromViteProxy, resolveBackendRoot, resolveUvicornStartCommand } from './backendRestart.js'
 
 const PACKAGE_DIRS = ['frontend', 'web', 'client', 'apps/web', '']
@@ -418,23 +418,162 @@ function launchWindows(workspace: string, plan: ServicePlan): { ok: true; pid: s
   }
 }
 
-function spawnDetached(plan: ServicePlan, logPath: string): { ok: true; pid: number | undefined } | { ok: false; detail: string } {
-  let fd: number | null = null
-  try {
-    mkdirSync(dirname(logPath), { recursive: true })
-    fd = openSync(logPath, 'a')
-  } catch {
-    fd = null
+/**
+ * 仅 POSIX 启动环境：桌面宿主 PATH 常缺 nvm/homebrew。
+ * Windows 走 launchWindows / Start-Process，禁止混用本函数。
+ */
+function posixLaunchEnv(bin: string): NodeJS.ProcessEnv {
+  const home = process.env.HOME || ''
+  const extra = [
+    dirname(bin),
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    '/usr/bin',
+    '/bin',
+    home ? join(home, '.nvm/current/bin') : '',
+    home ? join(home, '.local/share/fnm/current/bin') : '',
+  ].filter(Boolean)
+  const cur = String(process.env.PATH || '')
+  const parts = [...extra, ...cur.split(delimiter).filter(Boolean)]
+  const seen = new Set<string>()
+  const path = parts
+    .filter((p) => {
+      if (!p || seen.has(p)) return false
+      seen.add(p)
+      return true
+    })
+    .join(delimiter)
+  return { ...process.env, PATH: path, NO_PROXY: '*', no_proxy: '*' }
+}
+
+/**
+ * 仅 macOS/Linux：前端改为绝对 node + vite.js，避免 npm 包装进程随会话退出。
+ * Windows 必须原样返回：已验收路径是 npm.cmd + Start-Process，禁止在此改写。
+ * @param platform - 可注入，便于单测；默认 process.platform
+ */
+export function preferDirectVite(plan: ServicePlan, platform: NodeJS.Platform = process.platform): ServicePlan {
+  if (platform === 'win32') return plan
+  if (plan.side !== 'frontend' || !isSafePort(plan.port)) return plan
+  const viteJs = join(plan.cwd, 'node_modules', 'vite', 'bin', 'vite.js')
+  if (!existsSync(viteJs)) return plan
+  const node =
+    resolveBin('node') ||
+    ['/usr/local/bin/node', '/opt/homebrew/bin/node'].find((p) => existsSync(p)) ||
+    null
+  if (!node) return plan
+  return {
+    ...plan,
+    bin: node,
+    args: [viteJs, '--host', '0.0.0.0', '--port', String(plan.port), '--strictPort'],
+    label: `前端 vite :${plan.port}`,
+    markers: Array.from(new Set([...plan.markers, plan.cwd, viteJs, 'vite'])),
   }
+}
+
+/**
+ * 按操作系统分派拉起：win32 → Start-Process；darwin/linux → detached spawn。
+ * 禁止在 Windows 上调用 lsof/ps，禁止在 POSIX 上走 PowerShell。
+ * 调用方负责 preferDirectVite（仅非 win32）；此处不再改写计划。
+ */
+function launchForPlatform(
+  workspace: string,
+  plan: ServicePlan,
+): { ok: true; pid: string } | { ok: false; detail: string } {
+  if (process.platform === 'win32') return launchWindows(workspace, plan)
+  return launchPosix(workspace, plan)
+}
+
+/** 只停「本机回环 + 命令行含本项目标记」的监听进程。 */
+function stopPosixProjectPort(plan: ServicePlan): void {
+  if (!isSafePort(plan.port)) return
+  const needles = projectNeedles(plan).map((n) => n.toLowerCase())
+  if (!needles.length) return
+  let pids: string[] = []
+  try {
+    pids = execFileSync('lsof', ['-nP', `-iTCP:${plan.port}`, '-sTCP:LISTEN', '-t'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+  } catch {
+    return
+  }
+  for (const pid of pids) {
+    try {
+      const cmd = execFileSync('ps', ['-p', pid, '-o', 'command='], {
+        encoding: 'utf8',
+        timeout: 3000,
+      }).toLowerCase()
+      if (!needles.some((n) => cmd.includes(n))) continue
+      process.kill(Number(pid), 'SIGTERM')
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    execFileSync('/bin/sleep', ['1'], { timeout: 3000 })
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * macOS/Linux：与 Windows Start-Process 同契约——先停本项目端口进程，再 detached 后台拉起，
+ * 标准输出/错误分文件，写 pid。macOS 无 setsid，用 spawn({detached:true})+unref；
+ * 禁止依赖 Cursor 短会话里的 nohup（会话结束进程会被回收）。
+ */
+function launchPosix(
+  workspace: string,
+  plan: ServicePlan,
+): { ok: true; pid: string } | { ok: false; detail: string } {
+  // 调用方须已 preferDirectVite；此处不再二次改写，避免与 Windows 计划混淆。
+  const needles = projectNeedles(plan)
+  if (!needles.length) {
+    return { ok: false, detail: '无法确认本项目进程标记，未杀进程也未启动' }
+  }
+  const logDir = join(workspace, '.dev-logs')
+  mkdirSync(logDir, { recursive: true })
+  const outLog = join(logDir, `${plan.side}.log`)
+  const errLog = join(logDir, `${plan.side}.err.log`)
+  const pidFile = join(logDir, `${plan.side}.pid`)
+  stopPosixProjectPort(plan)
+  try {
+    writeFileSync(outLog, '')
+    writeFileSync(errLog, '')
+  } catch {
+    /* ignore */
+  }
+  let outFd: number | null = null
+  let errFd: number | null = null
   let child: ChildProcess
   try {
+    outFd = openSync(outLog, 'a')
+    errFd = openSync(errLog, 'a')
     child = spawn(plan.bin, plan.args, {
       cwd: plan.cwd,
       detached: true,
-      windowsHide: true,
-      stdio: fd == null ? 'ignore' : ['ignore', fd, fd],
+      stdio: ['ignore', outFd, errFd],
+      env: posixLaunchEnv(plan.bin),
     })
   } catch (err) {
+    for (const fd of [outFd, errFd]) {
+      if (fd != null) {
+        try {
+          closeSync(fd)
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return { ok: false, detail: `启动失败：${String(err).slice(0, 180)}` }
+  }
+  child.on('error', () => {
+    /* 已脱离的进程错误不能打崩宿主 */
+  })
+  child.unref()
+  for (const fd of [outFd, errFd]) {
     if (fd != null) {
       try {
         closeSync(fd)
@@ -442,20 +581,14 @@ function spawnDetached(plan: ServicePlan, logPath: string): { ok: true; pid: num
         /* ignore */
       }
     }
-    return { ok: false, detail: `启动失败：${String(err).slice(0, 160)}` }
   }
-  child.unref()
-  if (fd != null) {
-    try {
-      closeSync(fd)
-    } catch {
-      /* ignore */
-    }
+  const pid = child.pid ? String(child.pid) : ''
+  try {
+    writeFileSync(pidFile, pid ? `${pid}\n` : '')
+  } catch {
+    /* ignore */
   }
-  child.on('error', () => {
-    /* 已脱离的进程错误不能打崩宿主 */
-  })
-  return { ok: true, pid: child.pid }
+  return { ok: true, pid }
 }
 
 async function serviceResponds(plan: ServicePlan): Promise<boolean> {
@@ -484,15 +617,13 @@ async function waitReady(
     if (await serviceResponds(plan)) return { ok: true, detail: `${plan.label} 已在听` }
     await new Promise((r) => setTimeout(r, 400))
   }
-  const err = tailFile(join(workspace, '.dev-logs', `${plan.side}.err.log`))
+  const err =
+    tailFile(join(workspace, '.dev-logs', `${plan.side}.err.log`)) ||
+    tailFile(join(workspace, '.dev-logs', `${plan.side}.log`))
   return {
     ok: false,
     detail: err ? `${plan.label} 没有起来。${err}` : `${plan.label} 已执行，端口仍未响应`,
   }
-}
-
-function logFile(workspace: string, side: string): string {
-  return join(workspace, '.dev-logs', `${side}.log`)
 }
 
 export type StartServicesResult = {
@@ -552,29 +683,35 @@ export async function startRequestedServices(
       return { ok: false, detail: '用户取消' }
     }
     const callId = `restart-${plan.side}-${Date.now()}`
-    const cmdline = planCommandLine(plan)
-    say(`正在拉起${plan.label}，请稍候`)
+    // Windows：保持计划原样（npm.cmd / uvicorn）。POSIX：前端可改直拉 vite。
+    let launchPlan: ServicePlan =
+      process.platform === 'win32' ? plan : preferDirectVite(plan, process.platform)
+    const platformTag = process.platform === 'win32' ? 'Windows' : 'macOS/Linux'
+    say(`正在拉起${launchPlan.label}（${platformTag}），请稍候`)
+    if (launchPlan !== plan) {
+      say(`macOS/Linux：前端改用直接 vite :${launchPlan.port}，避免 npm 包装进程被会话回收`)
+    }
     onProgress?.({
       type: 'command',
       call_id: callId,
-      command: `cd ${plan.cwd}\n${cmdline}`,
+      command: `cd ${launchPlan.cwd}\n${planCommandLine(launchPlan)}`,
       tool_status: 'running',
-      snippet: `工作目录 ${plan.cwd}${plan.port ? `\n端口 ${plan.port}` : ''}`,
+      snippet: `平台 ${platformTag}\n工作目录 ${launchPlan.cwd}${launchPlan.port ? `\n端口 ${launchPlan.port}` : ''}`,
     })
-    let started =
-      process.platform === 'win32'
-        ? launchWindows(root, plan)
-        : spawnDetached(plan, logFile(root, plan.side))
-    // Windows 偶发 Start-Process 对 npm 失败：改用 npm.cmd 再试一次（不改其它计划）
+    let started = launchForPlatform(root, launchPlan)
+    // 仅 Windows：Start-Process 对无扩展名 npm 偶发失败 → npm.cmd 再试（不动 POSIX）
     if (
       !started.ok &&
       process.platform === 'win32' &&
-      plan.side === 'frontend' &&
-      /(?:^|[\\/])npm(?:\.exe)?$/i.test(plan.bin) &&
-      !/\.cmd$/i.test(plan.bin)
+      launchPlan.side === 'frontend' &&
+      /(?:^|[\\/])npm(?:\.exe)?$/i.test(launchPlan.bin) &&
+      !/\.cmd$/i.test(launchPlan.bin)
     ) {
-      const retryPlan = { ...plan, bin: `${plan.bin.replace(/\.exe$/i, '')}.cmd` }
-      say(`前端启动失败，改用 npm.cmd 再启一次`)
+      const retryPlan: ServicePlan = {
+        ...launchPlan,
+        bin: `${launchPlan.bin.replace(/\.exe$/i, '')}.cmd`,
+      }
+      say(`Windows：前端启动失败，改用 npm.cmd 再启一次`)
       onProgress?.({
         type: 'command',
         call_id: callId,
@@ -583,34 +720,38 @@ export async function startRequestedServices(
         snippet: `上次失败：${started.detail}\n改用 npm.cmd 重试`,
       })
       started = launchWindows(root, retryPlan)
+      if (started.ok) launchPlan = retryPlan
     }
     if (!started.ok) {
-      const failedLine = `${plan.label}：${started.detail}`
+      const failedLine = `${launchPlan.label}：${started.detail}`
       lines.push(failedLine)
       say(failedLine)
       onProgress?.({
         type: 'command',
         call_id: callId,
-        command: `cd ${plan.cwd}\n${cmdline}`,
+        command: `cd ${launchPlan.cwd}\n${planCommandLine(launchPlan)}`,
         tool_status: 'failed',
         snippet: started.detail.slice(0, 1200),
       })
       continue
     }
-    const ready = await waitReady(root, plan, isCancel)
+    const ready = await waitReady(root, launchPlan, isCancel)
     if (ready.detail === '用户取消') {
       return { ok: false, detail: '用户取消' }
     }
     lines.push(ready.detail)
     say(ready.detail)
-    const errTail = ready.ok ? '' : tailFile(join(root, '.dev-logs', `${plan.side}.err.log`))
+    const errTail = ready.ok
+      ? ''
+      : tailFile(join(root, '.dev-logs', `${launchPlan.side}.err.log`)) ||
+        tailFile(join(root, '.dev-logs', `${launchPlan.side}.log`))
     onProgress?.({
       type: 'command',
       call_id: callId,
-      command: `cd ${plan.cwd}\n${cmdline}`,
+      command: `cd ${launchPlan.cwd}\n${planCommandLine(launchPlan)}`,
       tool_status: ready.ok ? 'completed' : 'failed',
       snippet: (ready.ok
-        ? `${ready.detail}${started.ok && 'pid' in started && started.pid ? `\nPID ${started.pid}` : ''}`
+        ? `${ready.detail}${started.ok && started.pid ? `\nPID ${started.pid}` : ''}`
         : `${ready.detail}${errTail ? `\n${errTail}` : ''}`
       ).slice(0, 2000),
     })

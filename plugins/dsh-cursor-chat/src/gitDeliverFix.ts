@@ -6,6 +6,7 @@ import { createJob, forceCancelJob, loadJob, patchJob, setStatus } from './jobs.
 import { healStalePendingReview, runJobBackground } from './orchestrator/runJob.js'
 import type { ReviewFinding } from './gitDeliverReview.js'
 import { formatHighFindingsForFix } from './gitDeliverReview.js'
+import type { TranscriptItem } from './transcript.js'
 import type { CursorCodingJob } from './types.js'
 
 const FINISH = new Set(['succeeded', 'failed', 'cancelled', 'blocked_no_runner'])
@@ -39,12 +40,56 @@ function scopeFromFindings(files: string[], high: ReviewFinding[]): string[] {
   return [...set]
 }
 
+/**
+ * 把高危修复写码单的过程并进 Git 交付卡。
+ * 修复单不绑会话，用户只能看到交付卡；这里按 id 覆盖更新，思考和工具行会跟着变，不重复堆。
+ */
+export function mergeFixTranscript(
+  gitItems: TranscriptItem[],
+  fixItems: TranscriptItem[],
+): TranscriptItem[] | null {
+  const copies = (fixItems || [])
+    .filter((it) => it && it.kind !== 'user' && it.id)
+    .map((it) => ({ ...it, id: it.id.startsWith('fix:') ? it.id : `fix:${it.id}` }))
+  if (!copies.length) return null
+  const next = [...(gitItems || [])]
+  const indexById = new Map<string, number>()
+  next.forEach((it, i) => indexById.set(it.id, i))
+  let changed = false
+  for (const copy of copies) {
+    const idx = indexById.get(copy.id)
+    if (idx == null) {
+      indexById.set(copy.id, next.length)
+      next.push(copy)
+      changed = true
+      continue
+    }
+    const prev = next[idx]
+    if (
+      prev.text !== copy.text ||
+      prev.tool_status !== copy.tool_status ||
+      prev.snippet !== copy.snippet ||
+      prev.streaming !== copy.streaming ||
+      prev.thinking_duration_ms !== copy.thinking_duration_ms ||
+      prev.path !== copy.path ||
+      prev.command !== copy.command
+    ) {
+      next[idx] = copy
+      changed = true
+    }
+  }
+  if (!changed) return null
+  return next.slice(-240)
+}
+
 export async function runGitDeliverHighFix(opts: {
   workspace: string
   selectedFiles: string[]
   highFindings: ReviewFinding[]
   /** 保留参数位；故意不写入 Job，避免污染会话复用 */
   sessionId?: string | null
+  /** Git 交付卡的 job。过程镜像到这张卡，不改修复单自己的账。 */
+  gitJobId?: string | null
   signal?: AbortSignal | null
   onProgress?: (message: string) => void
 }): Promise<{ ok: boolean; job: CursorCodingJob | null; detail: string }> {
@@ -86,6 +131,10 @@ export async function runGitDeliverHighFix(opts: {
       healStalePendingReview(job.id)
       const live = loadJob(job.id)
       if (!live) return { ok: false, job: null, detail: '高危修复任务丢失' }
+      if (opts.gitJobId) {
+        const merged = mergeFixTranscript(loadJob(opts.gitJobId)?.transcript || [], live.transcript || [])
+        if (merged) patchJob(opts.gitJobId, { transcript: merged })
+      }
       if (FINISH.has(live.status)) {
         const ok = live.status === 'succeeded'
         return {

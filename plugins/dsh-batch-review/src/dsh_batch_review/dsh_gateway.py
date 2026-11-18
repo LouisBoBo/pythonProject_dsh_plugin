@@ -100,7 +100,12 @@ def candidate_dsh_homes() -> list[Path]:
     local = os.environ.get("LOCALAPPDATA") or ""
     if local:
         push(Path(local) / "ZR_DSH" / "dsh-home")
-    push(Path.home() / ".dsh")
+    # macOS：部分桌面壳仍落盘到 ~/AppData/Local（与 Windows 同布局）；另认 Application Support
+    home = Path.home()
+    push(home / "AppData" / "Local" / "ZR_DSH" / "dsh-home")
+    push(home / "Library" / "Application Support" / "ZR_DSH" / "dsh-home")
+    push(home / "Library" / "Application Support" / "zr-workbuddy-desktop" / "dsh-home")
+    push(home / ".dsh")
     appdata = os.environ.get("APPDATA") or ""
     if appdata:
         push(Path(appdata) / "zr-workbuddy-desktop" / "dsh-home")

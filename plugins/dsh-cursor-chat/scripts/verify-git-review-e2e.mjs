@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { loadConfig } from '../lib/config.js'
 import {
   evaluateBatchReviewPayload,
+  resolveBatchReviewPython,
   resolveBatchReviewRoot,
   resolveGitDeliverReviewBackend,
   runBatchCodeReview,
@@ -18,7 +19,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = join(here, '..')
 const batchRoot = resolveBatchReviewRoot()
-const py = process.env.PYTHON || 'python'
+const py = resolveBatchReviewPython()
 const report = { ok: false, steps: [] }
 
 function step(name, detail) {
@@ -61,6 +62,14 @@ step('off_bypass', {
 step('batch_root', {
   ok: Boolean(batchRoot),
   batchRoot,
+  code: 13,
+})
+
+// —— 3b. 跨平台 Python（禁止默认裸名 python 在 macOS ENOENT）——
+step('batch_python', {
+  ok: Boolean(py),
+  py,
+  platform: process.platform,
   code: 13,
 })
 

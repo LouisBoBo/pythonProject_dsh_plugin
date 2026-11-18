@@ -52,6 +52,47 @@ class ReviewFinding:
         return _SEV_TO_P.get(self.severity, "P1")
 
 
+def _try_close_truncated_json_array(text: str) -> str | None:
+    """网关模型常截断 JSON 数组；仅在已有完整对象时补 `]`，禁止把散文里的 `[` 当成空数组。"""
+    s = (text or "").strip()
+    a = s.find("[")
+    if a < 0:
+        return None
+    frag = s[a:]
+    # 已完整
+    try:
+        json.loads(frag)
+        return frag
+    except json.JSONDecodeError:
+        pass
+    # 机器块正文仅开了数组、尚无对象：视为显式空列表
+    if re.fullmatch(r"\[\s*", frag):
+        return "[]"
+    # 从末尾回退到最后一个完整 `}`，再补 `]`；没有完整对象则放弃（避免误放行）
+    last_brace = frag.rfind("}")
+    if last_brace < 0:
+        return None
+    candidate = frag[: last_brace + 1].rstrip()
+    candidate = re.sub(r",\s*$", "", candidate)
+    if not candidate.endswith("]"):
+        candidate = candidate + "]"
+    if not candidate.lstrip().startswith("["):
+        candidate = "[" + candidate
+    try:
+        obj = json.loads(candidate)
+    except json.JSONDecodeError:
+        candidate2 = re.sub(r",\s*([}\]])", r"\1", candidate)
+        try:
+            obj = json.loads(candidate2)
+            candidate = candidate2
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(obj, list) or not obj:
+        # 截断恢复出空列表不可信（多半没解析到对象）
+        return None
+    return candidate
+
+
 def _loads_json_list(body: str) -> list[dict[str, Any]] | None:
     text = (body or "").strip()
     if not text:
@@ -64,14 +105,21 @@ def _loads_json_list(body: str) -> list[dict[str, Any]] | None:
         obj = json.loads(text)
     except json.JSONDecodeError:
         a, b = text.find("["), text.rfind("]")
-        if a < 0 or b <= a:
-            return None
-        try:
-            obj = json.loads(text[a : b + 1])
-        except json.JSONDecodeError:
-            # 容忍尾逗号
+        obj = None
+        if a >= 0 and b > a:
             try:
-                obj = json.loads(re.sub(r",\s*([}\]])", r"\1", text[a : b + 1]))
+                obj = json.loads(text[a : b + 1])
+            except json.JSONDecodeError:
+                try:
+                    obj = json.loads(re.sub(r",\s*([}\]])", r"\1", text[a : b + 1]))
+                except json.JSONDecodeError:
+                    obj = None
+        if obj is None:
+            closed = _try_close_truncated_json_array(text)
+            if not closed:
+                return None
+            try:
+                obj = json.loads(closed)
             except json.JSONDecodeError:
                 return None
     if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
@@ -88,9 +136,14 @@ def _extract_findings_block(text: str) -> list[dict[str, Any]] | None:
         after = s[m.end() :].lstrip()
         close = re.search(r"\n[ \t]*:::[ \t]*(?:\n|$)", after)
         body = after[: close.start()].strip() if close else re.sub(r"\n?[ \t]*:::[ \t]*\s*$", "", after).strip()
+        # 显式空机器块
+        if body in ("", "[]") or re.fullmatch(r"\[\s*\]", body):
+            return []
         rows = _loads_json_list(body)
         if rows is not None:
             return rows
+        # 标记存在但 JSON 烂掉：不要用全文散文兜底冒充空块
+        return None
     # 兜底：全文找 JSON 数组（模型偶发漏 ::: 标记或包在 ```json 里）
     for m2 in re.finditer(r"```(?:json|JSON)?\s*(\[[\s\S]*?\])\s*```", s):
         rows = _loads_json_list(m2.group(1))
@@ -115,22 +168,43 @@ def _normalize_severity(raw: Any) -> str:
 
 def _normalize_finding(row: dict[str, Any]) -> ReviewFinding | None:
     file = str(row.get("file") or row.get("path") or "").strip()
-    title = str(row.get("title") or row.get("name") or "").strip()
-    desc = str(row.get("description") or row.get("detail") or row.get("risk") or "").strip()
+    # 网关模型常用 message / summary 代替 title
+    title = str(
+        row.get("title")
+        or row.get("name")
+        or row.get("message")
+        or row.get("summary")
+        or row.get("issue")
+        or ""
+    ).strip()
+    desc = str(
+        row.get("description")
+        or row.get("detail")
+        or row.get("risk")
+        or row.get("message")
+        or row.get("summary")
+        or ""
+    ).strip()
     if not file or not title:
         return None
     line_raw = row.get("line")
     line: int | None
     try:
-        line = int(line_raw) if line_raw is not None and str(line_raw).strip() != "" else None
+        if line_raw is None or str(line_raw).strip() == "":
+            line = None
+        else:
+            # 容忍 "12" / 12 / "1-56"（取起始行）
+            s = str(line_raw).strip()
+            m = re.match(r"^(\d+)", s)
+            line = int(m.group(1)) if m else None
     except (TypeError, ValueError):
         line = None
     return ReviewFinding(
         file=file,
         line=line,
         severity=_normalize_severity(row.get("severity")),
-        title=title,
-        description=desc or title,
+        title=title[:200],
+        description=(desc or title)[:2000],
         code_snippet=str(row.get("code_snippet") or row.get("code") or "").strip()[:2000],
         fix_suggestion=str(row.get("fix_suggestion") or row.get("fix") or "").strip()[:1200],
         fix_code=str(row.get("fix_code") or "").strip()[:2000],
@@ -261,6 +335,13 @@ def format_risk_overview_from_findings(findings: list[Any]) -> str:
     return "\n".join(format_risk_overview_lines(n0, n1, n2, http_hits=http_n))
 
 
+def _md_para(lines: list[str], text: str) -> None:
+    """Markdown 单换行会被预览折成空格，段与段之间必须空一行。"""
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(text)
+
+
 def format_findings_report(
     findings: list[ReviewFinding],
     *,
@@ -271,7 +352,11 @@ def format_findings_report(
     draft_note: str = "",
     force_incomplete: bool = False,
 ) -> str:
-    """终稿体例对齐「代码审核汇总报告」；排版紧凑（避免多余空行）。"""
+    """终稿体例对齐「代码审核汇总报告」。
+
+    预览里 # / ## / ### 会放大到 18–21px，和 14px 正文挤在一起。
+    标题只用 ####，字号与正文相同，代码走围栏（预览里是小号等宽）。
+    """
     from datetime import date
 
     files = list(files_reviewed or [])
@@ -280,52 +365,56 @@ def format_findings_report(
         buckets.setdefault(f.priority, []).append(f)
     n0, n1, n2 = len(buckets["P0"]), len(buckets["P1"]), len(buckets["P2"])
     total = n0 + n1 + n2
-    http_hits = count_http_rule_hits(findings)
-    risk_lines = format_risk_overview_lines(n0, n1, n2, http_hits=http_hits)
 
-    # 单行接续，少插空行；文件列表用顿号挤在一段里
-    lines: list[str] = ["代码审核汇总报告"]
+    lines: list[str] = ["#### 代码审核汇总报告", ""]
+    lines.append("**审核文件**")
+    lines.append("")
     if files:
-        lines.append("审核文件：" + "、".join(files))
+        for rel in files:
+            lines.append(f"- `{rel}`")
     else:
-        lines.append("审核文件：（无）")
-    lines.append(f"审核日期：{date.today().isoformat()}")
-    lines.append(f"审核人：Viprasol + workbuddy-gate-90（Skill `{skill_id}`）")
+        lines.append("- （无）")
+    _md_para(lines, f"**审核日期：** {date.today().isoformat()}")
+    # 这一行的字面量被测试钉死，不要加星号或换行拆开
+    _md_para(lines, f"审核人：Viprasol + workbuddy-gate-90（Skill `{skill_id}`）")
     if local_path:
-        lines.append(f"工程路径：{local_path}")
-    lines.append("---")
-    lines.append("一、总体评价")
-    # 图二样式：总体评价先放高/中/低危；非 Viprasol 元信息可跟一行短评
-    lines.extend(risk_lines)
+        _md_para(lines, f"**工程路径：** `{local_path}`")
+    _md_para(lines, "---")
+    _md_para(lines, "#### 一、总体评价")
     sum_txt = (summary or "").strip()
     sum_first = ""
     if sum_txt:
         sum_txt = re.sub(r"^##\s*🔍?\s*代码审核报告\s*", "", sum_txt, flags=re.I).strip()
         sum_txt = re.sub(r"(?is)\*{0,2}分批纪要\*{0,2}[\s\S]*$", "", sum_txt).strip()
         sum_first = next((ln.strip() for ln in sum_txt.splitlines() if ln.strip()), "")
-        if (
-            sum_first
-            and "第 " not in sum_first
-            and "批：" not in sum_first
-            and not sum_first.startswith("已按")
-        ):
-            lines.append(sum_first)
+        if sum_first and "第 " not in sum_first and "批：" not in sum_first:
+            _md_para(lines, sum_first)
     if total == 0:
-        lines.append("本次审核共发现 0 个问题。")
-        lines.append(
-            "本轮抽样未发现需阻塞合并的严重问题；建议结合业务场景再人工抽查关键路径。"
+        _md_para(lines, "本次审核共发现 0 个问题。")
+        _md_para(
+            lines,
+            "本轮抽样未发现需阻塞合并的严重问题；建议结合业务场景再人工抽查关键路径。",
         )
     else:
-        lines.append(f"本次审核共发现 {total} 个问题。")
-        lines.append(
+        _md_para(lines, f"本次审核共发现 {total} 个问题，具体分布如下：")
+        lines.append("")
+        lines.append(f"- 🔴 **高危问题：** {n0} 处")
+        lines.append(f"- 🟡 **中危问题：** {n1} 处")
+        lines.append(f"- 🟢 **低危问题：** {n2} 处")
+        if n0:
+            _md_para(lines, "其中高危项须全部修复后方可合并；中危项建议合入前处理。")
+        elif n1:
+            _md_para(lines, "其中中危项建议合入前处理。")
+        _md_para(
+            lines,
             "所有问题均基于已读源码/配置，方法论为 Viprasol + workbuddy-gate-90"
-            "（及源码规则补种），位置与代码片段对应原始文件。"
+            "（及源码规则补种），位置与代码片段对应原始文件。",
         )
-    lines.append("---")
-    lines.append("二、详细问题清单（汇总后）")
+    _md_para(lines, "---")
+    _md_para(lines, "#### 二、详细问题清单")
 
     if total == 0:
-        lines.append("（无）")
+        _md_para(lines, "（无）")
     else:
         label = {
             "P0": "🔴 高危",
@@ -336,46 +425,56 @@ def format_findings_report(
         band_items = [(b, f) for b in ("P0", "P1", "P2") for f in (buckets.get(b) or [])]
         for bi, (band, f) in enumerate(band_items):
             idx += 1
-            lines.append(f"{label[band]} 问题{idx} — {f.title}")
+            _md_para(lines, f"#### {label[band]} {band} — 问题 {idx} — {f.title}")
             loc = f"约第 {f.line} 行" if f.line is not None else "见相关片段"
-            lines.append(f"文件：{f.file}　位置：{loc}")
-            lines.append(f"问题描述：{f.description}")
+            file_chip = f"`{f.file}`" if f.file else "（未标注文件）"
+            _md_para(lines, f"**位置：** {file_chip} 文件，{loc}")
+            _md_para(lines, f"**问题描述：** {f.description.strip() or '（无描述）'}")
             if f.code_snippet:
-                lines.append("// ❌ 当前代码")
+                _md_para(lines, "**当前代码**")
+                lines.append("")
                 lines.append("```")
+                lines.append("// ❌ 当前代码")
                 lines.append(f.code_snippet.rstrip())
                 lines.append("```")
             if f.fix_suggestion:
-                lines.append(f"修改建议：{f.fix_suggestion}")
+                _md_para(lines, f"**修改建议：** {f.fix_suggestion.strip()}")
             if f.fix_code:
-                lines.append("// ✅ 正确做法")
+                _md_para(lines, "**正确做法**")
+                lines.append("")
                 lines.append("```")
+                lines.append("// ✅ 正确做法")
                 lines.append(f.fix_code.rstrip())
                 lines.append("```")
             if bi < len(band_items) - 1:
-                lines.append("---")
+                _md_para(lines, "---")
 
-    lines.append("---")
-    lines.append("四、审核结论")
+    _md_para(lines, "---")
+    _md_para(lines, "#### 四、审核结论")
     if force_incomplete:
-        lines.append("❌ 审查不完整（LLM 未成功完成审查，不得视为通过）")
-        lines.append(f"- 当前可见问题：高危{n0} / 中危{n1} / 低危{n2}（可能仅含规则补种）。")
+        _md_para(lines, "❌ 审查不完整（LLM 未成功完成审查，不得视为通过）")
+        _md_para(lines, f"- 当前可见问题：高危{n0} / 中危{n1} / 低危{n2}（可能仅含规则补种）。")
     elif n0:
-        # 有高危 = 阻断，审核不通过
-        lines.append("❌ 审核不通过（存在高危问题，须全部修复后方可合并）")
-        lines.extend(risk_lines)
+        _md_para(lines, "❌ 审核不通过")
+        lines.append("")
+        lines.append(f"- 🔴 高危问题：{n0} 处，必须全部修复后方可合并。")
+        lines.append(f"- 🟡 中危问题：{n1} 处，建议合入前优先处理。")
+        lines.append(f"- 🟢 低危问题：{n2} 处，建议后续迭代整改。")
     elif n1:
-        lines.append("⚠️ 有条件通过（无高危；存在中危项，建议本次一并修复）")
-        lines.extend(risk_lines)
+        _md_para(lines, "⚠️ 有条件通过")
+        lines.append("")
+        lines.append(f"- 🔴 高危问题：{n0} 处。")
+        lines.append(f"- 🟡 中危问题：{n1} 处，建议合入前优先处理。")
+        lines.append(f"- 🟢 低危问题：{n2} 处，建议后续迭代整改。")
     else:
-        lines.append("✅ 审核通过（无高危）")
-        lines.extend(risk_lines)
-    lines.append(f"✅ 数量核对：高危{n0} + 中危{n1} + 低危{n2} = 总问题数{total}。")
+        _md_para(lines, "✅ 审核通过")
+        lines.append("")
+        lines.append(f"- 🔴 高危问题：{n0} 处。")
+        lines.append(f"- 🟡 中危问题：{n1} 处。")
+        lines.append(f"- 🟢 低危问题：{n2} 处，建议后续迭代整改。")
+    _md_para(lines, f"✅ 数量核对：高危{n0} + 中危{n1} + 低危{n2} = 总问题数{total}。")
     if draft_note:
-        lines.append(f"> {draft_note}")
-    # Viprasol 技术元信息仅作脚注，不占总体评价红框位
-    if sum_first and sum_first.startswith("已按"):
-        lines.append(f"> 审码元信息：{sum_first}")
+        _md_para(lines, f"> {draft_note}")
     return "\n".join(lines).rstrip() + "\n"
 
 

@@ -1292,6 +1292,50 @@ async function executeOpsJob(jobId: string): Promise<void> {
       }
       probe = await probeDevPorts(opsWorkspace, opsPortExpectation(opsRequirement))
     }
+    // Cursor 短会话里 nohup 常被回收：排障后再交回插件 POSIX/Windows 稳拉一次。
+    if (restartWanted && probe.missing.length && !Boolean(loadJob(jobId)?.cancelled)) {
+      emit({
+        type: 'status',
+        message: 'Cursor 排障结束后改由插件按项目命令稳拉（脱离会话，避免进程被回收）…',
+      })
+      setStatus(loadJob(jobId)!, 'running', '插件稳拉前后端…')
+      const durable = await startRequestedServices(
+        opsWorkspace,
+        opsPortExpectation(opsRequirement),
+        () => Boolean(loadJob(jobId)?.cancelled),
+        undefined,
+        (ev) => {
+          if (ev.type === 'status' && ev.message) {
+            emit({ type: 'status', message: ev.message })
+            return
+          }
+          if (ev.type === 'command' && ev.command) {
+            emit({
+              type: 'tool_event',
+              name: 'Shell',
+              command: ev.command,
+              snippet: ev.snippet,
+              tool_status: ev.tool_status || 'running',
+              call_id: ev.call_id,
+            })
+          }
+        },
+      )
+      if (durable.detail === '用户取消' || Boolean(loadJob(jobId)?.cancelled)) {
+        forceCancelJob(jobId)
+        return
+      }
+      probe = await probeDevPorts(opsWorkspace, opsPortExpectation(opsRequirement))
+      if (!probe.missing.length) {
+        const mutatedAfter = transcriptMutatedProject(cre.transcript || [])
+        const detail = mutatedAfter
+          ? `已在项目目录完成重启；为启动做了必要处理。${probe.line}`.trim()
+          : [durable.detail, probe.line].filter(Boolean).join(' ')
+        setStatus(loadJob(jobId)!, 'succeeded', detail)
+        appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
+        return
+      }
+    }
     if (!cre.ok && !(restartWanted && !probe.missing.length)) {
       const detail = cre.error || '开发操作未完成'
       setStatus(loadJob(jobId)!, 'failed', detail)

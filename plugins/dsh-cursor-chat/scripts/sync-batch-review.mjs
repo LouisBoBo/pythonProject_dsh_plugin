@@ -35,5 +35,8 @@ cpSync(join(srcRoot, 'pyproject.toml'), join(dstRoot, 'pyproject.toml'))
 if (existsSync(join(srcRoot, 'README.md'))) {
   cpSync(join(srcRoot, 'README.md'), join(dstRoot, 'README.md'))
 }
+if (existsSync(join(srcRoot, 'skills'))) {
+  cpSync(join(srcRoot, 'skills'), join(dstRoot, 'skills'), { recursive: true })
+}
 writeFileSync(join(dstRoot, 'requirements.txt'), 'PyYAML>=6.0\n', 'utf8')
 console.log('[sync-batch-review] ok →', dstRoot)

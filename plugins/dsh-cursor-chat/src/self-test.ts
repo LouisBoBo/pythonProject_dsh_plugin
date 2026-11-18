@@ -248,8 +248,10 @@ async function main() {
     const {
       displayRemoteUrl,
       parsePorcelainLines,
+      expandDirStatusRows,
       buildStatusEntries,
       pickDefaultBaseBranch,
+      parseRemoteHeadSymref,
       proposeDeliverBranch,
       inspectGitWorkspace,
       runGit,
@@ -258,6 +260,8 @@ async function main() {
       buildGitDeliverPlan,
       executeGitDeliver,
       formatGitDeliverConclusion,
+      githubPullErrorText,
+      githubPrAlreadyExists,
       draftCommitMessage,
       summarizeCommitFromChanges,
       isGenericDeliverIntent,
@@ -283,12 +287,55 @@ async function main() {
     const rows = parsePorcelainLines(' M src/a.ts\n?? .env\n?? docs/x.md\n')
     assert(rows.some((r) => r.rel === 'src/a.ts'), 'porcelain 须解析改动')
     assert(rows.some((r) => r.rel === '.env'), 'porcelain 须看到 .env')
+    const quotedZh = parsePorcelainLines(
+      '?? ".dsh-cursor-chat/reviews/cch-20261117-150227-3501-\\345\\256\\241\\347\\240\\201\\346\\212\\245\\345\\221\\212.md"\n',
+    )
+    assert(
+      quotedZh.some(
+        (r) => r.rel === '.dsh-cursor-chat/reviews/cch-20261117-150227-3501-审码报告.md',
+      ),
+      'porcelain 中文路径须还原 UTF-8，禁止把八进制拆成目录',
+    )
+    assert(
+      !quotedZh.some((r) => r.rel.includes('/345/')),
+      '八进制转义不得变成路径分段',
+    )
     const built = buildStatusEntries(rows)
     assert(built.selected_files.includes('src/a.ts'), '普通文件默认勾选')
     assert(built.selected_files.includes('docs/x.md'), '新文件默认勾选')
     assert(!built.selected_files.includes('.env'), '.env 不得默认勾选')
     assert(built.held_sensitive_files.includes('.env'), '.env 须进敏感列表')
+    {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+      const { join } = await import('node:path')
+      const { tmpdir } = await import('node:os')
+      const td = mkdtempSync(join(tmpdir(), 'dsh-porcelain-dir-'))
+      try {
+        mkdirSync(join(td, 'MOM', 'd'), { recursive: true })
+        writeFileSync(join(td, 'MOM', 'd', 'a.md'), '#a\n')
+        writeFileSync(join(td, 'solo.ts'), 'x\n')
+        const expanded = expandDirStatusRows(td, [
+          { rel: 'solo.ts', code: ' M' },
+          { rel: 'MOM', code: '??' },
+        ])
+        assert(expanded.some((r) => r.rel === 'solo.ts'), '普通文件须保留')
+        assert(
+          expanded.some((r) => r.rel === 'MOM/d/a.md'),
+          '未跟踪目录须展开为内部文件',
+        )
+        assert(!expanded.some((r) => r.rel === 'MOM'), '目录本身不得留在候选里')
+      } finally {
+        rmSync(td, { recursive: true, force: true })
+      }
+    }
     assert(pickDefaultBaseBranch({ currentBranch: 'feat', localBranches: ['main'] }) === 'main', '基线认 local main')
+    assert(parseRemoteHeadSymref('ref: refs/heads/hebo\tHEAD\n') === 'hebo', '远端默认分支须认 symref')
+    assert(
+      pickDefaultBaseBranch({ currentBranch: 'hebo', remoteHead: 'hebo', localBranches: ['main', 'hebo'] }) === 'hebo',
+      '仓库默认分支是 hebo 时，合并目标是 hebo',
+    )
+    const onHebo = proposeDeliverBranch({ currentBranch: 'hebo', baseBranch: 'hebo' })
+    assert(onHebo.create_new && onHebo.branch.startsWith('dsh/'), '已在 hebo 上时另开分支，再合并回 hebo')
     const onMain = proposeDeliverBranch({ currentBranch: 'main', baseBranch: 'main' })
     assert(onMain.create_new && onMain.branch.startsWith('dsh/'), '主干上须新建 dsh 分支')
     const onFeat = proposeDeliverBranch({ currentBranch: 'feat/x', baseBranch: 'main' })
@@ -547,6 +594,12 @@ async function main() {
     assert(clientSrc.includes('git-deliver-risk') || clientSrc.includes('risk-decision'), '高危决策须打 risk API')
     assert(clientSrc.includes('修复高危') && clientSrc.includes('暂停提交'), '高危卡须有修复/暂停按钮')
     assert(clientSrc.includes('正在审码本批'), '确认后进度须提示审码闸')
+    assert(
+      clientSrc.includes('collapseReviewProgress') &&
+        clientSrc.includes('function isReviewProgressLine') &&
+        clientSrc.includes('git-live-review'),
+      '审码进度只留最新一条（n/m），SSE 刷新同一行',
+    )
     assert(clientSrc.includes('pickLiveStatusId') || clientSrc.includes('liveStatusId'), '进度条只转最新一条')
     assert(clientSrc.includes('只转最新一条'), '禁止历史进度条同时转圈')
     assert(
@@ -558,10 +611,12 @@ async function main() {
       join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'launchGitDeliver.ts'),
       'utf8',
     )
+    assert(launchSrcEarly.includes('审码进度改同一条'), '账本里审码进度只改同一条状态')
     assert(launchSrcEarly.includes('onProgress'), '推送重试须推进度')
     assert(launchSrcEarly.includes('runBatchCodeReview'), '交付须调用本批审码')
     assert(launchSrcEarly.includes('waitForGitDeliverRisk'), '高危须二次人审等待')
     assert(launchSrcEarly.includes('runGitDeliverHighFix'), '高危修复须有独立写码入口')
+    assert(launchSrcEarly.includes('gitJobId: jobId'), '高危修复过程须映到 Git 交付卡')
     assert(launchSrcEarly.includes('resolveGitDeliverReviewBackend'), '须有审码后端开关')
     assert(launchSrcEarly.includes("=== 'off'"), '关闸须认 backend=off 并跳过审码')
     {
@@ -589,15 +644,33 @@ async function main() {
       )
       assert(reviewSrc.includes('runEmbeddedBatchReview'), 'embedded 须走旁路子进程')
       assert(reviewSrc.includes('DSH_BATCH_REVIEW_ROOT'), 'embedded 须可配置旁路根目录')
+      assert(reviewSrc.includes('resolveBatchReviewPython'), 'embedded 须跨平台解析 Python')
       assert(reviewSrc.includes("vendor', 'dsh-batch-review'") || reviewSrc.includes('vendor/dsh-batch-review') || reviewSrc.includes("'vendor', 'dsh-batch-review'"), '须优先解析插件内 vendor 旁路')
       assert(!/api\.deepseek\.com/.test(reviewSrc), '写码插件审码适配器禁止写死 DeepSeek 官网')
-      const { resolveBatchReviewRoot } = await import('./gitDeliverReview.js')
+      assert(
+        !/DSH_BATCH_REVIEW_PYTHON \|\| process\.env\.PYTHON \|\| 'python'/.test(reviewSrc),
+        '禁止默认裸名 python（macOS 会 ENOENT）',
+      )
+      const { resolveBatchReviewRoot, resolveBatchReviewPython } = await import('./gitDeliverReview.js')
       const batchRoot = resolveBatchReviewRoot()
       assert(Boolean(batchRoot), '构建后须能解析到审码旁路根目录')
       assert(
         batchRoot.includes('vendor') || batchRoot.includes('dsh-batch-review'),
         '旁路根须为 vendor 或开发仓同级',
       )
+      const pyBin = resolveBatchReviewPython()
+      assert(Boolean(pyBin), '本机须能解析到审码用 Python')
+      if (process.platform !== 'win32') {
+        assert(/python3/i.test(pyBin) || /\/python(\d|$)/i.test(pyBin), 'POSIX 审码 Python 须为 python3 系')
+      }
+      const gatewayPy = readFileSync(
+        join(batchRoot, 'src', 'dsh_batch_review', 'dsh_gateway.py'),
+        'utf8',
+      )
+      assert(gatewayPy.includes('Application Support'), '审码旁路须认 macOS Application Support 凭证目录')
+      assert(gatewayPy.includes('AppData') && gatewayPy.includes('ZR_DSH'), '审码旁路须认 mac 混合 AppData/ZR_DSH 布局')
+      const wbCfgPy = readFileSync(join(batchRoot, 'src', 'dsh_batch_review', 'wb_config.py'), 'utf8')
+      assert(wbCfgPy.includes('Application Support'), 'WorkBuddy config 探测须含 macOS 路径')
     }
     const fixSrc = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gitDeliverFix.ts'),
@@ -670,8 +743,11 @@ async function main() {
       '须先建 Job 再 inspect，进度卡才能挂过程',
     )
     assert(launchSrc.includes('pushGitProgress'), 'Git 交付须推过程到 transcript/SSE')
+    assert(launchSrc.includes('正在审码（${done}/${total}）'), '审码过程须按已审/总数推进度')
     assert(launchSrc.includes('appendEvent(live'), '同态 Git 进度也须 SSE，禁止只改 status 不推流')
     assert(gitDeliverSrc.includes('正在推送到远端…已等待'), '推送须有等待心跳，禁止长时间无输出')
+    assert(gitDeliverSrc.includes('http.version=HTTP/1.1'), '推送须走 HTTP/1.1，避开 HTTP/2 空等')
+    assert(gitDeliverSrc.includes('http.lowSpeedTime=15'), '推送无字节须在 15 秒内断开重试')
     assert(gitDeliverSrc.includes('正在创建 commit'), 'commit 阶段须推进度')
     assert(clientSrc.includes('git-live-'), 'SSE Git 进度须即时写入灰条')
     assert(launchSrc.includes('runGitDeliverWithHitl'), '须有中间件人审全程')
@@ -713,10 +789,28 @@ async function main() {
       assert(!/'已选择暂停提交…'/.test(pauseBlock), '禁止暂停时写 running「已选择暂停提交…」')
       assert(/stage:\s*'paused'/.test(pauseBlock), '暂停须立刻落 stage=paused')
     }
-    assert(indexSrc.includes("suppress_conclusion: true"), 'Git 结论只走 turnTail，finalize 须 suppress')
+    assert(indexSrc.includes("suppress_conclusion: true"), 'Git 结论工具卡仍 suppress，全文不在卡片里重复')
+    assert(
+      !/suppress_conclusion === true\) return textBlocks\(''\)/.test(indexSrc),
+      '终态结论必须写入会话日志，切换会话后正文还在',
+    )
+    assert(indexSrc.includes("deliverables/presented"), '审码报告须写入宿主 deliverables/presented，走原生文件卡')
+    assert(indexSrc.includes('review_presented'), '补挂成功后须记 review_presented，避免重复卡片')
     assert(clientSrc.includes('Git 交付结论'), 'client 须认 Git 交付结论标题')
     assert(clientSrc.includes('交付结论'), 'Git 进度卡终态标题须用交付结论')
     assert(clientSrc.includes('任务结果') && clientSrc.includes('具体行为'), '须剥离模型写码式双份结论')
+    assert(
+      /function findConclusionLeaves[\s\S]{0,900}任务结果/.test(clientSrc),
+      'Git 三段式去重须认任务结果，不能只认结果：',
+    )
+    assert(
+      clientSrc.includes('function verifyUniqueGitConclusion') &&
+        clientSrc.includes('function isModelGitDeliverSummary') &&
+        clientSrc.includes('function hideModelGitSummariesNear') &&
+        clientSrc.includes('data-cc-conclusion-official') &&
+        clientSrc.includes('installGitConclusionDedupe()'),
+      'Git 结论须对照账本正式正文；模型的提交已完成复述在正式结论出现后去掉',
+    )
     assert(clientSrc.includes('concludeMdForWorkKind'), '结论标题须按 work_kind 分流')
     assert(clientSrc.includes('stoppedConclusionMd'), '停止兜底须按写码/Git 分模板')
     assert(clientSrc.includes('codingStoppedConclusionMd'), '写码停止不得套 Git 文案')
@@ -727,6 +821,8 @@ async function main() {
       const { buildComparePrUrl, parseGitHosting, sanitizeGitRef } = await import('./gitDeliver.js')
       const p = parseGitHosting('https://github.com/LouisBoBo/pythonProject_zr_aicoding.git')
       assert(p?.kind === 'github' && p.owner === 'LouisBoBo', '须解析 GitHub owner/repo')
+      assert(parseGitHosting('https://notgithub.com/a/b')?.kind === 'unknown', '不能把 notgithub.com 当成 GitHub')
+      assert(parseGitHosting('https://github.com.evil.com/a/b')?.kind === 'unknown', '不能把仿冒域名当成 GitHub')
       const cmp = buildComparePrUrl(
         'https://github.com/LouisBoBo/pythonProject_zr_aicoding',
         'hebo',
@@ -772,6 +868,81 @@ async function main() {
       const codeFix = ensureConclusionTitle('## Git 交付结论\n\n结果：✅ 已完成\n', 'code')
       assert(/^##\s*本轮结论/m.test(codeFix), '写码 job 误带 Git 标题须改回本轮结论')
     }
+    const okConc = formatGitDeliverConclusion({
+      status: 'succeeded',
+      result: {
+        ok: true,
+        stage: 'pr',
+        detail: '已推送 hebo（c6c0ef1）。未能自动开 PR：未配置 Git Token（设置 → AI写码），本机也无可用的 gh。',
+        remote_url: 'https://github.com/LouisBoBo/pythonProject_zr_aicoding',
+        current_branch: 'hebo',
+        target_branch: 'hebo',
+        base_branch: 'main',
+        commit_sha: 'c6c0ef1aaa',
+        commit_short: 'c6c0ef1',
+        pushed: true,
+        pr_url: '',
+        pr_manual_hint:
+          '未能自动开 PR：未配置 Git Token（设置 → AI写码），本机也无可用的 gh。请手动开 PR：hebo → main',
+        committed_files: ['backend/app/main.py'],
+      },
+    })
+    assert(/任务结果/.test(okConc) && /做了什么/.test(okConc) && /如何验证/.test(okConc), '成功结论须含任务结果/做了什么/如何验证')
+    assert(/c6c0ef1/.test(okConc) && /compare\/main\.\.\.hebo/.test(okConc), '成功结论须含 commit 与 Compare 链接')
+    assert(/未配置 Git Token/.test(okConc), '无 Token 时须说明开 PR 失败原因')
+    assert(/缺少凭据/.test(okConc), '无 Token 时做了什么须写缺少凭据')
+    const gh422 = githubPullErrorText(
+      {
+        message: 'Validation Failed',
+        errors: [{ message: 'A pull request already exists for LouisBoBo:hebo.' }],
+      },
+      '',
+      'Unprocessable Entity',
+    )
+    assert(gh422.includes('already exists'), 'GitHub 422 须带上 errors 正文')
+    assert(githubPrAlreadyExists(gh422), '已有 PR 的 422 须认出来')
+    const existsConc = formatGitDeliverConclusion({
+      status: 'succeeded',
+      result: {
+        ok: true,
+        stage: 'done',
+        detail: '已推送 hebo（98c00b6）。该分支已有进行中的 PR：https://github.com/LouisBoBo/pythonProject_zr_aicoding/pull/3',
+        remote_url: 'https://github.com/LouisBoBo/pythonProject_zr_aicoding',
+        current_branch: 'hebo',
+        target_branch: 'hebo',
+        base_branch: 'main',
+        commit_sha: '98c00b60945307077d53699a2dd94c6293a7d82d',
+        commit_short: '98c00b6',
+        pushed: true,
+        pr_url: 'https://github.com/LouisBoBo/pythonProject_zr_aicoding/pull/3',
+        pr_manual_hint: '',
+        committed_files: ['backend/app/openapi_zh.py'],
+      },
+    })
+    assert(/pull\/3/.test(existsConc), '已有 PR 时结论须给出该链接')
+    assert(!/缺少凭据|配置 Git Token/.test(existsConc), '已有 PR 不得写成缺凭据')
+    const apiFailConc = formatGitDeliverConclusion({
+      status: 'succeeded',
+      result: {
+        ok: true,
+        stage: 'pr',
+        detail: '已推送 hebo（98c00b6）。GitHub API 开 PR 失败：Validation Failed：A pull request already exists。',
+        remote_url: 'https://github.com/LouisBoBo/pythonProject_zr_aicoding',
+        current_branch: 'hebo',
+        target_branch: 'hebo',
+        base_branch: 'main',
+        commit_sha: '98c00b6',
+        commit_short: '98c00b6',
+        pushed: true,
+        pr_url: '',
+        pr_manual_hint:
+          'GitHub API 开 PR 失败：Validation Failed：A pull request already exists。请手动开 PR：hebo → main',
+        committed_files: ['a.py'],
+      },
+    })
+    assert(/already exists/.test(apiFailConc), '接口拒绝时结论须保留 GitHub 原文')
+    assert(!/缺少凭据|配置 Git Token/.test(apiFailConc), 'Token 已用上时不得再提示去配 Token')
+    assert(okConc.indexOf('**任务结果**') < okConc.indexOf('提交文件'), '叙事须在文件清单之前')
     const pushFailConc = formatGitDeliverConclusion({
       status: 'failed',
       result: {
@@ -1216,7 +1387,35 @@ async function main() {
       assert(runJobSrcOps.includes('start_failed'), '插件启动失败须能降级 Cursor')
       assert(runJobSrcOps.includes("name: 'Shell'"), '重启过程须推送 Shell 工具块')
       assert(runJobSrcOps.includes('继续按 Cursor IDE 方式处理'), '未成功时须再给 Cursor 一次 IDE 式机会')
+      assert(runJobSrcOps.includes('插件按项目命令稳拉') || runJobSrcOps.includes('插件稳拉'), 'Cursor 后须再交回插件稳拉')
       assert(runJobSrcOps.includes('ask_user_choice') || runJobSrcOps.includes('AskQuestion'), '重启重试须要求用户互动')
+      const opsRestartSrcPosix = readFileSync(
+        fileURLToPath(new URL('../src/opsRestart.ts', import.meta.url)),
+        'utf8',
+      )
+      assert(opsRestartSrcPosix.includes('launchPosix') && opsRestartSrcPosix.includes('detached: true'), 'POSIX 须 detached 稳拉')
+      assert(opsRestartSrcPosix.includes('launchWindows') && opsRestartSrcPosix.includes('Start-Process'), 'Windows 须 Start-Process')
+      assert(opsRestartSrcPosix.includes('launchForPlatform'), '须按平台分派拉起')
+      assert(opsRestartSrcPosix.includes('preferDirectVite'), '前端须可直拉 vite.js')
+      assert(opsRestartSrcPosix.includes("platform === 'win32'"), 'preferDirectVite 须在 win32 直接返回')
+      assert(opsRestartSrcPosix.includes('posixLaunchEnv'), 'POSIX 须补齐 PATH')
+      // 运行时：win32 注入不得改写计划；posix 才允许直拉 vite（有 vite.js 时）
+      {
+        const sample: import('./opsRestart.js').ServicePlan = {
+          side: 'frontend',
+          cwd: workspace,
+          port: 5175,
+          label: '前端 npm run dev :5175',
+          bin: 'npm',
+          args: ['run', 'dev'],
+          markers: [workspace],
+        }
+        const { preferDirectVite } = await import('./opsRestart.js')
+        assert(preferDirectVite(sample, 'win32') === sample, 'Windows 不得改写前端计划')
+        const posix = preferDirectVite(sample, 'darwin')
+        // 无真实 vite.js 时保持原计划；有则 bin 变为 node
+        assert(posix.side === 'frontend', 'posix 仍须是前端计划')
+      }
       const runnerSrcOps = readFileSync(
         fileURLToPath(new URL('../src/cursor/runner.ts', import.meta.url)),
         'utf8',
@@ -1235,6 +1434,8 @@ async function main() {
         '用户选择须走 HITL nonce，禁止裸 POST',
       )
       assert(clientSrcEarly.includes('cc-changes-card'), '结论下须能兜底「已编辑」改动卡')
+      assert(!clientSrcEarly.includes('cc-review-file'), '审码报告预览走 DSH 原生文件卡，禁止自绘')
+      assert(!clientSrcEarly.includes('data-cc-git-cancel-hide'), '禁止藏起 DSH 原生已编辑卡')
       assert(clientSrcEarly.includes('data-cc-changes-fallback'), '改动卡兜底须可识别以免叠原生卡')
       assert(clientSrcEarly.includes('findSiblingNativeChangesCard'), '须按同级原生卡判断，禁止误关兜底')
       assert(clientSrcEarly.includes('openWorkspaceRel'), '改动卡须有工作区打开入口')
@@ -1464,10 +1665,20 @@ async function main() {
       assert(linked.includes('/api/health'), '验收步骤生成 health 链接')
       const clientSrcLink = readFileSync(fileURLToPath(new URL('../src/client.js', import.meta.url)), 'utf8')
       assert(clientSrcLink.includes('isSafeBrowseUrl'), '结论壳须校验本机链接')
+      assert(clientSrcLink.includes('isGitBrowseHost'), 'Git 结论中的托管站链接须可点开')
+      assert(
+        clientSrcLink.includes("'github.com'") &&
+          clientSrcLink.includes("'gitee.com'") &&
+          clientSrcLink.includes("'gitlab.com'"),
+        '可点开的托管站须含 GitHub / Gitee / GitLab',
+      )
       assert(clientSrcLink.includes('cc-md-link'), '结论壳须渲染可点击链接样式')
       assert(clientSrcLink.includes('data-cc-open'), '本机链接须带打开标记')
       assert(clientSrcLink.includes('installConclusionLinkOpener'), '结论壳须接管链接点击')
       assert(clientSrcLink.includes('button type="button" class="cc-md-link"'), '链接用 button 避免宿主剥 a')
+      assert(clientSrcLink.includes('function lightMdNodes'), '结论正文须用真实链接节点，不能只靠 HTML 字符串')
+      assert(clientSrcLink.includes('lightMdNodes(md)'), 'Git 结论 turnTail 须挂真实链接节点')
+      assert(clientSrcLink.includes('browseLinkVNode'), '托管站地址须渲染成可点击链接')
     }
     console.log('ok: dev work routes to cursor sdk')
   }

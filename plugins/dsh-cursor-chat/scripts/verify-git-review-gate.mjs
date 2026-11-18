@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadConfig } from '../lib/config.js'
 import {
+  resolveBatchReviewPython,
   resolveBatchReviewRoot,
   resolveGitDeliverReviewBackend,
   runBatchCodeReview,
@@ -46,7 +47,12 @@ def chat(llm, msgs, **kw):
 :::"""
 print(json.dumps(run_batch_review(workspace=${JSON.stringify(td)}, files=["x.py"], chat_fn=chat)))
 `
-const py = spawnSync(process.env.PYTHON || 'python', ['-c', code], {
+const pyBin = resolveBatchReviewPython()
+if (!pyBin) {
+  console.error('batch review python missing')
+  process.exit(14)
+}
+const py = spawnSync(pyBin, ['-c', code], {
   env: { ...process.env, PYTHONPATH: join(root, 'src'), DSH_BATCH_REVIEW_ALLOW_ANY_GATEWAY: '1' },
   encoding: 'utf8',
 })
@@ -61,7 +67,7 @@ if (!(mocked.passed && mocked.engine === 'embedded' && !mocked.unavailable)) {
 }
 
 // 公司网关就绪（本机已登录 ZR_GATEWAY_TOKEN）
-const status = spawnSync(process.env.PYTHON || 'python', ['-m', 'dsh_batch_review', 'llm-status'], {
+const status = spawnSync(pyBin, ['-m', 'dsh_batch_review', 'llm-status'], {
   env: { ...process.env, PYTHONPATH: join(root, 'src') },
   encoding: 'utf8',
 })

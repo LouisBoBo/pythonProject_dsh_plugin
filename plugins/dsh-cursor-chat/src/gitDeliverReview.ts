@@ -3,10 +3,10 @@
  * 不改写码主路径；引擎地址只读环境 / 本机既有约定，不进插件推送配置。
  * 后端开关：off | workbuddy | embedded（默认 embedded，公司网关审码）。
  */
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadConfig } from './config.js'
 
@@ -49,6 +49,8 @@ export type BatchReviewResult = {
   high_findings: ReviewFinding[]
   detail: string
   engine: string
+  /** files_skipped=勾选路径读不到；空=引擎/配置故障。只认该字段，不扫 detail 正文。 */
+  unavailable_code?: 'files_skipped' | ''
 }
 
 const HIGH_SEV = new Set(['critical', 'high', 'p0', 'blocker', 'block'])
@@ -211,10 +213,177 @@ export function resolveBatchReviewRoot(): string {
   return ''
 }
 
+/**
+ * 桌面宿主 PATH 常缺 nvm/homebrew/Frameworks；给审码子进程补常见 Python 目录。
+ * Windows / macOS 路径分开，禁止混用。
+ * macOS：Frameworks / Homebrew 须排在 /usr/bin 之前，避免命中无 PyYAML 的 CLT python3。
+ */
+export function batchReviewPythonPathEnv(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  const local = process.env.LOCALAPPDATA || ''
+  const extras =
+    process.platform === 'win32'
+      ? [
+          local ? join(local, 'Programs', 'Python', 'Python313') : '',
+          local ? join(local, 'Programs', 'Python', 'Python312') : '',
+          local ? join(local, 'Programs', 'Python', 'Python311') : '',
+          'C:\\Python313',
+          'C:\\Python312',
+          'C:\\Python311',
+        ]
+      : [
+          '/Library/Frameworks/Python.framework/Versions/Current/bin',
+          '/Library/Frameworks/Python.framework/Versions/3.13/bin',
+          '/Library/Frameworks/Python.framework/Versions/3.12/bin',
+          '/Library/Frameworks/Python.framework/Versions/3.11/bin',
+          '/opt/homebrew/bin',
+          '/usr/local/bin',
+          home ? join(home, '.local', 'bin') : '',
+          home ? join(home, '.pyenv', 'shims') : '',
+          '/usr/bin',
+          '/bin',
+        ]
+  const cur = String(process.env.PATH || '')
+  const parts = [...extras.filter(Boolean), ...cur.split(delimiter).filter(Boolean)]
+  const seen = new Set<string>()
+  return parts
+    .filter((p) => {
+      if (!p || seen.has(p)) return false
+      seen.add(p)
+      return true
+    })
+    .join(delimiter)
+}
+
+/** 旁路要求 Python≥3.10 + PyYAML；CLT /usr/bin/python3 常缺 yaml，须探针剔除。 */
+function pythonUsableForBatchReview(bin: string, pathEnv: string): boolean {
+  if (!bin) return false
+  try {
+    const r = spawnSync(
+      bin,
+      ['-c', 'import sys; assert sys.version_info >= (3, 10); import yaml'],
+      {
+        encoding: 'utf8',
+        timeout: 8000,
+        windowsHide: true,
+        env: { ...process.env, PATH: pathEnv },
+      },
+    )
+    return !r.error && r.status === 0
+  } catch {
+    return false
+  }
+}
+
+function listWherePython(name: string, pathEnv: string): string[] {
+  const n = String(name || '').trim()
+  if (!n) return []
+  if (isAbsolute(n) || /^[A-Za-z]:[\\/]/.test(n)) return existsSync(n) ? [n] : []
+  if (process.platform === 'win32') {
+    try {
+      const out = execFileSync('where.exe', [n], {
+        encoding: 'utf8',
+        timeout: 4000,
+        windowsHide: true,
+        env: { ...process.env, PATH: pathEnv },
+      })
+      return out
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter((s) => s && !/\\windowsapps\\/i.test(s))
+        .map((line) => {
+          if (existsSync(line)) return line
+          if (existsSync(`${line}.exe`)) return `${line}.exe`
+          return ''
+        })
+        .filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+  try {
+    // type -a：列出 PATH 上全部 python3，便于跳过无依赖的 CLT
+    const out = execFileSync('/usr/bin/env', ['bash', '-lc', 'type -a -p -- "$1" 2>/dev/null || true', 'bash', n], {
+      encoding: 'utf8',
+      timeout: 4000,
+      env: { ...process.env, PATH: pathEnv },
+    })
+    return String(out || '')
+      .split(/\n/)
+      .map((s) => s.trim())
+      .filter((s) => s && existsSync(s))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 解析本批审码子进程用的 Python 可执行文件。
+ * - 认 DSH_BATCH_REVIEW_PYTHON / PYTHON（存在且探针通过才用）
+ * - macOS/Linux：优先 Frameworks/Homebrew 的 python3；禁止默认裸名 python（ENOENT）
+ * - Windows：优先 python.exe（跳过 WindowsApps 商店占位）
+ * - 须 Python≥3.10 且已装 PyYAML（旁路依赖）；否则返回空串
+ */
+export function resolveBatchReviewPython(): string {
+  const pathEnv = batchReviewPythonPathEnv()
+  const fromEnv = String(process.env.DSH_BATCH_REVIEW_PYTHON || process.env.PYTHON || '').trim()
+  const candidates: string[] = []
+  const push = (p: string) => {
+    const x = String(p || '').trim()
+    if (!x || candidates.includes(x)) return
+    candidates.push(x)
+  }
+  push(fromEnv)
+  if (process.platform === 'win32') {
+    for (const name of ['python', 'python3']) {
+      for (const hit of listWherePython(name, pathEnv)) push(hit)
+    }
+    const local = process.env.LOCALAPPDATA || ''
+    for (const c of [
+      local ? join(local, 'Programs', 'Python', 'Python313', 'python.exe') : '',
+      local ? join(local, 'Programs', 'Python', 'Python312', 'python.exe') : '',
+      local ? join(local, 'Programs', 'Python', 'Python311', 'python.exe') : '',
+      'C:\\Python313\\python.exe',
+      'C:\\Python312\\python.exe',
+      'C:\\Python311\\python.exe',
+    ]) {
+      push(c)
+    }
+  } else {
+    // 绝对路径优先于 PATH 上的 /usr/bin/python3（CLT 常无 yaml）
+    for (const c of [
+      '/Library/Frameworks/Python.framework/Versions/Current/bin/python3',
+      '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3',
+      '/Library/Frameworks/Python.framework/Versions/3.12/bin/python3',
+      '/Library/Frameworks/Python.framework/Versions/3.11/bin/python3',
+      '/opt/homebrew/bin/python3',
+      '/usr/local/bin/python3',
+    ]) {
+      push(c)
+    }
+    for (const name of ['python3', 'python']) {
+      for (const hit of listWherePython(name, pathEnv)) push(hit)
+    }
+    push('/usr/bin/python3')
+  }
+  for (const c of candidates) {
+    if (!existsSync(c) && !(isAbsolute(c) || /^[A-Za-z]:[\\/]/.test(c))) {
+      // 裸名：再 where 一次
+      for (const hit of listWherePython(c, pathEnv)) {
+        if (pythonUsableForBatchReview(hit, pathEnv)) return hit
+      }
+      continue
+    }
+    if (existsSync(c) && pythonUsableForBatchReview(c, pathEnv)) return c
+  }
+  return ''
+}
+
 function runEmbeddedBatchReview(opts: {
   workspace: string
   files: string[]
   focus?: string
+  onProgress?: (done: number, total: number) => void
 }): Promise<BatchReviewResult> {
   const empty = (detail: string): BatchReviewResult => ({
     ran: false,
@@ -230,6 +399,7 @@ function runEmbeddedBatchReview(opts: {
     high_findings: [],
     detail,
     engine: 'embedded',
+    unavailable_code: '',
   })
   const root = resolveBatchReviewRoot()
   if (!root) {
@@ -242,7 +412,17 @@ function runEmbeddedBatchReview(opts: {
   if (!opts.workspace || !opts.files.length) {
     return Promise.resolve(empty(opts.workspace ? '本批无可审文件' : '缺少工作区路径'))
   }
-  const py = String(process.env.DSH_BATCH_REVIEW_PYTHON || process.env.PYTHON || 'python').trim() || 'python'
+  const pathEnv = batchReviewPythonPathEnv()
+  const py = resolveBatchReviewPython()
+  if (!py) {
+    return Promise.resolve(
+      empty(
+        process.platform === 'win32'
+          ? '未找到可用 Python（需 ≥3.10 且已装 PyYAML；或设 DSH_BATCH_REVIEW_PYTHON 指向该解释器）'
+          : '未找到可用 python3（需 ≥3.10 且已装 PyYAML；macOS 勿用无依赖的 CLT /usr/bin/python3；或设 DSH_BATCH_REVIEW_PYTHON）',
+      ),
+    )
+  }
   const srcPath = join(root, 'src')
   const args = [
     '-m',
@@ -261,19 +441,30 @@ function runEmbeddedBatchReview(opts: {
   if (focus && !/ignore previous|system prompt|跳过审码|忽略以上/i.test(focus)) {
     args.push('--focus', focus)
   }
-  // 最小环境：避免把 CURSOR_API_KEY 等一并灌进审码子进程
+  // 最小环境：避免把 CURSOR_API_KEY 等一并灌进审码子进程；PATH 用补齐后的，避免桌面宿主缺 python3
+  // macOS 混合布局：部分壳把 dsh-home 落在 ~/AppData/Local；未设 LOCALAPPDATA 时补上，便于读 .credentials.yaml
+  const homeDir = process.env.HOME || homedir()
+  const macLocalApp = join(homeDir, 'AppData', 'Local')
+  const localAppData =
+    process.env.LOCALAPPDATA ||
+    (process.platform === 'darwin' && existsSync(macLocalApp) ? macLocalApp : undefined)
+  const dshHome =
+    process.env.DSH_HOME ||
+    (localAppData && existsSync(join(localAppData, 'ZR_DSH', 'dsh-home'))
+      ? join(localAppData, 'ZR_DSH', 'dsh-home')
+      : undefined)
   const childEnv: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
+    PATH: pathEnv,
     SYSTEMROOT: process.env.SYSTEMROOT,
     TEMP: process.env.TEMP,
     TMP: process.env.TMP,
     LANG: process.env.LANG,
     PYTHONPATH: srcPath,
     PYTHONIOENCODING: 'utf-8',
-    DSH_HOME: process.env.DSH_HOME,
-    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    DSH_HOME: dshHome,
+    LOCALAPPDATA: localAppData,
     APPDATA: process.env.APPDATA,
-    HOME: process.env.HOME,
+    HOME: homeDir,
     USERPROFILE: process.env.USERPROFILE,
     ZR_GATEWAY_TOKEN: process.env.ZR_GATEWAY_TOKEN,
     ZR_MODEL_GATEWAY_URL: process.env.ZR_MODEL_GATEWAY_URL,
@@ -290,6 +481,7 @@ function runEmbeddedBatchReview(opts: {
     })
     let stdout = ''
     let stderr = ''
+    let progressBuf = ''
     const timer = setTimeout(() => {
       try {
         child.kill()
@@ -302,7 +494,24 @@ function runEmbeddedBatchReview(opts: {
       stdout += String(b || '')
     })
     child.stderr?.on('data', (b) => {
-      stderr += String(b || '')
+      const chunk = String(b || '')
+      stderr += chunk
+      if (!opts.onProgress) return
+      progressBuf += chunk
+      const lines = progressBuf.split(/\r?\n/)
+      progressBuf = lines.pop() || ''
+      for (const line of lines) {
+        const m = /^DSH_REVIEW_PROGRESS\t(\d+)\t(\d+)$/.exec(line.trim())
+        if (!m) continue
+        const done = Number(m[1])
+        const total = Number(m[2])
+        if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) continue
+        try {
+          opts.onProgress(done, total)
+        } catch {
+          /* 进度失败不打断审码 */
+        }
+      }
     })
     child.on('error', (err) => {
       clearTimeout(timer)
@@ -320,9 +529,11 @@ function runEmbeddedBatchReview(opts: {
         return
       }
       if (raw.unavailable === true || raw.ran === false) {
-        resolve(
-          empty(String(raw.detail || raw.reply || 'embedded 审码不可用').slice(0, 300)),
-        )
+        const missed = raw.unavailable_code === 'files_skipped'
+        resolve({
+          ...empty(String(raw.detail || raw.reply || 'embedded 审码不可用').slice(0, 300)),
+          unavailable_code: missed ? 'files_skipped' : '',
+        })
         return
       }
       const judged = evaluateBatchReviewPayload(raw)
@@ -353,6 +564,8 @@ export async function runBatchCodeReview(opts: {
   workspace: string
   files: string[]
   focus?: string
+  /** 已审文件数 / 本批文件数。只用于进度条文案。 */
+  onProgress?: (done: number, total: number) => void
 }): Promise<BatchReviewResult> {
   const backend = resolveGitDeliverReviewBackend()
   const workspace = String(opts.workspace || '').trim()
@@ -376,7 +589,12 @@ export async function runBatchCodeReview(opts: {
     }
   }
   if (backend === 'embedded') {
-    return runEmbeddedBatchReview({ workspace, files, focus: opts.focus })
+    return runEmbeddedBatchReview({
+      workspace,
+      files,
+      focus: opts.focus,
+      onProgress: opts.onProgress,
+    })
   }
   const engine = await resolveWorkbuddyEngineBase()
   const empty = (detail: string, unavailable = true): BatchReviewResult => ({
@@ -484,6 +702,76 @@ export function formatHighFindingsForFix(high: ReviewFinding[], max = 12): strin
   lines.push('')
   lines.push('修完后停止；由交付闸再审本批文件。')
   return lines.join('\n')
+}
+
+/** 落盘用的本批审码报告。引擎已给出「代码审核汇总报告」时原样落盘。 */
+export function renderBatchReviewMarkdown(
+  review: BatchReviewResult,
+  meta?: { jobId?: string; files?: string[] },
+): string {
+  const official = String(review.reply || '').trim()
+  if (official.includes('代码审核汇总报告') && official.includes('审核人：')) {
+    return official.endsWith('\n') ? official : `${official}\n`
+  }
+  const lines: string[] = [
+    '#### 本批审码报告',
+    '',
+    `- 结果：${review.passed ? '无高危，已放行' : review.unavailable ? '未完成' : '存在高危，未放行'}`,
+    `- 高危 ${review.high_count} · 中危 ${review.medium_count} · 低危 ${review.low_count}`,
+  ]
+  if (review.detail) lines.push(`- 说明：${review.detail}`)
+  if (review.summary) lines.push(`- 摘要：${review.summary}`)
+  if (meta?.jobId) lines.push(`- 任务：\`${meta.jobId}\``)
+  const files = (meta?.files || []).filter(Boolean)
+  if (files.length) {
+    lines.push('', '#### 本批文件', '')
+    for (const f of files.slice(0, 40)) lines.push(`- \`${f}\``)
+  }
+  const findings = review.findings || []
+  lines.push('', '## 发现', '')
+  if (!findings.length) {
+    lines.push('无结构化条目。')
+  } else {
+    for (const f of findings.slice(0, 40)) {
+      const loc = f.line ? `${f.file}:${f.line}` : f.file
+      lines.push(`#### [${f.severity}] ${f.title}`)
+      lines.push('')
+      lines.push(`- 位置：\`${loc}\``)
+      if (f.description) lines.push(`- 说明：${f.description}`)
+      if (f.fix_suggestion) lines.push(`- 建议：${f.fix_suggestion}`)
+      lines.push('')
+    }
+  }
+  lines.push('---', '', '本文件由写码插件在 Git 交付时生成，供本轮结论预览；未纳入本次 commit。')
+  return lines.join('\n') + '\n'
+}
+
+/**
+ * 把审码报告写到工作区 `.dsh-cursor-chat/reviews/`，返回相对路径供右侧预览。
+ * 路径只允许插件自己的文件名，禁止把用户字符串拼进目录。
+ */
+export function writeBatchReviewReport(opts: {
+  workspace: string
+  jobId: string
+  review: BatchReviewResult
+  files?: string[]
+}): { ok: true; rel: string } | { ok: false; detail: string } {
+  const root = String(opts.workspace || '').trim()
+  if (!root || !existsSync(root)) return { ok: false, detail: '工作区不存在，未写审码报告' }
+  const safeId = String(opts.jobId || 'review').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'review'
+  const rel = `.dsh-cursor-chat/reviews/${safeId}-审码报告.md`
+  const abs = join(root, '.dsh-cursor-chat', 'reviews', `${safeId}-审码报告.md`)
+  try {
+    mkdirSync(join(root, '.dsh-cursor-chat', 'reviews'), { recursive: true })
+    writeFileSync(
+      abs,
+      renderBatchReviewMarkdown(opts.review, { jobId: opts.jobId, files: opts.files }),
+      'utf8',
+    )
+  } catch (err) {
+    return { ok: false, detail: `审码报告落盘失败：${String(err).slice(0, 120)}` }
+  }
+  return { ok: true, rel }
 }
 
 export function buildPrReviewComment(review: BatchReviewResult): string {

@@ -37,6 +37,19 @@ def candidate_config_paths() -> list[Path]:
             / "config"
             / "config.yaml"
         )
+    # macOS WorkBuddy 系统配置（禁止只认 Windows APPDATA）
+    mac_as = Path.home() / "Library" / "Application Support"
+    push(mac_as / "zr-workbuddy-desktop" / "persist" / "config.yaml")
+    push(
+        mac_as
+        / "zr-workbuddy-desktop"
+        / "runtime-app"
+        / "apps"
+        / "zr-workbuddy"
+        / "engine"
+        / "config"
+        / "config.yaml"
+    )
     # 源码仓相对旁路包（开发机）：…/AICodes/DSH_Plugins/…/dsh_batch_review → AICodes
     here = Path(__file__).resolve()
     if len(here.parents) > 6:

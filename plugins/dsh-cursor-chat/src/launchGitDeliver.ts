@@ -21,6 +21,7 @@ import {
   buildPrReviewComment,
   resolveGitDeliverReviewBackend,
   runBatchCodeReview,
+  writeBatchReviewReport,
   type BatchReviewResult,
 } from './gitDeliverReview.js'
 import {
@@ -105,16 +106,42 @@ function failConclusion(detail: string, plan?: GitDeliverPlan | null, code?: str
   })
 }
 
+/** 审码进度是同一条：本批 N 个文件，以及随后的（2/8）（3/8）只改这一条，不另起一行。 */
+const REVIEW_PROGRESS_LINE = /^正在审码（\s*\d+\s*\/\s*\d+\s*）|^正在审码本批/
+
 function pushGitProgress(jobId: string, message: string, status?: CursorCodingJob['status']): void {
   const job = loadJob(jobId)
   if (!job) return
   const text = String(message || '').trim()
   if (!text) return
+  const transcript = job.transcript || []
   // 连续同文案不重复入账（心跳可改秒数；阶段切换必出）
-  const prev = [...(job.transcript || [])].reverse().find((it) => it && it.kind === 'status')
+  const prev = [...transcript].reverse().find((it) => it && it.kind === 'status')
   if (prev && String(prev.text || '').trim() === text) {
     patchJob(jobId, { detail: text })
     return
+  }
+  // 审码进度改同一条：找到已有的「正在审码」状态，只换正文
+  if (REVIEW_PROGRESS_LINE.test(text)) {
+    let idx = -1
+    for (let i = 0; i < transcript.length; i++) {
+      const it = transcript[i]
+      if (it && it.kind === 'status' && REVIEW_PROGRESS_LINE.test(String(it.text || '').trim())) idx = i
+    }
+    if (idx >= 0) {
+      const nextTranscript = transcript.map((it, i) =>
+        i === idx ? { ...it, text, at: new Date().toISOString() } : it,
+      )
+      patchJob(jobId, { transcript: nextTranscript, detail: text })
+      const live = loadJob(jobId)
+      if (!live) return
+      if (status && status !== live.status) {
+        setStatus(live, status, text)
+        return
+      }
+      appendEvent(live, { type: 'status', status: live.status, message: text })
+      return
+    }
   }
   const item = {
     id: newTranscriptId('git'),
@@ -122,7 +149,7 @@ function pushGitProgress(jobId: string, message: string, status?: CursorCodingJo
     at: new Date().toISOString(),
     text,
   }
-  const nextTranscript = [...(job.transcript || []), item].slice(-80)
+  const nextTranscript = [...transcript, item].slice(-240)
   patchJob(jobId, { transcript: nextTranscript, detail: text })
   const live = loadJob(jobId)
   if (!live) return
@@ -259,7 +286,8 @@ export async function prepareGitDeliverSession(
     `请在下方确认卡核对后提交：\n` +
     `• 仓库：${plan.remote_url}\n` +
     `• 当前分支：${plan.current_branch}\n` +
-    `• 将提交到：${plan.target_branch}\n` +
+    `• 提交分支：${plan.target_branch}\n` +
+    `• 合并到：${plan.base_branch}\n` +
     `• 文件：${plan.selected_files.length} 个` +
     (plan.held_sensitive_files.length ? `（已排除敏感 ${plan.held_sensitive_files.length}）` : '') +
     `\n点「确认提交并开 PR」后才会 commit / push。`
@@ -347,6 +375,22 @@ function mergeGitDeliverPatch(
   patchJob(jobId, { git_deliver: { ...prev, ...patch } })
 }
 
+function persistReviewReport(opts: {
+  workspace: string
+  jobId: string
+  review: BatchReviewResult | null | undefined
+  files?: string[]
+}): string {
+  if (!opts.review?.ran || !opts.workspace) return ''
+  const written = writeBatchReviewReport({
+    workspace: opts.workspace,
+    jobId: opts.jobId,
+    review: opts.review,
+    files: opts.files,
+  })
+  return written.ok ? written.rel : ''
+}
+
 function sealPausedGitDeliver(opts: {
   jobId: string
   plan: GitDeliverPlan
@@ -375,6 +419,12 @@ function sealPausedGitDeliver(opts: {
       /* pending 清理失败不影响暂停封口 */
     }
   }
+  const reportRel = persistReviewReport({
+    workspace: opts.plan.workspace,
+    jobId,
+    review: opts.review,
+    files: opts.review?.findings?.map((f) => f.file),
+  })
   if (job && jobId) {
     mergeGitDeliverPatch(jobId, {
       risk_gate: null,
@@ -384,6 +434,7 @@ function sealPausedGitDeliver(opts: {
       low_count: opts.review?.low_count,
       risk_summary: opts.review?.summary || opts.detail,
       report_id: opts.review?.report_id || '',
+      review_report_rel: reportRel || undefined,
       high_titles: titles.slice(0, 12),
     })
     patchJob(jobId, {
@@ -648,6 +699,11 @@ export async function completeGitDeliverFromConfirm(opts: {
       files: selected,
       // 不把 commit message 当 focus，避免 prompt 注入左右审码结论
       focus: `本批 ${selected.length} 个待提交文件`,
+      onProgress: jobId
+        ? (done, total) => {
+            if (total > 0) pushGitProgress(jobId, `正在审码（${done}/${total}）…`, 'running')
+          }
+        : undefined,
     })
     lastReview = review
     if (review.unavailable || !review.ran) {
@@ -680,6 +736,7 @@ export async function completeGitDeliverFromConfirm(opts: {
           risk_gate: 'await_risk',
           stage: 'await_risk',
           risk_kind: 'engine_unavailable',
+          risk_code: review.unavailable_code === 'files_skipped' ? 'files_skipped' : null,
           risk_summary: detail,
           high_count: 0,
           high_titles: [],
@@ -688,7 +745,7 @@ export async function completeGitDeliverFromConfirm(opts: {
       }
       const risk = await waitForGitDeliverRisk({ confirmToken: confirm_token })
       if (jobId) {
-        mergeGitDeliverPatch(jobId, { risk_gate: null, risk_kind: null })
+        mergeGitDeliverPatch(jobId, { risk_gate: null, risk_kind: null, risk_code: null })
         patchJob(jobId, { review_gate: null })
       }
       if (!risk.ok) {
@@ -767,7 +824,7 @@ export async function completeGitDeliverFromConfirm(opts: {
     }
     const risk = await waitForGitDeliverRisk({ confirmToken: confirm_token })
     if (jobId) {
-      mergeGitDeliverPatch(jobId, { risk_gate: null, risk_kind: null })
+      mergeGitDeliverPatch(jobId, { risk_gate: null, risk_kind: null, risk_code: null })
       patchJob(jobId, { review_gate: null })
     }
     if (!risk.ok) {
@@ -836,6 +893,7 @@ export async function completeGitDeliverFromConfirm(opts: {
       selectedFiles: selected,
       highFindings: review.high_findings,
       sessionId: opts.sessionId,
+      gitJobId: jobId,
       signal: opts.signal || null,
       onProgress: (m) => {
         if (jobId) pushGitProgress(jobId, m, 'running')
@@ -902,10 +960,26 @@ export async function completeGitDeliverFromConfirm(opts: {
     else if (comment.detail) pushGitProgress(jobId, comment.detail)
   }
 
+  const reportRel = persistReviewReport({
+    workspace: opts.plan.workspace,
+    jobId,
+    review: lastReview,
+    files: opts.selected_files,
+  })
   const conclusion = formatGitDeliverConclusion({
     status: result.ok ? 'succeeded' : 'failed',
     plan: opts.plan,
     result,
+    review: lastReview?.ran
+      ? {
+          ran: true,
+          passed: lastReview.passed,
+          high_count: lastReview.high_count,
+          medium_count: lastReview.medium_count,
+          low_count: lastReview.low_count,
+          report_rel: reportRel,
+        }
+      : null,
   })
   if (job) {
     patchJob(jobId, {
@@ -936,6 +1010,7 @@ export async function completeGitDeliverFromConfirm(opts: {
         low_count: lastReview?.low_count,
         risk_summary: lastReview?.summary || '',
         report_id: lastReview?.report_id || '',
+        review_report_rel: reportRel || undefined,
       },
     })
     setStatus(loadJob(jobId) || job, result.ok ? 'succeeded' : 'failed', result.detail)

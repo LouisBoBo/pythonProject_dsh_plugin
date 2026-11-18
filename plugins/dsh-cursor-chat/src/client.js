@@ -193,6 +193,11 @@ window.__ModuleLoader__.load({
       return String(message || '')
     }
 
+    /** 审码进度是同一条：「正在审码本批」和「正在审码（3/8）」都算这一条。 */
+    function isReviewProgressLine(text) {
+      return /正在审码（\s*\d+\s*\/\s*\d+\s*）|正在审码本批/.test(String(text || ''))
+    }
+
     /** 与 workKind.ts 同一口径。账本 work_kind=code 时一律保持写码。 */
     function looksLikeOpsOnlyClient(message) {
       var t = String(message || '').replace(/\s+/g, '')
@@ -495,6 +500,7 @@ window.__ModuleLoader__.load({
       if (/正在推送到远端|正在推送/.test(d)) {
         return d.length > 48 ? d.slice(0, 48) + '…' : d
       }
+      if (/正在审码（\s*\d+\s*\/\s*\d+\s*）/.test(d)) return d
       if (/正在创建 commit|本地已提交|正在暂存/.test(d)) {
         return d.length > 48 ? d.slice(0, 48) + '…' : d
       }
@@ -1535,13 +1541,18 @@ window.__ModuleLoader__.load({
       var s = String(list.length)
       for (var i = 0; i < list.length; i++) {
         var it = list[i] || {}
+        var body = String(it.text || '')
+        var sum = 0
+        for (var c = 0; c < body.length; c++) sum = (sum + body.charCodeAt(c)) % 100000
         s +=
           '|' +
           String(it.id || i) +
           ':' +
           String(it.kind || '') +
           ':' +
-          String(it.text || '').length +
+          body.length +
+          ':' +
+          sum +
           ':' +
           String(it.tool_status || '') +
           ':' +
@@ -2865,9 +2876,11 @@ window.__ModuleLoader__.load({
           } else if (job.git_deliver.risk_gate === 'await_risk') {
             nextPhase = 'review'
             nextLabel =
-              job.git_deliver.risk_kind === 'engine_unavailable'
-                ? '审码引擎不可用'
-                : '本批存在高危，请选择修复或暂停'
+              job.git_deliver.risk_code === 'files_skipped'
+                ? '有勾选文件未能纳入审码'
+                : job.git_deliver.risk_kind === 'engine_unavailable'
+                  ? '审码引擎不可用'
+                  : '本批存在高危，请选择修复或暂停'
           }
         }
         if (TERMINAL_JOB[st]) sealedStatusRef.current = st
@@ -3150,6 +3163,7 @@ window.__ModuleLoader__.load({
               : raw.risk_kind === 'high'
                 ? 'high'
                 : null,
+          risk_code: raw.risk_code === 'files_skipped' ? 'files_skipped' : null,
           high_count: Number(raw.high_count || 0) || 0,
           medium_count: Number(raw.medium_count || 0) || 0,
           low_count: Number(raw.low_count || 0) || 0,
@@ -3467,6 +3481,7 @@ window.__ModuleLoader__.load({
           var accentRisk = resolveAvatarAccent()
           var titles = Array.isArray(g.high_titles) ? g.high_titles : []
           var engineDown = g.risk_kind === 'engine_unavailable'
+          var filesMissed = engineDown && g.risk_code === 'files_skipped'
           return h(
             'div',
             {
@@ -3474,27 +3489,35 @@ window.__ModuleLoader__.load({
               'data-cc-git-deliver': '1',
               'data-cc-risk-gate': 'await_risk',
               'data-cc-risk-kind': engineDown ? 'engine_unavailable' : 'high',
+              'data-cc-risk-code': filesMissed ? 'files_skipped' : '',
               style: { ['--cc-git-accent']: accentRisk, ['--cc-avatar-accent']: accentRisk },
             },
             h(
               'p',
               { className: 'cc-git-title' },
-              engineDown ? '审码引擎不可用' : '本批审码：发现高危',
+              filesMissed
+                ? '有勾选文件未能纳入审码'
+                : engineDown
+                  ? '审码引擎不可用'
+                  : '本批审码：发现高危',
             ),
             h(
               'p',
               { className: 'cc-note' },
-              engineDown
-                ? '未能连接 WorkBuddy 审码引擎，无法完成本批自动审码。可暂停，或仍继续 commit / push（自行承担风险）。'
-                : '高危 ' +
-                    String(g.high_count || titles.length || 0) +
-                    ' · 中危 ' +
-                    String(g.medium_count || 0) +
-                    ' · 低危 ' +
-                    String(g.low_count || 0) +
-                    '。高危未清前不会 commit / push。',
+              filesMissed
+                ? String(g.risk_summary || '有勾选文件未能纳入审码，未放行') +
+                    '。可暂停，或仍继续 commit / push（自行承担风险）。'
+                : engineDown
+                  ? '未能连接审码引擎，无法完成本批自动审码。可暂停，或仍继续 commit / push（自行承担风险）。'
+                  : '高危 ' +
+                      String(g.high_count || titles.length || 0) +
+                      ' · 中危 ' +
+                      String(g.medium_count || 0) +
+                      ' · 低危 ' +
+                      String(g.low_count || 0) +
+                      '。高危未清前不会 commit / push。',
             ),
-            g.risk_summary
+            !filesMissed && g.risk_summary
               ? h('p', { className: 'cc-note' }, String(g.risk_summary))
               : null,
             !engineDown && titles.length
@@ -3635,7 +3658,7 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'cc-git-row' },
-            h('span', { className: 'cc-git-lab' }, 'PR 基线'),
+            h('span', { className: 'cc-git-lab' }, '合并到'),
             h('input', {
               type: 'text',
               value: String(g.base_branch || ''),
@@ -3967,6 +3990,35 @@ window.__ModuleLoader__.load({
                   if (last && last.kind === 'status' && String(last.text || '').trim() === statusMsg) {
                     return prev
                   }
+                  // 审码进度只改同一条：2/8 → 3/8 刷新数字，不另起一行
+                  if (isReviewProgressLine(statusMsg)) {
+                    var hit = -1
+                    for (var ri = 0; ri < items.length; ri++) {
+                      if (items[ri] && items[ri].kind === 'status' && isReviewProgressLine(items[ri].text)) {
+                        hit = ri
+                      }
+                    }
+                    var kept = []
+                    for (var rj = 0; rj < items.length; rj++) {
+                      var row = items[rj]
+                      if (row && row.kind === 'status' && isReviewProgressLine(row.text)) {
+                        if (rj === hit) {
+                          kept.push(Object.assign({}, row, { text: statusMsg, at: new Date().toISOString() }))
+                        }
+                        continue
+                      }
+                      kept.push(row)
+                    }
+                    if (hit < 0) {
+                      kept.push({
+                        id: 'git-live-review',
+                        kind: 'status',
+                        at: new Date().toISOString(),
+                        text: statusMsg,
+                      })
+                    }
+                    return kept.slice(-80)
+                  }
                   items.push({
                     id: 'git-live-' + Date.now() + '-' + items.length,
                     kind: 'status',
@@ -3994,7 +4046,7 @@ window.__ModuleLoader__.load({
       useEffect(
         function () {
           if (phase !== 'running' || !jobId) return
-          var ms = workKind === 'git_deliver' || gitSubmittedRef.current ? 2000 : 5000
+          var ms = workKind === 'git_deliver' || gitSubmittedRef.current ? 1000 : 5000
           var t = setInterval(function () {
             reconcileJob(jobId)
           }, ms)
@@ -5307,6 +5359,17 @@ window.__ModuleLoader__.load({
             prevWait = String(row.id || '')
           })
         })()
+        // 审码进度「正在审码（3/8）」只留最新一条，并盖住开头的「正在审码本批 N 个文件」
+        ;(function collapseReviewProgress() {
+          var prev = ''
+          ;(transcript || []).forEach(function (row) {
+            if (!row || row.kind !== 'status') return
+            var m = normalizeStatusDisplayClient(row.text || '')
+            if (!isReviewProgressLine(m)) return
+            if (prev) skipStatusId[prev] = true
+            prev = String(row.id || '')
+          })
+        })()
         // 进行中只让「当前最新一条」进度转圈；历史步骤静止，避免一大片同时转
         var liveStatusId = ''
         ;(function pickLiveStatusId() {
@@ -5848,13 +5911,26 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 结论壳只允许点开本机 http(s)，避免把任意外链塞进可点击控件 */
+    /** 本机预览，或 GitHub / Gitee / GitLab 的 https 仓库与 PR。其它外链仍保持纯文本。 */
+    function isGitBrowseHost(host) {
+      var h = String(host || '').toLowerCase()
+      var roots = ['github.com', 'gitee.com', 'gitlab.com']
+      for (var i = 0; i < roots.length; i++) {
+        var root = roots[i]
+        if (h === root || h.slice(-(root.length + 1)) === '.' + root) return true
+      }
+      return false
+    }
+
     function isSafeBrowseUrl(url) {
       try {
         var u = new URL(String(url || ''))
+        if (u.username || u.password) return false
         if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
         var h = String(u.hostname || '').toLowerCase()
-        return h === '127.0.0.1' || h === 'localhost'
+        if (h === '127.0.0.1' || h === 'localhost') return true
+        if (u.protocol !== 'https:') return false
+        return isGitBrowseHost(h)
       } catch (e0) {
         return false
       }
@@ -5863,9 +5939,11 @@ window.__ModuleLoader__.load({
     function openSafeBrowseUrl(url) {
       var href = String(url || '').trim()
       if (!isSafeBrowseUrl(href)) return false
+      // 桌面端 window.open 会被拦截并改去系统浏览器，返回值仍是空。
+      // 这时再点一次隐藏链接会打开第二个窗口。
       try {
-        var opened = window.open(href, '_blank', 'noopener,noreferrer')
-        if (opened) return true
+        window.open(href, '_blank', 'noopener,noreferrer')
+        return true
       } catch (e0) {}
       try {
         var a = document.createElement('a')
@@ -5931,6 +6009,116 @@ window.__ModuleLoader__.load({
     try {
       installConclusionLinkOpener()
     } catch (eLink) {}
+
+    /** 结论里的可点地址用真实 <a>，不用 innerHTML。宿主会剥掉 HTML 字符串里的链接。 */
+    function browseLinkVNode(url, label) {
+      var href = String(url || '').trim()
+      // 可见文字始终是真实地址，避免「点这里」链到另一处。
+      var text = href || String(label || '')
+      if (!isSafeBrowseUrl(href)) return String(label || href)
+      return h(
+        'a',
+        {
+          href: href,
+          target: '_blank',
+          rel: 'noopener noreferrer',
+          className: 'cc-md-link',
+          'data-cc-open': href,
+          title: '在浏览器打开',
+          style: {
+            color: '#0969da',
+            textDecoration: 'underline',
+            textUnderlineOffset: '2px',
+            cursor: 'pointer',
+            wordBreak: 'break-all',
+          },
+          onClick: function (ev) {
+            try {
+              if (ev && ev.preventDefault) ev.preventDefault()
+              if (ev && ev.stopPropagation) ev.stopPropagation()
+            } catch (e0) {}
+            openSafeBrowseUrl(href)
+          },
+        },
+        text,
+      )
+    }
+
+    function inlineVNodes(s) {
+      var src = String(s || '')
+      var nodes = []
+      var re =
+        /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|\*\*([^*]+)\*\*|`([^`\n]+)`|(https?:\/\/[^\s<>"'））；;，,]+)/g
+      var last = 0
+      var m
+      while ((m = re.exec(src))) {
+        if (m.index > last) nodes.push(src.slice(last, m.index))
+        if (m[1] != null && m[2]) nodes.push(browseLinkVNode(m[2], m[1]))
+        else if (m[3] != null) nodes.push(h('strong', null, m[3]))
+        else if (m[4] != null) nodes.push(h('code', null, m[4]))
+        else if (m[5]) nodes.push(browseLinkVNode(m[5], m[5]))
+        last = m.index + m[0].length
+      }
+      if (last < src.length) nodes.push(src.slice(last))
+      if (!nodes.length) nodes.push('')
+      return nodes
+    }
+
+    function lightMdNodes(text) {
+      var lines = String(text || '')
+        .replace(/\r\n/g, '\n')
+        .split('\n')
+      var out = []
+      for (var i = 0; i < lines.length; i++) {
+        var t = String(lines[i] || '').trim()
+        var key = 'md' + i
+        if (!t) {
+          out.push(h('div', { className: 'cc-gap', key: key }))
+          continue
+        }
+        if (/^##\s+/.test(t)) {
+          out.push(h('h2', { key: key }, inlineVNodes(t.replace(/^##\s+/, ''))))
+          continue
+        }
+        if (/^###\s+/.test(t)) {
+          out.push(h('div', { className: 'cc-sec-title', key: key }, inlineVNodes(t.replace(/^###\s+/, ''))))
+          continue
+        }
+        if (/^---+$/.test(t)) {
+          out.push(h('hr', { key: key }))
+          continue
+        }
+        if (/^https?:\/\//i.test(t)) {
+          out.push(h('div', { className: 'cc-p', key: key }, browseLinkVNode(t, t)))
+          continue
+        }
+        if (/^[•·]\s+/.test(t) || /^[-*]\s+/.test(t)) {
+          out.push(h('div', { className: 'cc-li', key: key }, inlineVNodes(t.replace(/^[•·\-*]\s+/, ''))))
+          continue
+        }
+        if (/^\d+\.\s+/.test(t)) {
+          out.push(h('div', { className: 'cc-ol', key: key }, inlineVNodes(t)))
+          continue
+        }
+        var lm = t.match(/^([^：:]{1,16})([：:])\s*(.*)$/)
+        if (lm && !/^https?$/i.test(lm[1])) {
+          var kids = [h('strong', { key: key + 's' }, inlineVNodes(lm[1] + lm[2]))]
+          if (lm[3]) {
+            kids.push(' ')
+            var restNodes = inlineVNodes(lm[3])
+            for (var r = 0; r < restNodes.length; r++) kids.push(restNodes[r])
+          }
+          out.push(h('div', { className: 'cc-label', key: key }, kids))
+          continue
+        }
+        if (/^\*\*[^*]+\*\*\s*$/.test(t)) {
+          out.push(h('div', { className: 'cc-sec-title', key: key }, inlineVNodes(t)))
+          continue
+        }
+        out.push(h('div', { className: 'cc-p', key: key }, inlineVNodes(t)))
+      }
+      return out
+    }
 
     function lightMdInline(s) {
       var html = String(s || '')
@@ -6058,9 +6246,14 @@ window.__ModuleLoader__.load({
           out.push('<div class="cc-ol">' + lightMdInline(t) + '</div>')
           continue
         }
+        // 单独一行的 https:// 不能走下面的「标签：正文」，否则会拆成粗体 https:
+        if (/^https?:\/\//i.test(t)) {
+          out.push('<div class="cc-p">' + lightMdInline(t) + '</div>')
+          continue
+        }
         // 结果：… / 改动： / 涉及文件： / 验收：
         var lm = t.match(/^([^：:]{1,16})([：:])\s*(.*)$/)
-        if (lm) {
+        if (lm && !/^https?$/i.test(lm[1])) {
           var rest = lm[3] || ''
           out.push(
             '<div class="cc-label"><strong>' +
@@ -6093,7 +6286,7 @@ window.__ModuleLoader__.load({
       return false
     }
 
-    /** 最小块：含「本轮结论」或「Git 交付结论」且含「结果：」；过程卡内部不算。 */
+    /** 最小块：含结论标题，且含「结果：」或三段式「任务结果」。过程卡内部不算。 */
     function findConclusionLeaves(root) {
       if (!root || !root.querySelectorAll) return []
       var hits = []
@@ -6107,7 +6300,7 @@ window.__ModuleLoader__.load({
           var t = String(el.textContent || '')
           if (t.length > 8000 || t.length < 12) continue
           if (!/本轮结论|Git\s*交付结论/.test(t)) continue
-          if (!/结果：/.test(t)) continue
+          if (!/结果：|任务结果/.test(t)) continue
           hits.push(el)
         }
       } catch (e1) {}
@@ -6134,6 +6327,198 @@ window.__ModuleLoader__.load({
         return true
       }
       return false
+    }
+
+    function isGitConclusionBlockText(t) {
+      return /Git\s*交付结论/.test(t) && /结果：|任务结果/.test(t)
+    }
+
+    /**
+     * 模型在工具结果之外另写的交付摘要。
+     * 没有「Git 交付结论」标题，但以「提交已完成」加上仓库 / Commit 复述结果。
+     * 正式结论自己带标题和「任务结果」，不会被认成这种摘要。
+     */
+    function isModelGitDeliverSummary(t) {
+      var s = String(t || '')
+      if (s.length < 24 || s.length > 6000) return false
+      if (/Git\s*交付结论/.test(s) && /任务结果|结果：/.test(s)) return false
+      if (!/提交已完成/.test(s)) return false
+      return /仓库|Commit|本次提交文件|已推送远端|审码/.test(s)
+    }
+
+    /** 节点里如果还包着原生文件卡或 turnTail，不能整段藏。 */
+    function conclusionNodeProtects(el) {
+      if (!el || !el.querySelector) return false
+      if (el.querySelector('[data-changed-files]')) return true
+      if (el.querySelector('[data-cc-turn-tail="1"]')) return true
+      if (el.querySelector('[data-cc-conclusion-hoist="1"]')) return true
+      if (typeof isNativeChangedFilesCard === 'function' && isNativeChangedFilesCard(el)) return true
+      return false
+    }
+
+    /**
+     * 从结论块里拆出可以藏的那一层。
+     * 模型和工具结果常跟「已编辑」卡包在同一个父节点里，藏父节点会把文件卡一起藏掉，所以要往下拆。
+     */
+    function collectHideableConclusions(el, out) {
+      if (!el || el.nodeType !== 1) return
+      if (el.closest && el.closest('[data-cc-turn-tail="1"]')) return
+      if (el.closest && el.closest('[data-cc-conclusion-hoist="1"]')) return
+      if (el.closest && el.closest('[data-cc-git-deliver="1"]')) return
+      if (el.getAttribute && el.getAttribute('data-cc-dup-conclusion-hidden') === '1') return
+      var t = String(el.textContent || '')
+      if (!isGitConclusionBlockText(t) || t.length < 12 || t.length > 8000) return
+      if (conclusionNodeProtects(el) && el.children && el.children.length) {
+        for (var i = 0; i < el.children.length; i++) collectHideableConclusions(el.children[i], out)
+        return
+      }
+      if (conclusionNodeProtects(el)) return
+      out.push(el)
+    }
+
+    function normalizeConcKey(s) {
+      return String(s || '').replace(/[#>*`•·\s]/g, '')
+    }
+
+    /**
+     * 检验：这段可见正文是不是账本上的那一份正式结论。
+     * 只比对正文指纹，不拿「Git 交付结论」标题当通过。模型改写的标题一样，正文对不上。
+     */
+    function fragmentMatchesOfficial(text, official) {
+      var o = normalizeConcKey(official)
+      var t = normalizeConcKey(text)
+      if (!o || o.length < 24 || !t) return false
+      if (t.indexOf(o) >= 0) return true
+      var start = Math.min(48, Math.max(0, o.length - 80))
+      var probe = o.slice(start, start + 80)
+      return probe.length >= 32 && t.indexOf(probe) >= 0
+    }
+
+    function collectModelGitSummaries(el, out) {
+      if (!el || el.nodeType !== 1) return
+      if (el.closest && el.closest('[data-cc-turn-tail="1"]')) return
+      if (el.closest && el.closest('[data-cc-conclusion-hoist="1"]')) return
+      if (el.closest && el.closest('[data-cc-git-deliver="1"]')) return
+      if (el.getAttribute && el.getAttribute('data-cc-dup-conclusion-hidden') === '1') return
+      var t = String(el.textContent || '')
+      if (isModelGitDeliverSummary(t)) {
+        if (el.children && el.children.length) {
+          var before = out.length
+          for (var i = 0; i < el.children.length; i++) collectModelGitSummaries(el.children[i], out)
+          if (out.length > before) return
+        }
+        if (conclusionNodeProtects(el)) return
+        out.push(el)
+        return
+      }
+      if (/提交已完成/.test(t) && el.children && el.children.length) {
+        for (var j = 0; j < el.children.length; j++) collectModelGitSummaries(el.children[j], out)
+      }
+    }
+
+    function hideHostConclusionCopy(el) {
+      if (!el || !el.style) return
+      if (el.closest && el.closest('[data-cc-turn-tail="1"]')) return
+      if (el.closest && el.closest('[data-cc-conclusion-hoist="1"]')) return
+      if (el.closest && el.closest('[data-cc-git-deliver="1"]')) return
+      if (conclusionNodeProtects(el)) return
+      try {
+        el.style.display = 'none'
+        el.setAttribute('data-cc-dup-conclusion-hidden', '1')
+      } catch (eHide) {}
+    }
+
+    /**
+     * 结论检验：同一轮只能有一份，且必须对上账本正式正文。
+     * 正式正文挂在 turnTail 的 data-cc-conclusion-official。
+     * 对不上的（模型复述）丢掉；对得上但又多出来的也丢掉。没有正式卡时，留最后一份对得上的。
+     */
+    function verifyUniqueGitConclusion(turn) {
+      if (!turn || !turn.querySelector) return
+      var tail = turn.querySelector('[data-cc-turn-tail="1"]')
+      var official = ''
+      if (tail && tail.getAttribute) official = String(tail.getAttribute('data-cc-conclusion-official') || '')
+      if (!official && tail) official = String(tail.textContent || '')
+      var leaves = findConclusionLeaves(turn)
+      var frags = []
+      for (var i = 0; i < leaves.length; i++) collectHideableConclusions(leaves[i], frags)
+      if (!frags.length) collectHideableConclusions(turn, frags)
+      var tailReady = !!(tail && isGitConclusionBlockText(String(tail.textContent || '')))
+      var keep = null
+      if (!tailReady) {
+        for (var k = frags.length - 1; k >= 0; k--) {
+          if (!official || fragmentMatchesOfficial(frags[k].textContent, official)) {
+            keep = frags[k]
+            break
+          }
+        }
+      }
+      for (var a = 0; a < frags.length; a++) {
+        if (frags[a] === keep) continue
+        if (official && !fragmentMatchesOfficial(frags[a].textContent, official)) {
+          hideHostConclusionCopy(frags[a])
+          continue
+        }
+        if (tailReady || keep) hideHostConclusionCopy(frags[a])
+      }
+    }
+
+    function dedupeGitConclusionsIn(turn) {
+      verifyUniqueGitConclusion(turn)
+    }
+
+    function gitConclusionZone(tail) {
+      if (!tail) return null
+      var zone =
+        (tail.closest && tail.closest('[data-chat-group-key]')) ||
+        (tail.closest && tail.closest('[data-chat-turn]'))
+      if (zone) return zone
+      var n = tail.parentElement
+      for (var up = 0; up < 8 && n && n !== document.body; up++) {
+        zone = n
+        n = n.parentElement
+      }
+      return zone
+    }
+
+    /** 正式结论已出现时，去掉同组里模型写的「提交已完成」复述。文件卡和正式卡留下。 */
+    function hideModelGitSummariesNear(tail) {
+      if (!tail || !isGitConclusionBlockText(String(tail.textContent || ''))) return
+      var zone = gitConclusionZone(tail)
+      if (!zone) return
+      var models = []
+      collectModelGitSummaries(zone, models)
+      var prev = zone.previousElementSibling
+      if (prev) collectModelGitSummaries(prev, models)
+      for (var i = 0; i < models.length; i++) hideHostConclusionCopy(models[i])
+      dedupeGitConclusionsIn(zone)
+    }
+
+    function installGitConclusionDedupe() {
+      if (typeof document === 'undefined' || window.__ccGitConcDedupe) return
+      window.__ccGitConcDedupe = 1
+      var timer = 0
+      function pass() {
+        timer = 0
+        var tails = document.querySelectorAll('[data-cc-turn-tail="1"]')
+        for (var t = 0; t < tails.length; t++) hideModelGitSummariesNear(tails[t])
+        var turns = document.querySelectorAll('[data-chat-turn]')
+        for (var i = 0; i < turns.length; i++) dedupeGitConclusionsIn(turns[i])
+      }
+      function schedule() {
+        if (timer) return
+        timer = setTimeout(pass, 200)
+      }
+      function arm() {
+        if (!document.body) return
+        pass()
+        try {
+          var obs = new MutationObserver(schedule)
+          obs.observe(document.body, { childList: true, subtree: true })
+        } catch (eObs) {}
+      }
+      if (document.body) arm()
+      else document.addEventListener('DOMContentLoaded', arm)
     }
 
     function hideDupConclusion(el) {
@@ -6260,6 +6645,7 @@ window.__ModuleLoader__.load({
         chat_conclusion: String(it.chat_conclusion || ''),
         synced_files: Array.isArray(it.synced_files) ? it.synced_files : [],
         deleted_files: Array.isArray(it.deleted_files) ? it.deleted_files : [],
+        review_report: it.review_report && it.review_report.rel ? it.review_report : null,
       }
       saveConclusionStore(store)
     }
@@ -6791,7 +7177,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'cc-git-row' },
-          h('span', { className: 'cc-git-lab' }, 'PR 基线'),
+          h('span', { className: 'cc-git-lab' }, '合并到'),
           h('input', {
             type: 'text',
             value: String(plan.base_branch || ''),
@@ -7060,17 +7446,7 @@ window.__ModuleLoader__.load({
             setSkipNative(false)
             return
           }
-          var hideGit = item && String(item.work_kind || '') === 'git_deliver'
-          // Git 交付：底座若误出写码「已编辑」卡一律藏掉（成功文件清单只在结论正文）
-          if (hideGit) {
-            var nativeHide = findSiblingNativeChangesCard(host)
-            if (nativeHide && nativeHide.setAttribute) {
-              nativeHide.setAttribute('data-cc-git-cancel-hide', '1')
-              nativeHide.style.display = 'none'
-            }
-            setSkipNative(true)
-            return
-          }
+          // 文件卡与预览一律留底座原生「已编辑」。禁止自绘，也禁止把原生卡 display:none。
           // 仅当同级已有底座原生卡时跳过兜底；误判会永久吃掉文件列表，禁止扫正文模糊匹配
           var native = findSiblingNativeChangesCard(host)
           setSkipNative(Boolean(native))
@@ -7152,11 +7528,9 @@ window.__ModuleLoader__.load({
           'data-cc-conclusion-hoist': '1',
           'data-cc-job-id': String(item.id || ''),
           'data-cc-turn-tail': '1',
+          'data-cc-conclusion-official': kindTail === 'git_deliver' ? md : '',
         },
-        h('div', {
-          className: 'cc-conclusion',
-          dangerouslySetInnerHTML: { __html: lightMdHtml(md) },
-        }),
+        h('div', { className: 'cc-conclusion' }, lightMdNodes(md)),
         beOffer
           ? h(
               'div',
@@ -7675,6 +8049,7 @@ window.__ModuleLoader__.load({
           CursorCodingSettingsSection,
         )
       })
+      installGitConclusionDedupe()
       // 「已完成」下方：Git 确认卡（先于结论），再挂本轮结论
       ctx.slots.inject('conversation.chat.turnTail', function () {
         return ctx.slots.register(

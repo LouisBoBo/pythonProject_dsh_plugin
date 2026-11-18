@@ -18,6 +18,7 @@ import {
   stripAccidentalMockEnv,
 } from './config.js'
 import { checkCompat, readPluginVersion } from './compat.js'
+import { reviewReportView } from './gitDeliver.js'
 import { redactJobPublic, redactSseEvent } from './redact.js'
 import { consume, issue } from './hitl.js'
 import {
@@ -1000,10 +1001,13 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       )
       return
     }
+    const filesSkipped = live?.git_deliver?.risk_code === 'files_skipped'
     const pauseDetail =
       decision === 'pause'
         ? riskKind === 'engine_unavailable'
-          ? '用户选择暂停提交（审码引擎不可用）'
+          ? filesSkipped
+            ? '用户选择暂停提交（有勾选文件未能纳入审码）'
+            : '用户选择暂停提交（审码引擎不可用）'
           : '用户选择暂停提交（保留高危，未 commit）'
         : undefined
     const decided = decideGitDeliverRisk(confirmToken, decision, pauseDetail)
@@ -1025,6 +1029,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
               risk_gate: null,
               stage: 'paused',
               risk_kind: null,
+              risk_code: null,
               risk_summary: pauseDetail || '用户选择暂停提交',
             },
           })
@@ -1394,6 +1399,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
           // Git 交付：取消/失败不得用 review_in_scope（候选清单）冒充已编辑
           synced_files: conclusionSyncedFiles(j),
           deleted_files: conclusionDeletedFiles(j),
+          review_report: reviewReportView(j),
         })),
       },
       req,
@@ -1430,6 +1436,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         synced_files: synced,
         deleted_files: deleted,
         files: [...synced, ...deleted],
+        review_report: reviewReportView(job),
         // 结论区常显重启条：进度卡折叠后仍可自动/手工下发
         backend_restart: job.backend_restart || null,
         backend_restart_hint: job.backend_restart_hint || null,

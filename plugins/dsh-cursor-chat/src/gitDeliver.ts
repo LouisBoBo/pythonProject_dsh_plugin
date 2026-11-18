@@ -441,12 +441,27 @@ export async function executeGitDeliver(
     const startedAt = Date.now()
     const tick = setInterval(() => {
       const sec = Math.round((Date.now() - startedAt) / 1000)
-      progress(`正在推送到远端…已等待 ${sec} 秒（网络较慢时属正常）`)
+      progress(`正在推送到远端…已等待 ${sec} 秒，无进展会自动重试`)
     }, 8000)
     try {
-      return await runGit(workspace, ['push', '-u', remoteName, target_branch], {
-        timeoutMs: 120_000,
-      })
+      // Apple Git 走 HTTP/2 连 github.com 时，连接能建上但一直 0 字节，要空等一两分钟才断。
+      // 强制 HTTP/1.1，并在 15 秒没有任何字节时主动断开再重试。
+      return await runGit(
+        workspace,
+        [
+          '-c',
+          'http.version=HTTP/1.1',
+          '-c',
+          'http.lowSpeedLimit=1',
+          '-c',
+          'http.lowSpeedTime=15',
+          'push',
+          '-u',
+          remoteName,
+          target_branch,
+        ],
+        { timeoutMs: 45_000 },
+      )
     } finally {
       clearInterval(tick)
     }
@@ -486,6 +501,7 @@ export async function executeGitDeliver(
   // 4) PR（尽力：本机 gh；失败不回滚 commit/push）
   let pr_url = ''
   let pr_manual_hint = ''
+  let pr_detail = ''
   if (create_pr) {
     progress(`推送成功，正在尝试开 PR（${target_branch} → ${base_branch}）…`)
     const pr = await tryCreatePullRequest({
@@ -496,6 +512,7 @@ export async function executeGitDeliver(
       remoteUrl: fresh.remote_url,
     })
     pr_url = pr.url
+    pr_detail = pr.detail || ''
     if (!pr.url) {
       pr_manual_hint =
         pr.detail ||
@@ -508,7 +525,9 @@ export async function executeGitDeliver(
     ok: true,
     stage: pr_url || !create_pr ? 'done' : pr_manual_hint ? 'pr' : 'done',
     detail: pr_url
-      ? `已提交并开 PR：${pr_url}`
+      ? /已有进行中的 PR/.test(pr_detail)
+        ? `已推送 ${target_branch}（${commit_short}）。该分支已有进行中的 PR：${pr_url}`
+        : `已提交并开 PR：${pr_url}`
       : create_pr
         ? `已推送 ${target_branch}（${commit_short}）。${pr_manual_hint}`
         : `已推送 ${target_branch}（${commit_short}）`,
@@ -522,6 +541,46 @@ export async function executeGitDeliver(
     pr_url,
     pr_manual_hint,
     committed_files: selected,
+  }
+}
+
+/** 域名本身或子域。`notgithub.com` 不能因为结尾像 github.com 就算托管站。 */
+function isHostOrSubdomain(host: string, root: string): boolean {
+  const name = host.split(':')[0].replace(/\.$/, '').toLowerCase()
+  return name === root || name.endsWith(`.${root}`)
+}
+
+/** owner/repo 只允许路径段，避免拼进 API 地址时改掉请求路径。 */
+function gitPathSegment(value: string): string {
+  const s = String(value || '')
+  if (!/^[A-Za-z0-9_.-]+$/.test(s)) return ''
+  if (s === '.' || s === '..' || s.includes('..')) return ''
+  return encodeURIComponent(s)
+}
+
+function githubPullPageUrl(url: string): string {
+  const raw = String(url || '').trim()
+  try {
+    const u = new URL(raw)
+    if (u.protocol !== 'https:' || u.username || u.password) return ''
+    if (!isHostOrSubdomain(u.hostname, 'github.com')) return ''
+    if (!/\/pull\/\d+$/i.test(u.pathname)) return ''
+    return u.toString()
+  } catch {
+    return ''
+  }
+}
+
+function giteePullPageUrl(url: string): string {
+  const raw = String(url || '').trim()
+  try {
+    const u = new URL(raw)
+    if (u.protocol !== 'https:' || u.username || u.password) return ''
+    if (!isHostOrSubdomain(u.hostname, 'gitee.com')) return ''
+    if (!/\/pulls?\/\d+$/i.test(u.pathname)) return ''
+    return u.toString()
+  } catch {
+    return ''
   }
 }
 
@@ -539,9 +598,9 @@ export function parseGitHosting(remoteUrl: string): {
   const host = m[1].toLowerCase()
   const owner = m[2]
   const repo = m[3].replace(/\.git$/i, '')
-  const kind: 'github' | 'gitee' | 'unknown' = /github\.com$/i.test(host)
+  const kind: 'github' | 'gitee' | 'unknown' = isHostOrSubdomain(host, 'github.com')
     ? 'github'
-    : /gitee\.com$/i.test(host)
+    : isHostOrSubdomain(host, 'gitee.com')
       ? 'gitee'
       : 'unknown'
   return {
@@ -582,6 +641,75 @@ function resolveGhExecutable(): string {
   return named
 }
 
+function githubAuthHeaders(token: string): Record<string, string> {
+  return {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+    'User-Agent': 'dsh-cursor-chat',
+    'X-GitHub-Api-Version': '2022-11-28',
+  }
+}
+
+/** GitHub 422 的正文在 errors[]，顶层 message 经常只是 Validation Failed。 */
+export function githubPullErrorText(json: Record<string, unknown>, raw: string, statusText: string): string {
+  const message = String(json.message || '').trim()
+  const errors = Array.isArray(json.errors) ? json.errors : []
+  const parts: string[] = []
+  for (const err of errors) {
+    if (!err || typeof err !== 'object') continue
+    const row = err as Record<string, unknown>
+    const m = String(row.message || '').trim()
+    if (m) {
+      parts.push(m)
+      continue
+    }
+    const field = String(row.field || '').trim()
+    const code = String(row.code || '').trim()
+    if (field || code) parts.push([field, code].filter(Boolean).join(' '))
+  }
+  const joined = [message, ...parts].filter(Boolean).join('：')
+  return (joined || raw || statusText).slice(0, 240)
+}
+
+export function githubPrAlreadyExists(text: string): boolean {
+  return /pull request already exists|已经存在|已存在/i.test(String(text || ''))
+}
+
+async function findOpenGitHubPull(opts: {
+  token: string
+  owner: string
+  repo: string
+  head: string
+  base: string
+}): Promise<string> {
+  const owner = gitPathSegment(opts.owner)
+  const repo = gitPathSegment(opts.repo)
+  if (!owner || !repo) return ''
+  const q = new URLSearchParams({
+    state: 'open',
+    head: `${opts.owner}:${opts.head}`,
+    base: opts.base,
+    per_page: '5',
+  })
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/pulls?${q.toString()}`,
+    { headers: githubAuthHeaders(opts.token) },
+  )
+  if (!res.ok) return ''
+  const json = (await res.json()) as unknown
+  if (!Array.isArray(json)) return ''
+  for (const row of json) {
+    if (!row || typeof row !== 'object') continue
+    const pr = row as Record<string, unknown>
+    const base = pr.base && typeof pr.base === 'object' ? String((pr.base as { ref?: string }).ref || '') : ''
+    const head = pr.head && typeof pr.head === 'object' ? String((pr.head as { ref?: string }).ref || '') : ''
+    const url = githubPullPageUrl(String(pr.html_url || ''))
+    if (url && base === opts.base && head === opts.head) return url
+  }
+  return ''
+}
+
 async function createPrWithHostToken(opts: {
   token: string
   remoteUrl: string
@@ -597,17 +725,22 @@ async function createPrWithHostToken(opts: {
   const bodyText = `Created by dsh-cursor-chat Git deliver.\n\n${opts.title}`
   try {
     if (parsed.kind === 'github') {
+      const existing = await findOpenGitHubPull({
+        token: opts.token,
+        owner: parsed.owner,
+        repo: parsed.repo,
+        head: opts.head,
+        base: opts.base,
+      })
+      if (existing) return { url: existing, detail: '该分支已有进行中的 PR' }
+      const owner = gitPathSegment(parsed.owner)
+      const repo = gitPathSegment(parsed.repo)
+      if (!owner || !repo) return { url: '', detail: '仓库路径无法用于 GitHub API' }
       const res = await fetch(
-        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls`,
+        `https://api.github.com/repos/${owner}/${repo}/pulls`,
         {
           method: 'POST',
-          headers: {
-            Accept: 'application/vnd.github+json',
-            Authorization: `Bearer ${opts.token}`,
-            'Content-Type': 'application/json',
-            'User-Agent': 'dsh-cursor-chat',
-            'X-GitHub-Api-Version': '2022-11-28',
-          },
+          headers: githubAuthHeaders(opts.token),
           body: JSON.stringify({
             title,
             head: opts.head,
@@ -624,10 +757,20 @@ async function createPrWithHostToken(opts: {
         json = {}
       }
       if (res.ok) {
-        const url = String(json.html_url || json.url || '').trim()
-        return { url, detail: '' }
+        const url = githubPullPageUrl(String(json.html_url || ''))
+        return url ? { url, detail: '' } : { url: '', detail: 'GitHub 未返回可打开的 PR 页面' }
       }
-      const msg = String(json.message || raw || res.statusText || res.status).slice(0, 240)
+      const msg = githubPullErrorText(json, raw, res.statusText || String(res.status))
+      if (githubPrAlreadyExists(msg)) {
+        const again = await findOpenGitHubPull({
+          token: opts.token,
+          owner: parsed.owner,
+          repo: parsed.repo,
+          head: opts.head,
+          base: opts.base,
+        })
+        if (again) return { url: again, detail: '该分支已有进行中的 PR' }
+      }
       // fine-grained 常见：只勾了 Pull requests Read → 403 Resource not accessible…
       const permHint = /Resource not accessible by personal access token|403/i.test(msg)
         ? '（当前 Token 对 Pull requests 只有读权限。请到 GitHub → Settings → Fine-grained tokens，编辑该 Token：仓库选中本仓，Permissions → Pull requests 改为 Read and write，保存后回「设置 → AI写码」覆盖保存 Token）'
@@ -635,8 +778,11 @@ async function createPrWithHostToken(opts: {
       return { url: '', detail: `GitHub API 开 PR 失败：${msg}${permHint}` }
     }
     // Gitee
+    const giteeOwner = gitPathSegment(parsed.owner)
+    const giteeRepo = gitPathSegment(parsed.repo)
+    if (!giteeOwner || !giteeRepo) return { url: '', detail: '仓库路径无法用于 Gitee API' }
     const res = await fetch(
-      `https://gitee.com/api/v5/repos/${parsed.owner}/${parsed.repo}/pulls`,
+      `https://gitee.com/api/v5/repos/${giteeOwner}/${giteeRepo}/pulls`,
       {
         method: 'POST',
         headers: {
@@ -660,8 +806,8 @@ async function createPrWithHostToken(opts: {
       json = {}
     }
     if (res.ok) {
-      const url = String(json.html_url || json.url || '').trim()
-      return { url, detail: '' }
+      const url = giteePullPageUrl(String(json.html_url || ''))
+      return url ? { url, detail: '' } : { url: '', detail: 'Gitee 未返回可打开的 PR 页面' }
     }
     const msg = String(json.message || json.error_description || raw || res.statusText).slice(0, 240)
     return { url: '', detail: `Gitee API 开 PR 失败：${msg}` }
@@ -747,8 +893,11 @@ export async function postPrReviewComment(opts: {
     }
     const token = cfg.gitHostToken.trim()
     if (parsed.kind === 'github') {
+      const owner = gitPathSegment(parsed.owner)
+      const repo = gitPathSegment(parsed.repo)
+      if (!owner || !repo) return { ok: false, detail: '仓库路径无法用于 GitHub API' }
       const res = await fetch(
-        `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${prNumber}/comments`,
+        `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`,
         {
           method: 'POST',
           headers: {
@@ -765,8 +914,11 @@ export async function postPrReviewComment(opts: {
       const raw = await res.text()
       return { ok: false, detail: `GitHub 评论失败：${raw.slice(0, 200)}` }
     }
+    const giteeOwner = gitPathSegment(parsed.owner)
+    const giteeRepo = gitPathSegment(parsed.repo)
+    if (!giteeOwner || !giteeRepo) return { ok: false, detail: '仓库路径无法用于 Gitee API' }
     const res = await fetch(
-      `https://gitee.com/api/v5/repos/${parsed.owner}/${parsed.repo}/pulls/${prNumber}/comments`,
+      `https://gitee.com/api/v5/repos/${giteeOwner}/${giteeRepo}/pulls/${prNumber}/comments`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'User-Agent': 'dsh-cursor-chat' },
@@ -842,6 +994,17 @@ export function isGitDeliverIdleDetail(detail: string, code?: string): boolean {
   return /没有未提交改动|无需 Git 交付|没有可安全提交的改动|仅有敏感文件未提交/.test(t)
 }
 
+/** 结论卡用：只认插件自己写下的审码报告相对路径。 */
+export function reviewReportView(job: {
+  git_deliver?: { review_report_rel?: string } | null
+}): { rel: string; name: string } | null {
+  const rel = String(job.git_deliver?.review_report_rel || '')
+    .replace(/\\/g, '/')
+    .trim()
+  if (!rel.startsWith('.dsh-cursor-chat/reviews/') || rel.includes('..')) return null
+  return { rel, name: '本批审码报告.md' }
+}
+
 export function formatGitDeliverConclusion(opts: {
   status: 'succeeded' | 'failed' | 'cancelled' | 'idle' | 'paused'
   plan?: GitDeliverPlan | null
@@ -853,6 +1016,15 @@ export function formatGitDeliverConclusion(opts: {
   /** 审码闸暂停时的高危摘要 */
   riskSummary?: string
   highTitles?: string[]
+  /** 已跑完的本批审码：写入结论说明，并指向可预览报告 */
+  review?: {
+    ran?: boolean
+    passed?: boolean
+    high_count?: number
+    medium_count?: number
+    low_count?: number
+    report_rel?: string
+  } | null
 }): string {
   // 与写码「## 本轮结论」区分：Git 专用标题，避免结论区叠两套模板
   const lines: string[] = ['## Git 交付结论', '']
@@ -948,25 +1120,75 @@ export function formatGitDeliverConclusion(opts: {
     lines.push(...(hintByStage[stage] || hintByStage.inspect))
     return lines.join('\n') + '\n'
   }
-  lines.push(`结果：✅ Git 交付完成。`)
+  const remote = result.remote_url || plan?.remote_url || ''
+  const compare =
+    remote && result.base_branch && result.target_branch
+      ? buildComparePrUrl(remote, result.base_branch, result.target_branch)
+      : ''
+  const missingToken = /未配置 Git Token/.test(result.pr_manual_hint) && /gh/.test(result.pr_manual_hint)
+  const existingPr = /已有进行中的 PR/.test(result.detail || '')
+  const prSentence = result.pr_url
+    ? existingPr
+      ? `该分支已有进行中的 PR：${result.pr_url}`
+      : `已自动创建 PR：${result.pr_url}`
+    : missingToken
+      ? '自动创建 PR 未成功：未配置 Git Token（设置 → AI写码），本机也没有可用的 gh 命令。'
+      : result.pr_manual_hint
+        ? result.pr_manual_hint.split('请手动开 PR')[0].replace(/^未能自动开 PR：/, '自动创建 PR 未成功：').trim() ||
+          '自动创建 PR 未成功。'
+        : '未创建 PR。'
+  lines.push(`提交已完成。`)
+  lines.push(``)
+  lines.push(
+    `**任务结果** 代码已提交并推送到远端仓库 ${result.target_branch} 分支（commit ${result.commit_short || '—'}）。${prSentence}`,
+  )
+  lines.push(``)
+  lines.push(`**做了什么**`)
+  lines.push(``)
+  lines.push(`- 读取当前仓库未提交改动，经确认后执行 commit → push。`)
+  lines.push(`- 推送成功，目标分支 ${result.target_branch}。`)
+  if (result.pr_url) lines.push(`- ${existingPr ? '沿用已有 PR' : '已开 PR'}：${result.pr_url}`)
+  else if (missingToken) lines.push(`- 开 PR 环节因缺少凭据跳过。`)
+  else if (result.pr_manual_hint) lines.push(`- 自动开 PR 未成功，原因见任务结果。`)
+  else lines.push(`- 本次未要求开 PR。`)
+  lines.push(``)
+  lines.push(`**如何验证**`)
+  lines.push(``)
+  if (result.pr_url) {
+    lines.push(`打开 PR 完成人审：`)
+    lines.push(``)
+    lines.push(result.pr_url)
+  } else if (compare) {
+    lines.push(`手动开 PR 可用链接：`)
+    lines.push(``)
+    lines.push(compare)
+  } else {
+    lines.push(`在托管平台核对分支 ${result.target_branch} 与 commit ${result.commit_short || '—'}。`)
+  }
+  if (!result.pr_url && missingToken) {
+    lines.push(``)
+    lines.push(`若想后续自动开 PR，可在「设置 → AI写码」里配置 Git Token，或在本机安装并登录 gh。`)
+  }
   lines.push(``)
   lines.push(`说明：`)
-  lines.push(`• 仓库：${result.remote_url || plan?.remote_url || ''}`)
+  if (remote) lines.push(`• 仓库：${remote}`)
   lines.push(`• 分支：${result.target_branch}`)
   if (result.commit_short) lines.push(`• Commit：${result.commit_short}`)
   if (result.committed_files.length) {
-    lines.push(
-      `• 提交文件：${result.committed_files.slice(0, 20).join(', ')}${result.committed_files.length > 20 ? '…' : ''}`,
-    )
+    const shown = result.committed_files.slice(0, 12)
+    const more = result.committed_files.length > shown.length ? ` …等 ${result.committed_files.length} 个` : ''
+    lines.push(`• 提交文件：${shown.join(', ')}${more}`)
   }
-  if (result.pr_url) lines.push(`• PR：${result.pr_url}`)
-  else if (result.pr_manual_hint) lines.push(`• ${result.pr_manual_hint}`)
+  if (opts.review?.ran) {
+    const h = Number(opts.review.high_count || 0)
+    const m = Number(opts.review.medium_count || 0)
+    const l = Number(opts.review.low_count || 0)
+    lines.push(
+      `• 本批审码：高危 ${h} · 中危 ${m} · 低危 ${l}${opts.review.passed ? '（已放行）' : ''}`,
+    )
+    if (opts.review.report_rel) lines.push(`• 审码报告：\`${opts.review.report_rel}\`（结论下方可点开预览）`)
+  }
   if (result.pr_comment_ok) lines.push(`• 审码报告已写入 PR 评论`)
   else if (result.pr_comment_detail) lines.push(`• 审码评论：${result.pr_comment_detail}`)
-  lines.push(``)
-  lines.push(`请你验收：`)
-  lines.push(`1. 在托管平台核对分支与 commit。`)
-  if (result.pr_url) lines.push(`2. 打开 PR 链接完成人审合并。`)
-  else lines.push(`2. 若需合入主干，按提示手动开 PR。`)
   return lines.join('\n') + '\n'
 }
