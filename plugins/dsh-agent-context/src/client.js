@@ -1,6 +1,6 @@
 /**
  * 任务上下文右侧栏：只读聚合写码 Job / Git 摘要 / ESC 状态；提交走 begin-ui → 对话确认卡。
- * BUILD_MARK: acontext-0.1.67-launch-300
+ * BUILD_MARK: acontext-0.1.67-launch-301
  */
 window.__ModuleLoader__.load({
   id: '@zhongruan/dsh-agent-context',
@@ -28,6 +28,8 @@ window.__ModuleLoader__.load({
     var RAIL_DEFAULT_W = 300
     var RAIL_MAX_W = 720
     var LS_RAIL_W = 'dsh-agent-context-rail-w'
+    /** 对话正文/输入区最大宽度：40rem 窄栏，宽屏居中留白 */
+    var CHAT_CONTENT_MAX_W = 640
 
     function lsGet(key, fallback) {
       try {
@@ -1023,114 +1025,42 @@ window.__ModuleLoader__.load({
       return w
     }
 
-    /** 对话列可用的右边界：右栏在场时就是它的左缘（不依赖“是否展开”判断） */
-    function activeChatLimit() {
+    /** 旧版铺满逻辑留下的内联宽度：撤销，交还宿主自己的居中布局 */
+    function releaseWidened(el) {
+      if (!el || !el.getAttribute || !el.getAttribute('data-acx-fill')) return false
       try {
-        var panel = hostRightPanelEl()
-        var pr = panel && panel.getBoundingClientRect()
-        if (pr && pr.left > 120 && pr.left < window.innerWidth - 24) return pr.left
-      } catch (e) {}
-      return window.innerWidth
-    }
-
-    /** 元素右侧的空隙是否由真正的分栏兄弟（如右栏）占着；是则不能再往上放开 */
-    function rightGapIsSplitSibling(el) {
-      try {
-        var p = el.parentElement
-        if (!p) return false
-        var pr = p.getBoundingClientRect()
-        if (pr.width < window.innerWidth * 0.85) return false
-        var er = el.getBoundingClientRect()
-        for (var i = 0; i < p.children.length; i++) {
-          var sib = p.children[i]
-          if (sib === el) continue
-          var sr = sib.getBoundingClientRect()
-          if (sr.width > 120 && sr.left >= er.right - 2 && sr.left < pr.right - 2) return true
-        }
+        el.style.removeProperty('max-width')
+        el.style.removeProperty('width')
+        el.style.removeProperty('box-sizing')
+        el.style.removeProperty('margin-left')
+        el.style.removeProperty('margin-right')
+        el.removeAttribute('data-acx-fill')
+        return true
       } catch (e) {}
       return false
-    }
-
-    /** 输入框区域一律不碰：只调对话列宽度，不改 composer 的盒模型/高度 */
-    function isComposerSubtree(el) {
-      try {
-        return !!(el && el.closest && el.closest('[data-conversation-composer], [data-composer], [class*="composer"], [class*="Composer"]'))
-      } catch (e) {}
-      return false
-    }
-
-    /** 只放开「比父容器窄」的布局壳，避免改到图标行、按钮等正常窄元素 */
-    function unbindWidthCap(el) {
-      if (!el || !el.style || el === document.body || el === document.documentElement) return ''
-      var parent = el.parentElement
-      if (!parent) return ''
-      try {
-        if (isComposerSubtree(el)) return 'stop'
-        if (rightGapIsSplitSibling(el)) return 'stop'
-        var pcs = window.getComputedStyle(parent)
-        var avail =
-          parent.clientWidth -
-          (parseFloat(pcs.paddingLeft) || 0) -
-          (parseFloat(pcs.paddingRight) || 0)
-        var r = el.getBoundingClientRect()
-        if (!(avail > 0) || !(r.width > 0) || avail - r.width <= 24) return ''
-        var cs = window.getComputedStyle(el)
-        el.style.setProperty('max-width', 'none', 'important')
-        el.style.setProperty('width', '100%', 'important')
-        if (cs.boxSizing !== 'border-box') el.style.setProperty('box-sizing', 'border-box', 'important')
-        if (cs.marginLeft === 'auto') el.style.setProperty('margin-left', '0', 'important')
-        if (cs.marginRight === 'auto') el.style.setProperty('margin-right', '0', 'important')
-        el.setAttribute('data-acx-fill', '1')
-        return 'changed'
-      } catch (e) {
-        return ''
-      }
-    }
-
-    /**
-     * 沿锚点向上找到「铺到右栏左缘」的祖先，途中被限宽的布局壳逐个放开。
-     * 不按固定 class/属性猜宿主结构，换宿主版本也能命中。
-     */
-    function unbindChatChain(start, limit) {
-      if (!start) return 0
-      var changed = 0
-      var node = start
-      for (var i = 0; i < 16 && node && node !== document.body; i++) {
-        var r = node.getBoundingClientRect()
-        if (r.right >= limit - 24) break
-        var act = unbindWidthCap(node)
-        if (act === 'stop') break
-        if (act) changed += 1
-        node = node.parentElement
-      }
-      return changed
     }
 
     function fillChatGutter() {
-      var limit = activeChatLimit()
-      var widened = 0
-      // 只覆盖对话列宽度；composer（输入框）的宽度/高度变量一概不写
+      // 主流阅读宽度：宽屏居中留白，窄屏随容器收缩；不再铺满到右栏左缘
+      var cssW = 'min(' + CHAT_CONTENT_MAX_W + 'px, 100%)'
       try {
-        document.documentElement.style.setProperty('--dsh-chat-content-width', '100%', 'important')
+        document.documentElement.style.setProperty('--dsh-chat-content-width', cssW, 'important')
       } catch (eRoot) {}
       var roots = document.querySelectorAll('[data-conversation-content]')
       for (var i = 0; i < roots.length; i++) {
-        var root = roots[i]
-        root.style.setProperty('--dsh-chat-content-width', '100%', 'important')
-        widened += unbindChatChain(root, limit)
+        roots[i].style.setProperty('--dsh-chat-content-width', cssW, 'important')
       }
-      var scrolls = document.querySelectorAll('[data-conversation-scroll]')
-      for (var s = 0; s < scrolls.length; s++) widened += unbindChatChain(scrolls[s], limit)
-      try {
-        var turns = document.querySelectorAll('[data-chat-turn]')
-        if (turns.length) widened += unbindChatChain(turns[turns.length - 1], limit)
-      } catch (e) {}
-      // 切会话/切 tab 会重建节点：每次铺满后把观察器重新挂到最新节点
+      var released = 0
+      var widened = document.querySelectorAll('[data-acx-fill]')
+      for (var j = 0; j < widened.length; j++) {
+        if (releaseWidened(widened[j])) released += 1
+      }
+      // 切会话/切 tab 会重建节点：每次应用后把观察器重新挂到最新节点
       bindChatFillTargets()
       try {
-        console.info('[agent-context][fill]', 'limit=' + limit, 'widened=' + widened)
+        console.info('[agent-context][width]', cssW, 'released=' + released)
       } catch (eLog) {}
-      return { limit: limit, widened: widened }
+      return { width: cssW, released: released }
     }
 
     var fillTimer = null
@@ -2586,8 +2516,8 @@ window.__ModuleLoader__.load({
       /**
        * 系统侧栏 / 会话侧栏是宿主右栏里的两个 tab：
        * - 宽度归宿主：会话首开时按记忆值（默认 300）设置一次，之后拖拽说了算
-       * - 右栏已关就保持关闭；用户关掉后不再被轮询抢回
-       * - 右栏开着且被系统 tab 占用时不抢；只有空白时才补挂会话 tab
+       * - 会话首挂时右栏若未展开，自动替用户展开一次；同一会话被关掉后不再抢回
+       * - 右栏开着且被系统 tab 占用时不抢（本次自动展开的除外）；空白时才补挂会话 tab
        */
       var dock = null
       try {
@@ -2601,6 +2531,10 @@ window.__ModuleLoader__.load({
 
       var openTimer = null
       var lastOpenState = null
+      /** 会话首挂自动展开一次：undefined=未处理，pending=正在自动展开，done=已结束 */
+      var railAutoState = Object.create(null)
+      var railAutoTries = Object.create(null)
+      var RAIL_AUTO_MAX_TRIES = 6
       /**
        * 右栏默认宽度（300）只在本次启动内播种一次：
        * 宿主可能先恢复上次的宽布局，所以设完还要复核，被覆盖就再设（有界重试）。
@@ -2702,24 +2636,60 @@ window.__ModuleLoader__.load({
         }, 120)
       }
 
+      /** 首次挂载时右栏是关的：替用户展开一次；有界重试，之后主循环接管挂 tab */
+      function tryAutoOpenRail(sid) {
+        var key = String(sid)
+        var tries = railAutoTries[key] || 0
+        if (tries >= RAIL_AUTO_MAX_TRIES) {
+          railAutoState[key] = 'done'
+          return
+        }
+        railAutoTries[key] = tries + 1
+        if (!tryOpenHostRightbar(ctx)) {
+          // 保底：点一次宿主右栏开关（未展开时宿主自己负责展开）
+          try {
+            var btn = document.querySelector('[data-sidebar-right-toggle]')
+            if (btn && typeof btn.click === 'function') btn.click()
+          } catch (e) {}
+        }
+      }
+
       function syncHostSession(props) {
         var sid = resolveSessionId(props || {}, ctx)
         if (!sid) return false
+        var key = String(sid)
 
         var open = isHostRightSidebarOpen()
         if (open !== lastOpenState) {
+          var wasOpen = lastOpenState
           lastOpenState = open
           scheduleFillChat(120)
           if (open) seedDefaultWidth()
+          // 展开过又被关掉：视为用户主动关闭，本次会话不再抢回
+          else if (wasOpen && railAutoState[key] === 'pending') railAutoState[key] = 'done'
         }
         syncTogglePressed()
 
-        if (!open) return false
+        if (!open) {
+          // 新会话首挂时自动展开一次；展开后由下一次 tick 挂上会话 tab
+          if (railAutoState[key] === undefined) railAutoState[key] = 'pending'
+          if (railAutoState[key] === 'pending') tryAutoOpenRail(sid)
+          return false
+        }
         // 宽度归宿主列：只要右栏开着就先保证默认 300，再决定挂哪个 tab
         seedDefaultWidth()
         if (hasSessionPanel()) {
+          railAutoState[key] = 'done'
           return true
         }
+        if (railAutoState[key] === 'pending') {
+          // 本次是我们自动展开的：宿主可能恢复系统 tab，这里切回会话 tab
+          if (openSessionDock(sid)) railAutoState[key] = 'done'
+          else if ((railAutoTries[key] || 0) >= RAIL_AUTO_MAX_TRIES) railAutoState[key] = 'done'
+          return true
+        }
+        // 用户自己开着的右栏：不抢现有 tab，也不在关掉后再自动展开
+        if (railAutoState[key] === undefined) railAutoState[key] = 'done'
         if (isPanelOccupiedByOther()) return false
         scheduleOpenSession(sid)
         return true
@@ -2885,7 +2855,7 @@ window.__ModuleLoader__.load({
 
       console.log(
         '[agent-context] 每次启动右栏回到默认宽度 300；拖拽只在本次运行内生效',
-        'BUILD acontext-0.1.67-launch-300',
+        'BUILD acontext-0.1.67-launch-301',
       )
       watchChatFill()
       // 首屏/恢复布局/会话晚挂载各补一次；有界重试，不是轮询
