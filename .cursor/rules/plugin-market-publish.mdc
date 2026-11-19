@@ -26,6 +26,8 @@ alwaysApply: true
 
 `pack.sh` 会扫描 `plugins/` 下所有 `dsh-*` Bundle，不必再改脚本白名单。只打一个包时，其它已有 tgz 仍会写进 `plugins.json`，避免把线上插件冲掉。
 
+`@zhongruan/dsh-llm-meter` 已从发现页拿掉（`generate-registry.sh` 的 `HIDDEN_FROM_CATALOG`）。npm 历史包保留，供浏览器壳钉死的 `0.1.1` 解析。不要把它加回发现页，也不要删它的 tgz。
+
 ## 禁止
 
 - **未获「上架」口令就 pack+upload**（含「修完顺便上架」「方便你更新」）

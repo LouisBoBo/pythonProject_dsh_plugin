@@ -130,7 +130,7 @@ import { decideCodingGate, readAskUserAfterLastUser } from './clarifyFlow.js'
 import { launchCodingJob } from './launchJob.js'
 import { planProjectServices } from './opsRestart.js'
 import { buildPrompt, runningBulkInstallTool } from './cursor/runner.js'
-import { inferShellToolOutcome } from './transcript.js'
+import { inferShellToolOutcome, opsEvidenceProblem } from './transcript.js'
 import { answerUserChoice, cancelUserChoice, waitForUserChoice } from './userChoice.js'
 import {
   buildOpsPrompt,
@@ -465,6 +465,19 @@ async function main() {
     writeFileSync(join(gitRoot, '.env'), 'SECRET=1\n', 'utf8')
     writeFileSync(join(gitRoot, 'note.md'), 'n\n', 'utf8')
 
+    const { parseGitShortstat, summarizeGitWorkspace } = await import('./gitInspect.js')
+    assert(parseGitShortstat('').add === 0 && parseGitShortstat('').del === 0, '空 shortstat 须为 0')
+    assert(
+      parseGitShortstat(' 1 file changed, 12 insertions(+), 3 deletions(-)\n').add === 12 &&
+        parseGitShortstat(' 1 file changed, 12 insertions(+), 3 deletions(-)\n').del === 3,
+      'shortstat 须解析 +/-',
+    )
+    assert(
+      parseGitShortstat(' 2 files changed, 1 insertion(+)\n').files === 2 &&
+        parseGitShortstat(' 2 files changed, 1 insertion(+)\n').del === 0,
+      '仅 insertions 时 del=0',
+    )
+
     const inspected = await inspectGitWorkspace(gitRoot)
     assert(inspected.ok === true, '有改动的 git 仓须 inspect ok')
     if (inspected.ok !== true) throw new Error('inspect failed')
@@ -473,6 +486,14 @@ async function main() {
     assert(inspected.selected_files.includes('app.js'), '改动文件进候选')
     assert(inspected.selected_files.includes('note.md'), '新文件进候选')
     assert(!inspected.selected_files.includes('.env'), '敏感不进候选')
+
+    const summary = await summarizeGitWorkspace(gitRoot)
+    assert(summary.ok === true && summary.is_git === true, 'workspace-summary 脏仓须 ok+is_git')
+    assert(summary.current_branch === 'main', 'summary 须带当前分支')
+    assert(summary.dirty === true, '有改动时 dirty')
+    assert(summary.selected_files.includes('app.js'), 'summary 须列可提交文件')
+    const cleanSummary = await summarizeGitWorkspace(bare)
+    assert(cleanSummary.ok === true, 'summary 对 bare/异常路径也须 ok 结构')
 
     const plan = buildGitDeliverPlan(inspected, {
       requirement: '修一下日志',
@@ -764,16 +785,26 @@ async function main() {
     assert(indexSrc.includes('禁止填 synced_files') || indexSrc.includes('committed_files'), 'Git 成功勿填宿主 synced_files')
     assert(indexSrc.includes('GIT_DELIVER_MODEL_STOP'), 'Git 终态须统一硬停止，禁止模型复述结论')
     assert(indexSrc.includes('GIT_DELIVER_MODEL_STOP_PAUSED'), '暂停须专用硬停止，禁止立刻再调 git_deliver')
+    assert(indexSrc.includes('GIT_DELIVER_MODEL_STOP_CANCELLED'), '取消须专用硬停止，禁止当故障重试')
     assert(indexSrc.includes('out.paused === true') || indexSrc.includes('paused = out.paused'), '暂停须认 out.paused')
     assert(
       /if \(out\.paused === true\)[\s\S]{0,200}ok:\s*true/.test(indexSrc),
       '暂停须 ok:true 终态收口，禁止当失败诱出追问',
     )
     assert(
+      /if \(out\.cancelled === true\)[\s\S]{0,200}ok:\s*true/.test(indexSrc),
+      '用户取消须 ok:true 终态收口，禁止当失败诱出 Retry',
+    )
+    assert(
       indexSrc.includes('v.paused === true') && indexSrc.includes('GIT_DELIVER_MODEL_STOP_PAUSED'),
       'chatBodyRender 暂停须直接吐硬停止给模型',
     )
+    assert(
+      indexSrc.includes('v.cancelled === true') && indexSrc.includes('GIT_DELIVER_MODEL_STOP_CANCELLED'),
+      'chatBodyRender 取消须直接吐硬停止给模型',
+    )
     assert(indexSrc.includes('paused=true'), '工具描述须声明 paused 后禁止追问')
+    assert(indexSrc.includes('cancelled=true') && indexSrc.includes('禁止重试'), '工具描述须声明取消后禁止重试')
     assert(launchSrc.includes('findRecentPausedGitDeliver'), '暂停后须防模型重开确认卡')
     assert(launchSrc.includes('risk_paused_replay'), '重入须复用暂停结论码')
     assert(launchSrc.includes('PAUSED_REENTRY_GUARD_MS'), '暂停重入须有时间窗')
@@ -848,6 +879,28 @@ async function main() {
         'utf8',
       )
       assert(serverSrc.includes('git-deliver/awaiting 须带 session_id'), 'awaiting 须强制 session_id')
+      assert(serverSrc.includes('/api/cursor-chat/workspace-summary'), '须暴露 workspace-summary')
+      assert(serverSrc.includes('/api/cursor-chat/git-deliver/begin-ui'), '须暴露 begin-ui')
+      assert(serverSrc.includes('startGitDeliverFromUi'), 'begin-ui 须走 startGitDeliverFromUi')
+      assert(
+        /session_id[\s\S]{0,1200}images:\s*Array\.isArray\(j\.images\)/.test(serverSrc) ||
+          serverSrc.includes('任务上下文「来源」：仅用户附图'),
+        'jobs?session_id 须带用户附图 images 供来源区',
+      )
+      assert(
+        !/git-deliver\/begin-ui[\s\S]{0,800}executeGitDeliver\(/.test(serverSrc),
+        'begin-ui 路由内禁止直接 executeGitDeliver',
+      )
+      const launchSrc = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'launchGitDeliver.ts'),
+        'utf8',
+      )
+      assert(launchSrc.includes('startGitDeliverFromUi'), '须有侧栏 Git 交付入口')
+      assert(
+        launchSrc.includes('waitForGitDeliverConfirm') &&
+          launchSrc.includes('completeGitDeliverFromConfirm'),
+        '侧栏入口须挂 waiter 并走 complete（含审码闸）',
+      )
     }
     {
       const { gitHostTokenReady, loadConfig, saveConfig } = await import('./config.js')
@@ -1301,6 +1354,22 @@ async function main() {
       const fe = planned.plans.find((p) => p.side === 'frontend')
       const be = planned.plans.find((p) => p.side === 'backend')
       assert(Boolean(fe && fe.args.join(' ') === 'run dev' && fe.port === 5175), '前端须用项目的 dev 脚本和端口')
+      mkdirSync(join(proj, 'frontend', 'node_modules', 'vite', 'bin'), { recursive: true })
+      writeFileSync(join(proj, 'frontend', 'node_modules', 'vite', 'bin', 'vite.js'), '#!/usr/bin/env node\n')
+      const { locateNodeBinary, planProjectServices: planAgain } = await import('./opsRestart.js')
+      const nodeBin = locateNodeBinary()
+      assert(Boolean(nodeBin && existsSync(nodeBin)), '桌面 PATH 没有 npm 时也必须能找到 node')
+      const withVite = planAgain(proj, { frontend: true, backend: true })
+      const feVite = withVite.plans.find((p) => p.side === 'frontend')
+      assert(
+        Boolean(
+          feVite &&
+            feVite.bin === nodeBin &&
+            feVite.args.includes(join(proj, 'frontend', 'node_modules', 'vite', 'bin', 'vite.js')) &&
+            feVite.args.includes('5175'),
+        ),
+        '有 vite.js 时前端须用 node 直拉，实际 ' + JSON.stringify(feVite),
+      )
       assert(Boolean(be && be.args.includes('app.main:app') && be.port === 8009), '后端须用项目的 uvicorn 命令')
       assert(
         !planned.plans.some((p) => `${p.label} ${p.args.join(' ')}`.includes('pull-refresh')),
@@ -1357,6 +1426,30 @@ async function main() {
       assert(!opsConclusion.includes('写码空跑'), '未改代码的重启不得写成写码空跑')
       assert(opsConclusion.includes('未改代码'), '结论须写明未改代码')
       assert(!opsJob?.sandbox_path, '启动服务不得把真实项目记成沙箱')
+      const contradicted = createJob({ workspace, requirement: '重启前后端服务' })
+      patchJob(contradicted.id, {
+        work_kind: 'ops',
+        assistant_text:
+          '## 说明方案\n\n**结论：** 前后端已重新拉起并在监听，健康检查与首页均正常。\n\n**验收或下一步：**\n- 前端：http://127.0.0.1:5175/\n',
+        transcript: [
+          {
+            id: 'st-be',
+            kind: 'status',
+            at: new Date().toISOString(),
+            text: '后端 app.main:app :8009 已在听',
+          },
+        ],
+      })
+      setStatus(
+        loadJob(contradicted.id)!,
+        'failed',
+        '重启未成功：前端没有在听。前端 5175 未监听；后端 8009 在听',
+      )
+      const bad = formatChatConclusion(loadJob(contradicted.id)!)
+      assert(bad.includes('未完成'), '失败结论须标明未完成')
+      assert(bad.includes('前端 5175 未监听'), '失败结论须写探测结果，实际 ' + bad.slice(0, 240))
+      assert(!bad.includes('前后端已重新拉起并在监听'), '失败结论不得沿用 Cursor 的成功句')
+      assert(!bad.includes('请你验收'), '端口未齐不得再请用户按链接验收')
     }
     {
       const fromPlugin = buildOpsPrompt({
@@ -1384,7 +1477,20 @@ async function main() {
         fileURLToPath(new URL('../src/orchestrator/runJob.ts', import.meta.url)),
         'utf8',
       )
-      assert(runJobSrcOps.includes('start_failed'), '插件启动失败须能降级 Cursor')
+      assert(runJobSrcOps.includes('started.start_failed'), '插件启动失败须有独立收口')
+      assert(
+        !/started\.no_commands\s*\|\|\s*started\.start_failed/.test(runJobSrcOps),
+        '启动失败不得和认不出命令绑在一起交给 Cursor',
+      )
+      assert(
+        runJobSrcOps.includes('缺端口不得再交给 Cursor'),
+        '端口未齐不得再交给 Cursor',
+      )
+      assert(runJobSrcOps.includes('验收通过'), '端口齐了才算完成')
+      assert(runJobSrcOps.includes('验收未过'), '端口未齐须抛出问题再纠错一轮')
+      assert(runJobSrcOps.includes('maxAuditRounds'), '验收纠错须有轮次上限')
+      assert(runJobSrcOps.includes('opsEvidenceProblem'), '测试/安装/看日志等也须按工具终态验收')
+      assert(runJobSrcOps.includes('验收未过，继续纠错'), '验收未过须再纠错一轮')
       assert(runJobSrcOps.includes("name: 'Shell'"), '重启过程须推送 Shell 工具块')
       assert(runJobSrcOps.includes('继续按 Cursor IDE 方式处理'), '未成功时须再给 Cursor 一次 IDE 式机会')
       assert(runJobSrcOps.includes('插件按项目命令稳拉') || runJobSrcOps.includes('插件稳拉'), 'Cursor 后须再交回插件稳拉')
@@ -1490,6 +1596,51 @@ async function main() {
           result: { exitCode: 1 },
         })
         assert(notShell.status === 'completed', '非 Shell 不得仅因 exitCode 字段误杀')
+        const shellItem = (
+          name: string,
+          tool_status: string,
+          extra: { command?: string; snippet?: string } = {},
+        ) => ({
+          id: name + tool_status,
+          kind: 'tool' as const,
+          at: '',
+          name,
+          tool_status,
+          ...extra,
+        })
+        assert(
+          opsEvidenceProblem([shellItem('Shell', 'completed', { command: 'pytest' })], 'test') === '',
+          '测试命令完成才算过',
+        )
+        assert(
+          opsEvidenceProblem([], 'test').includes('验收未过'),
+          '测试没跑命令不得过',
+        )
+        assert(
+          opsEvidenceProblem(
+            [shellItem('Shell', 'failed', { command: 'pytest', snippet: '失败：exit 1' })],
+            'test',
+          ).includes('exit 1'),
+          '最后一条失败命令不得算完成',
+        )
+        assert(
+          opsEvidenceProblem(
+            [
+              shellItem('Shell', 'failed', { command: 'pytest', snippet: '失败：exit 1' }),
+              shellItem('Shell', 'completed', { command: 'pytest' }),
+            ],
+            'test',
+          ) === '',
+          '后面补跑成功则认最后一条',
+        )
+        assert(
+          opsEvidenceProblem([shellItem('Read', 'completed')], 'logs') === '',
+          '看日志有读完的工具即可',
+        )
+        assert(
+          opsEvidenceProblem([shellItem('ask_user_choice', 'completed')], 'generic').includes('验收未过'),
+          '只问了用户不算做完',
+        )
         const waitP = waitForUserChoice({
           jobId: 'job-choice-selftest',
           question: '装依赖方式？',
@@ -1803,6 +1954,7 @@ async function main() {
     const offer = evaluateBackendRestartOffer({
       workspace: root,
       syncedFiles: ['backend/app/routers/reports.py'],
+      platform: 'win32',
     })
     assert(offer && offer.offered === true, '仅改 reports 路由也应出重启 offer')
     assert(offer!.port === 8009, '端口须来自 Vite 代理')
@@ -2569,8 +2721,10 @@ async function main() {
         assistant_text: '## 说明方案\n**结论**\n已在沙箱追加注释\n',
         detail: '写码已结束；变更均在写范围外未同步（1）。',
       })
-      setStatus(loadJob(gated.id)!, 'succeeded', '写码已结束；变更均在写范围外未同步（1）。')
+      setStatus(loadJob(gated.id)!, 'failed', '写码已结束；变更均在写范围外未同步（1）。')
       const gatedBody = formatChatConclusion(loadJob(gated.id)!)
+      assert(gatedBody.indexOf('❌') >= 0, '范围外未同步不得标已完成')
+      assert(gatedBody.indexOf('✅ 已完成') < 0, '范围外未同步不得打绿勾')
       assert(gatedBody.indexOf('硬配置拦截，未同步') >= 0, 'config+仅 deferred 须写硬配置拦截')
       assert(gatedBody.indexOf('writeScope') >= 0 || gatedBody.indexOf('硬边界') >= 0, '须提示硬边界')
       assert(gatedBody.indexOf('backend/app/main.py') >= 0, '须列出范围外文件')
@@ -3454,8 +3608,12 @@ async function main() {
       )
       writeFileSync(join(tg, 'frontend/src/views/MaterialOutbound.vue'), '<template></template>\n', 'utf8')
       const dbPath = join(tg, 'backend/pcb_procurement.db')
+      const pyCmd =
+        spawnSync('python3', ['-c', 'import sqlite3'], { encoding: 'utf8' }).status === 0
+          ? 'python3'
+          : 'python'
       const py = spawnSync(
-        'python',
+        pyCmd,
         [
           '-c',
           'import sqlite3;c=sqlite3.connect(r"""' +
@@ -3541,7 +3699,7 @@ async function main() {
       synced: ['backend/app/routers/work_hours.py'],
     })
     assert(skippedLive.length === 0, '自检模式不探测端口、不把没跑的检查写成通过')
-    // 结论：文件已落盘时结果算完成；挂载没对上只写在审计行
+    // 结论：文件可以已经落盘，但审计没过不得打已完成
     const auditJob = createJob({ workspace: tg, requirement: '审计结论' })
     patchJob(auditJob.id, {
       synced_files: ['backend/app/routers/work_hours.py'],
@@ -3552,9 +3710,11 @@ async function main() {
     setStatus(loadJob(auditJob.id)!, 'succeeded', '已同步 1 个文件')
     const body = formatChatConclusion(loadJob(auditJob.id)!)
     const resultLine = body.split('\n').find((line) => line.startsWith('结果：')) || ''
-    assert(resultLine.indexOf('✅ 已完成') >= 0, '文件已落盘时结果须完成')
-    assert(resultLine.indexOf('已同步 1 个文件') >= 0, '结果只写落盘数量')
+    assert(resultLine.indexOf('❌ 未完成') >= 0, '审计没过不得打已完成')
+    assert(resultLine.indexOf('✅ 已完成') < 0, '审计没过不得打绿勾')
+    assert(resultLine.indexOf('已同步 1 个文件') >= 0, '结果仍写落盘数量')
     assert(resultLine.indexOf('交付审计未通过') < 0, '结果行不得搬审计失败')
+    assert(body.indexOf('请你验收') < 0, '审计没过不得再要求按成功路径验收')
     assert(body.indexOf('审计：❌ 未通过') >= 0, '审计失败须带未通过图标')
     assert(body.indexOf('完成度') >= 0, '失败也要写出完成度')
     assert(body.indexOf('结果：') < body.indexOf('审计：❌ 未通过'), '失败审计须紧挨在结果下方')

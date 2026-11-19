@@ -33,6 +33,8 @@ pick_profile_dir() {
     return
   fi
   local c
+  # 江西中软工作助手（macOS 进程实测）：$HOME/AppData/Local/ZR_DSH/.../desktop
+  # 勿误同步到 zr-workbuddy-desktop/.../web 或 ~/.dsh（那不是验收客户端）
   for c in \
     "$HOME/AppData/Local/ZR_DSH/dsh-home/profiles/desktop" \
     "$HOME/Library/Application Support/ZR_DSH/dsh-home/profiles/desktop" \

@@ -70,7 +70,8 @@ import {
   decideGitDeliverRisk,
   getGitDeliverWaitPlan,
 } from './gitDeliverWait.js'
-import { completeGitDeliverFromConfirm } from './launchGitDeliver.js'
+import { completeGitDeliverFromConfirm, startGitDeliverFromUi } from './launchGitDeliver.js'
+import { summarizeGitWorkspace } from './gitInspect.js'
 import type { HitlAction } from './types.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -1302,24 +1303,168 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (method === 'GET' && path === '/api/cursor-chat/jobs') {
     if (rejectBadOrigin(req, res)) return
-    const jobs = listJobs(30)
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const sessionId = String(u.searchParams.get('session_id') || '').trim()
+    const limit = Math.min(40, Math.max(1, Number(u.searchParams.get('limit') || 30) || 30))
+    let jobs = listJobs(Math.max(limit, sessionId ? 80 : limit))
+    if (sessionId) {
+      jobs = jobs.filter((j) => String(j.dsh_session_id || '').trim() === sessionId)
+    }
+    jobs = jobs.slice(0, limit)
     send(
       res,
       200,
       {
         ok: true,
         count: jobs.length,
-        items: jobs.map((j) => ({
-          id: j.id,
-          status: j.status,
-          workspace: j.workspace,
-          detail: j.detail,
-          updated_at: j.updated_at,
-          summary: jobSummary(j),
-        })),
+        session_id: sessionId || undefined,
+        items: jobs.map((j) => {
+          const base = {
+            id: j.id,
+            status: j.status,
+            workspace: j.workspace,
+            detail: j.detail,
+            updated_at: j.updated_at,
+            summary: jobSummary(j),
+          }
+          // 无 session_id：保持旧字段面，避免其它调用方依赖被冲掉
+          if (!sessionId) return base
+          const g = j.git_deliver || null
+          return {
+            ...base,
+            dsh_session_id: j.dsh_session_id || null,
+            work_kind: j.work_kind || '',
+            // 任务上下文侧栏跨轮摘要用：短需求，不当控制流
+            requirement: String(j.requirement || '').replace(/\s+/g, ' ').trim().slice(0, 240),
+            synced_files: conclusionSyncedFiles(j),
+            deleted_files: conclusionDeletedFiles(j),
+            chat_conclusion: j.conclusion_delivered ? formatChatConclusion(j) : '',
+            pr_url: g?.pr_url || '',
+            commit_short: g?.commit_short || '',
+            // 任务上下文「来源」：仅用户附图元数据，不含工作区改动/审码报告
+            images: Array.isArray(j.images)
+              ? j.images
+                  .slice(0, 8)
+                  .map((img) => ({
+                    name: String(img?.name || '').trim() || undefined,
+                    path: String(img?.path || '').trim() || undefined,
+                    mimeType: String(img?.mimeType || '').trim() || undefined,
+                  }))
+                  .filter((img) => img.name || img.path)
+              : [],
+          }
+        }),
       },
       req,
     )
+    return
+  }
+
+  // 任务上下文侧栏：工作区 Git 只读摘要（干净仓也返回分支）
+  if (method === 'GET' && path === '/api/cursor-chat/workspace-summary') {
+    if (rejectBadOrigin(req, res)) return
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    const workspace = resolve(String(u.searchParams.get('workspace') || '').trim())
+    if (!workspace) {
+      send(res, 400, { ok: false, detail: '缺少 workspace' }, req)
+      return
+    }
+    try {
+      const summary = await summarizeGitWorkspace(workspace)
+      send(res, 200, summary, req)
+    } catch (err) {
+      send(
+        res,
+        500,
+        { ok: false, detail: `读取工作区摘要失败：${String(err).slice(0, 160)}` },
+        req,
+      )
+    }
+    return
+  }
+
+  // 任务上下文侧栏：触发 Git 交付人审（不直接 commit；后台 waiter + 现有确认卡）
+  if (method === 'POST' && path === '/api/cursor-chat/git-deliver/begin-ui') {
+    if (rejectBadOrigin(req, res)) return
+    let body: Record<string, unknown> = {}
+    try {
+      body = parseJson(await readBody(req))
+    } catch {
+      send(res, 400, { ok: false, detail: 'JSON 无法解析' }, req)
+      return
+    }
+    const workspace = resolve(String(body.workspace || '').trim())
+    const sessionId = String(body.session_id || body.sessionId || '').trim()
+    if (!workspace) {
+      send(res, 400, { ok: false, detail: '缺少 workspace', code: 'workspace_required' }, req)
+      return
+    }
+    if (!sessionId) {
+      send(res, 400, { ok: false, detail: '缺少 session_id', code: 'session_required' }, req)
+      return
+    }
+    try {
+      const out = await startGitDeliverFromUi({
+        workspace,
+        sessionId,
+        requirement: typeof body.requirement === 'string' ? body.requirement : undefined,
+        commit_message: typeof body.commit_message === 'string' ? body.commit_message : undefined,
+        target_branch: typeof body.target_branch === 'string' ? body.target_branch : undefined,
+        base_branch: typeof body.base_branch === 'string' ? body.base_branch : undefined,
+        create_pr: body.create_pr !== false && body.create_pr !== 'false',
+      })
+      if (!out.ok) {
+        send(
+          res,
+          out.code === 'busy' || out.code === 'session_required' ? 409 : 400,
+          {
+            ok: false,
+            detail: out.detail,
+            code: out.code || '',
+            conclusion: out.conclusion || '',
+            job_id: out.job?.id || '',
+          },
+          req,
+        )
+        return
+      }
+      send(
+        res,
+        200,
+        {
+          ok: true,
+          reused: out.reused || false,
+          idle: out.idle || false,
+          detail: out.detail || '',
+          code: out.code || '',
+          chat_body: out.chat_body,
+          job_id: out.job.id,
+          confirm_token: out.confirm_token || '',
+          status: out.job.status,
+          workspace: out.job.workspace,
+          plan: out.plan
+            ? {
+                remote_url: out.plan.remote_url,
+                current_branch: out.plan.current_branch,
+                target_branch: out.plan.target_branch,
+                base_branch: out.plan.base_branch,
+                commit_message: out.plan.commit_message,
+                create_pr: out.plan.create_pr,
+                selected_files: out.plan.selected_files,
+                held_sensitive_files: out.plan.held_sensitive_files,
+              }
+            : null,
+        },
+        req,
+      )
+    } catch (err) {
+      send(
+        res,
+        500,
+        { ok: false, detail: `begin-ui 失败：${String(err).slice(0, 160)}` },
+        req,
+      )
+    }
     return
   }
 

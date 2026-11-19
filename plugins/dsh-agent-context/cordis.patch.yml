@@ -1,0 +1,6 @@
+# 任务上下文薄面板：右侧 Tab 聚合环境/改动/提交入口/技能/产出。
+# 无业务凭证；不挂 llm/stream；不写第二套会话。
+- insert:
+    - id: agent-context
+      name: '@zhongruan/dsh-agent-context'
+      config: {}

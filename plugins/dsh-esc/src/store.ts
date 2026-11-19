@@ -60,20 +60,38 @@ function uniqueIds(ids: string[]): string[] {
 }
 
 function emptySession(): SessionOverride {
-  return { expertId: null, sceneId: null, pinnedSkillId: null, skillIds: [], connectorIds: [] }
+  return {
+    expertId: null,
+    sceneId: null,
+    pinnedSkillId: null,
+    skillIds: [],
+    connectorIds: [],
+    usedConnectorIds: [],
+    usedSkillIds: [],
+  }
 }
 
 function readSessionRow(row: Partial<SessionOverride> | null | undefined): SessionOverride {
   const base = emptySession()
   if (!row || typeof row !== 'object') return base
   const skillIds = Array.isArray(row.skillIds) ? row.skillIds.map((x) => String(x)).filter(Boolean) : []
-  const connectorIds = Array.isArray(row.connectorIds) ? row.connectorIds.map((x) => String(x)).filter(Boolean) : []
+  const connectorIds = Array.isArray(row.connectorIds)
+    ? row.connectorIds.map((x) => String(x)).filter(Boolean)
+    : []
+  const usedConnectorIds = Array.isArray(row.usedConnectorIds)
+    ? row.usedConnectorIds.map((x) => String(x)).filter(Boolean)
+    : []
+  const usedSkillIds = Array.isArray(row.usedSkillIds)
+    ? row.usedSkillIds.map((x) => String(x)).filter(Boolean)
+    : []
   return {
     expertId: row.expertId === undefined ? null : (row.expertId as string | null),
     sceneId: row.sceneId === undefined ? null : (row.sceneId as string | null),
     pinnedSkillId: row.pinnedSkillId === undefined ? null : (row.pinnedSkillId as string | null),
     skillIds,
     connectorIds,
+    usedConnectorIds: uniqueIds(usedConnectorIds),
+    usedSkillIds: uniqueIds(usedSkillIds),
   }
 }
 
@@ -289,15 +307,64 @@ export function publicConnectors(state: EscState) {
   return out
 }
 
-export function publicState(state: EscState, sessionId = '') {
+function sessionUsage(state: EscState, sessionId: string): {
+  usedSkillIds: string[]
+  usedConnectorIds: string[]
+} {
   const sid = sessionId.trim()
+  if (!sid) return { usedSkillIds: [], usedConnectorIds: [] }
+  const row = state.sessions[sid]
+  return {
+    usedSkillIds: uniqueIds(row?.usedSkillIds || []),
+    usedConnectorIds: uniqueIds(row?.usedConnectorIds || []),
+  }
+}
+
+/** 会话内标题映射（侧栏展示用人话，不暴露内部 id 噪音） */
+function sessionLabels(
+  dataRoot: string | undefined,
+  skillIds: string[],
+  connectorIds: string[],
+): { skillTitles: Record<string, string>; connectorTitles: Record<string, string> } {
+  const catalog = loadCatalog(dataRoot)
+  const skillTitles: Record<string, string> = {}
+  const connectorTitles: Record<string, string> = {}
+  const skillSet = new Set(skillIds)
+  const connSet = new Set(connectorIds)
+  for (const s of catalog.skills) {
+    if (skillSet.has(s.id)) skillTitles[s.id] = String(s.name || s.id)
+  }
+  for (const c of catalog.connectors) {
+    if (connSet.has(c.id)) connectorTitles[c.id] = String(c.title || c.id)
+  }
+  for (const id of skillIds) {
+    if (!skillTitles[id]) {
+      const hit = getSkill(id, dataRoot)
+      skillTitles[id] = hit ? String(hit.name || id) : id
+    }
+  }
+  return { skillTitles, connectorTitles }
+}
+
+export function publicState(state: EscState, sessionId = '', dataRoot?: string) {
+  const sid = sessionId.trim()
+  const enabledSkills = sid && resolveSceneId(state, sid) ? resolveSkillPool(state, sid) : []
+  const enabledConnectors = resolveConnectorPool(state, sid) || []
+  const usage = sessionUsage(state, sid)
+  const labelIdsSkills = uniqueIds([...enabledSkills, ...usage.usedSkillIds])
+  const labelIdsConn = uniqueIds([...enabledConnectors, ...usage.usedConnectorIds])
+  const labels = sessionLabels(dataRoot, labelIdsSkills, labelIdsConn)
   return {
     activeExpertId: state.activeExpertId,
     activeSceneId: state.activeSceneId,
     sessionExpertId: resolveExpertId(state, sid),
     sessionSceneId: resolveSceneId(state, sid),
-    sessionSkillIds: sid && resolveSceneId(state, sid) ? resolveSkillPool(state, sid) : [],
-    sessionConnectorIds: resolveConnectorPool(state, sid) || [],
+    sessionSkillIds: enabledSkills,
+    sessionConnectorIds: enabledConnectors,
+    sessionUsedSkillIds: usage.usedSkillIds,
+    sessionUsedConnectorIds: usage.usedConnectorIds,
+    sessionSkillTitles: labels.skillTitles,
+    sessionConnectorTitles: labels.connectorTitles,
     pinnedSkillId: resolvePinnedSkillId(state, sid),
     summonedSceneIds: state.summonedSceneIds,
     summonedExpertIds: state.summonedExpertIds,
@@ -329,14 +396,50 @@ export async function setSessionOverride(
   if (!sid) throw new Error('sessionId 不能为空')
   return withLock(() => {
     const cur = readStateFile(dataRoot)
-    const prev = cur.sessions[sid] || emptySession()
+    const prev = readSessionRow(cur.sessions[sid])
     cur.sessions[sid] = {
       expertId: patch.expertId === undefined ? prev.expertId : patch.expertId,
       sceneId: patch.sceneId === undefined ? prev.sceneId : patch.sceneId,
       pinnedSkillId: patch.pinnedSkillId === undefined ? prev.pinnedSkillId : patch.pinnedSkillId,
       skillIds: patch.skillIds === undefined ? prev.skillIds : patch.skillIds,
       connectorIds: patch.connectorIds === undefined ? prev.connectorIds : patch.connectorIds,
+      usedConnectorIds:
+        patch.usedConnectorIds === undefined ? prev.usedConnectorIds : uniqueIds(patch.usedConnectorIds),
+      usedSkillIds: patch.usedSkillIds === undefined ? prev.usedSkillIds : uniqueIds(patch.usedSkillIds),
     }
+    return persist(dataRoot, cur)
+  })
+}
+
+/**
+ * 工具真正进入 execute（未 scene 拦截）后记账。
+ * 只追加 used*，不改启用态 / 场景绑定。
+ */
+export async function noteSessionUsage(
+  dataRoot: string,
+  sessionId: string,
+  opts: { connectorId?: string; skillId?: string },
+): Promise<EscState> {
+  const sid = String(sessionId || '').trim()
+  const connectorId = String(opts.connectorId || '').trim()
+  const skillId = String(opts.skillId || '').trim()
+  if (!sid || (!connectorId && !skillId)) {
+    return loadState(dataRoot)
+  }
+  return withLock(() => {
+    const cur = readStateFile(dataRoot)
+    const prev = readSessionRow(cur.sessions[sid])
+    const usedConnectorIds = connectorId
+      ? uniqueIds([...prev.usedConnectorIds, connectorId])
+      : prev.usedConnectorIds
+    const usedSkillIds = skillId ? uniqueIds([...prev.usedSkillIds, skillId]) : prev.usedSkillIds
+    if (
+      usedConnectorIds.length === prev.usedConnectorIds.length &&
+      usedSkillIds.length === prev.usedSkillIds.length
+    ) {
+      return cur
+    }
+    cur.sessions[sid] = { ...prev, usedConnectorIds, usedSkillIds }
     return persist(dataRoot, cur)
   })
 }
@@ -428,12 +531,16 @@ export async function applyScene(
       cur.connectors[id] = row
     }
     if (sid) {
+      const prevSess = readSessionRow(cur.sessions[sid])
       cur.sessions[sid] = {
         expertId: scene.expertId,
         sceneId: scene.id,
         pinnedSkillId: scene.skillIds[0] || null,
         skillIds: [...scene.skillIds],
         connectorIds: [...scene.connectorIds],
+        // 换场景不抹掉本会话已调用痕迹（侧栏「实际用过」）
+        usedConnectorIds: prevSess.usedConnectorIds,
+        usedSkillIds: prevSess.usedSkillIds,
       }
     }
     return persist(dataRoot, cur)

@@ -847,8 +847,13 @@ async function createPrWithGhCli(opts: {
         const out = String(stdout || '').trim()
         const errText = String(stderr || '').trim()
         if (!err) {
+          // 只认 http(s) 链接；gh 输出其他内容时不能当 pr_url 让 UI 打开
           const m = out.match(/https?:\/\/\S+/)
-          resolve({ url: m ? m[0] : out, detail: '' })
+          if (m) {
+            resolve({ url: m[0], detail: '' })
+            return
+          }
+          resolve({ url: '', detail: out || 'gh pr create 未返回 PR 链接' })
           return
         }
         resolve({

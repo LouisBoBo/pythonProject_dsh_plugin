@@ -6961,7 +6961,10 @@ window.__ModuleLoader__.load({
                 bestTs = ts
               }
             }
-            // 时间窗对不齐时：本会话最近 30 分钟内的待确认仍要露出，禁止只剩文案
+            // 已闭合轮禁止 30 分钟兜底：否则侧栏 begin-ui / 新轮 pending 会挂到旧「本轮结论」下
+            var closed = turnEnd > 0 && turnEnd < Date.now() - 1000
+            if (closed) return best
+            // 进行中轮：时间窗对不齐时仍露出本会话最近待确认
             return best || fallback
           }
           function pull() {

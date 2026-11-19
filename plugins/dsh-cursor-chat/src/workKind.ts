@@ -370,6 +370,11 @@ export function buildOpsPrompt(opts: {
   const req = String(opts.requirement || '').trim()
   const kind = opts.terminalKind || classifyOpsTerminal(req)
   const restartMode = Boolean(opts.restartFallback) || kind === 'restart'
+  const prior = String(opts.restartAttemptDetail || '').trim()
+  const priorBlock =
+    !restartMode && prior
+      ? `【上一轮验收未过】\n${prior.slice(0, 800)}\n请只针对这一条重做，做完停。不要改源代码。\n\n`
+      : ''
   const noEditLine = opts.restartFallback
     ? `本轮为启动/重启降级：允许为启动安装依赖、创建项目内 venv、编写/修改启动脚本，以及修复挡启动的明显错误；禁止 git commit / push；禁止与启动无关的大范围改动。\n\n`
     : `禁止修改、创建、删除任何源代码或配置。禁止 git commit / push。\n\n`
@@ -380,6 +385,7 @@ export function buildOpsPrompt(opts: {
     `你是 Cursor IDE 里的 Agent，工作目录就是用户正在用的真实项目：${opts.workspace}\n` +
     `按 Cursor IDE 处理这类开发任务：先看仓库已有的脚本、配置和正在跑的终端，用项目自己的方式推进，不要死守某一种固定模板。\n` +
     opsKindInstructions(kind, Boolean(opts.restartFallback), opts.restartAttemptDetail) +
+    priorBlock +
     (restartMode ? '' : terminalProblemHandlingInstructions()) +
     noEditLine +
     `【用户诉求】\n` +

@@ -545,7 +545,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const u = new URL(req.url || '/', 'http://127.0.0.1')
     const sessionId = u.searchParams.get('sessionId') || ''
     const state = loadState(cfg.dataRoot)
-    send(res, 200, { ok: true, state: publicState(state, sessionId), draft: buildDraft(state, cfg.dataRoot) }, req)
+    send(
+      res,
+      200,
+      {
+        ok: true,
+        state: publicState(state, sessionId, cfg.dataRoot),
+        draft: buildDraft(state, cfg.dataRoot),
+      },
+      req,
+    )
     return
   }
 
@@ -689,7 +698,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         200,
         {
           ok: true,
-          state: publicState(state, sessionId),
+          state: publicState(state, sessionId, cfg.dataRoot),
           detail: sessionId ? '已把该场景卡绑到本会话，整段对话有效' : '已启用该场景的专家、技能与连接器',
         },
         req,
@@ -707,7 +716,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       const sessionId = String(body.sessionId || '').trim()
       const state = await clearSessionScene(cfg.dataRoot, sessionId)
       notify()
-      send(res, 200, { ok: true, state: publicState(state, sessionId), detail: '已清除本会话场景卡' }, req)
+      send(
+        res,
+        200,
+        { ok: true, state: publicState(state, sessionId, cfg.dataRoot), detail: '已清除本会话场景卡' },
+        req,
+      )
     } catch (e) {
       send(res, 400, { ok: false, detail: e instanceof Error ? e.message : String(e) }, req)
     }

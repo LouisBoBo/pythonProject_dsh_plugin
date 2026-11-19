@@ -324,6 +324,46 @@ export function inferShellToolOutcome(opts: {
   return { status: raw || 'running' }
 }
 
+function toolStatusDone(status?: string): boolean {
+  const st = String(status || '').toLowerCase()
+  return st === 'completed' || st === 'done' || st === 'success'
+}
+
+function toolStatusFailed(status?: string): boolean {
+  const st = String(status || '').toLowerCase()
+  return st === 'failed' || st === 'error'
+}
+
+/**
+ * 运维收口。只认工具终态：最后一条 Shell 失败，或该跑的命令一条都没跑完，即未过。
+ * 不扫模型正文里的「已完成」。
+ */
+export function opsEvidenceProblem(
+  items: TranscriptItem[] | undefined,
+  kind: 'test' | 'install' | 'logs' | 'env' | 'troubleshoot' | 'generic',
+): string {
+  const tools = (items || []).filter((it) => it && it.kind === 'tool')
+  const shells = tools.filter((it) => {
+    if (!(isShellToolName(it.name) || Boolean(it.command))) return false
+    return toolStatusDone(it.tool_status) || toolStatusFailed(it.tool_status)
+  })
+  const last = shells[shells.length - 1]
+  const lastFailed = Boolean(last && toolStatusFailed(last.tool_status))
+  const reason = lastFailed
+    ? String(last?.snippet || '命令未成功').replace(/\s+/g, ' ').trim().slice(0, 180)
+    : ''
+  const completedTool = tools.some(
+    (it) => !isAskUserToolName(it.name) && toolStatusDone(it.tool_status),
+  )
+  if (kind === 'test' || kind === 'install') {
+    if (!last || lastFailed) return `验收未过：${reason || '没有执行成功的命令'}`
+    return ''
+  }
+  if (lastFailed) return `验收未过：${reason || '命令未成功'}`
+  if (!completedTool) return '验收未过：没有可核对的执行结果'
+  return ''
+}
+
 /** 简易行级 diff 片断（进度卡用；非完整 unified diff） */
 export function snippetFromTextDiff(before: string, after: string): string | undefined {
   const a = String(before || '').replace(/\r\n/g, '\n').split('\n')

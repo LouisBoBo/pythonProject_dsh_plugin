@@ -109,6 +109,10 @@ export type SessionOverride = {
   pinnedSkillId: string | null
   skillIds: string[]
   connectorIds: string[]
+  /** 本会话实际调用过的连接器（工具 execute 记账，只增不改业务启用态） */
+  usedConnectorIds: string[]
+  /** 本会话实际关联过的技能（连接器调用时记 pinned，或建技能/绑场景） */
+  usedSkillIds: string[]
 }
 
 export type EscState = {

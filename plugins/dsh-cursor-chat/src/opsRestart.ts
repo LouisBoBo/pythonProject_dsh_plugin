@@ -4,7 +4,8 @@
  * 后续重启先看 docs/04-Cursor-AI-Coding逼真版本/重启服务方案.md；结构不同时沿用该项目自己的命令。
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { readBackendPortFromViteProxy, resolveBackendRoot, resolveUvicornStartCommand } from './backendRestart.js'
 
@@ -87,6 +88,75 @@ function pickScript(pkg: PackageJson): { name: string; command: string } | null 
   return null
 }
 
+function cmpNodeVersion(a: string, b: string): number {
+  const pa = a.replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = b.replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0)
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d) return d
+  }
+  return 0
+}
+
+/**
+ * 桌面宿主的 PATH 不含 nvm（nvm 只写在 zshrc，bash -lc 也读不到）。
+ * 重启必须自己找到用户的 node，不能因为 command -v 失败就当成没有前端。
+ */
+export function locateNodeBinary(): string | null {
+  const fromPath = resolveBin('node')
+  if (fromPath) return fromPath
+  const home = process.env.HOME || homedir()
+  const candidates: string[] = []
+  const aliasFile = join(home, '.nvm', 'alias', 'default')
+  if (existsSync(aliasFile)) {
+    try {
+      const ver = readFileSync(aliasFile, 'utf8').trim()
+      if (ver && !ver.includes('*') && !ver.includes('/')) {
+        const name = ver.startsWith('v') ? ver : `v${ver}`
+        candidates.push(join(home, '.nvm', 'versions', 'node', name, 'bin', 'node'))
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const nvmRoot = join(home, '.nvm', 'versions', 'node')
+  if (existsSync(nvmRoot)) {
+    let best = ''
+    try {
+      for (const name of readdirSync(nvmRoot)) {
+        if (!best || cmpNodeVersion(name, best) > 0) best = name
+      }
+    } catch {
+      best = ''
+    }
+    if (best) candidates.push(join(nvmRoot, best, 'bin', 'node'))
+  }
+  candidates.push(
+    join(home, '.nvm', 'current', 'bin', 'node'),
+    join(home, '.local', 'share', 'fnm', 'aliases', 'default', 'bin', 'node'),
+    join(home, '.volta', 'bin', 'node'),
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+  )
+  const exec = process.execPath
+  if (exec && /node/i.test(basename(exec))) candidates.push(exec)
+  for (const path of candidates) {
+    if (path && existsSync(path)) return path
+  }
+  return null
+}
+
+function locateNpmBinary(): string | null {
+  const fromPath = resolveBin('npm')
+  if (fromPath) return fromPath
+  const node = locateNodeBinary()
+  if (!node) return null
+  const npmName = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  const beside = join(dirname(node), npmName)
+  return existsSync(beside) ? beside : null
+}
+
 function resolveBin(name: string): string | null {
   if (process.platform === 'win32') {
     try {
@@ -144,8 +214,8 @@ function resolvePython(backendRoot: string, workspace: string): string | null {
 }
 
 function planFrontend(workspace: string): ServicePlan | null {
-  const npm = resolveBin('npm')
-  if (!npm) return null
+  const npm = locateNpmBinary()
+  const node = process.platform === 'win32' ? null : locateNodeBinary()
   for (const rel of PACKAGE_DIRS) {
     const dir = rel ? join(workspace, rel) : workspace
     if (!existsSync(dir)) continue
@@ -159,6 +229,20 @@ function planFrontend(workspace: string): ServicePlan | null {
     const script = pickScript(pkg)
     if (!script) continue
     const port = readDevPort(dir)
+    const viteJs = join(dir, 'node_modules', 'vite', 'bin', 'vite.js')
+    // macOS/Linux：有 vite.js 就直接用 node 拉起。桌面宿主没有 npm，也不能靠 npm 包装进程。
+    if (node && existsSync(viteJs) && isSafePort(port)) {
+      return {
+        side: 'frontend',
+        cwd: dir,
+        port,
+        label: `前端 vite :${port}`,
+        bin: node,
+        args: [viteJs, '--host', '0.0.0.0', '--port', String(port), '--strictPort'],
+        markers: ['vite.js', dir, viteJs, script.command],
+      }
+    }
+    if (!npm) continue
     return {
       side: 'frontend',
       cwd: dir,
@@ -424,8 +508,10 @@ function launchWindows(workspace: string, plan: ServicePlan): { ok: true; pid: s
  */
 function posixLaunchEnv(bin: string): NodeJS.ProcessEnv {
   const home = process.env.HOME || ''
+  const nodeBin = locateNodeBinary()
   const extra = [
     dirname(bin),
+    nodeBin ? dirname(nodeBin) : '',
     '/usr/local/bin',
     '/opt/homebrew/bin',
     '/usr/bin',
@@ -456,10 +542,7 @@ export function preferDirectVite(plan: ServicePlan, platform: NodeJS.Platform = 
   if (plan.side !== 'frontend' || !isSafePort(plan.port)) return plan
   const viteJs = join(plan.cwd, 'node_modules', 'vite', 'bin', 'vite.js')
   if (!existsSync(viteJs)) return plan
-  const node =
-    resolveBin('node') ||
-    ['/usr/local/bin/node', '/opt/homebrew/bin/node'].find((p) => existsSync(p)) ||
-    null
+  const node = locateNodeBinary()
   if (!node) return plan
   return {
     ...plan,
@@ -631,7 +714,7 @@ export type StartServicesResult = {
   detail: string
   /** 插件一张启动计划都认不出：可降级 Cursor IDE 式终端处理，禁止就此空手失败 */
   no_commands?: boolean
-  /** 已认出命令但未全部起来：可降级 Cursor 灵活排障后再启 */
+  /** 已认出命令但未全部起来：直接失败，不再交给 Cursor（短会话会收掉进程） */
   start_failed?: boolean
 }
 
@@ -675,7 +758,9 @@ export async function startRequestedServices(
   }
   say(
     `已认出 ${planned.plans.length} 条启动命令：` +
-      planned.plans.map((p) => `${p.label}${p.port ? ` :${p.port}` : ''}`).join('；'),
+      planned.plans
+        .map((p) => (p.port && !p.label.includes(`:${p.port}`) ? `${p.label} :${p.port}` : p.label))
+        .join('；'),
   )
   const lines: string[] = []
   for (const plan of planned.plans) {

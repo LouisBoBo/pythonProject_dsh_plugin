@@ -333,6 +333,222 @@ export function defaultDshBranchName(now?: Date, slug?: string): string {
   return `dsh/${stamp}-${safe}`
 }
 
+/** 解析 `git diff --shortstat` / `git diff HEAD --shortstat` 输出 */
+export function parseGitShortstat(text: string): { files: number; add: number; del: number } {
+  const s = String(text || '').trim()
+  if (!s) return { files: 0, add: 0, del: 0 }
+  const files = Number((s.match(/(\d+)\s+files?\s+changed/i) || [])[1] || 0) || 0
+  const add = Number((s.match(/(\d+)\s+insertions?\(\+\)/i) || [])[1] || 0) || 0
+  const del = Number((s.match(/(\d+)\s+deletions?\(-\)/i) || [])[1] || 0) || 0
+  return { files, add, del }
+}
+
+export type WorkspaceSummary = {
+  ok: true
+  workspace: string
+  is_git: boolean
+  current_branch: string
+  head_detached: boolean
+  remote_url: string
+  base_branch: string
+  dirty: boolean
+  shortstat: { files: number; add: number; del: number }
+  entries: { rel: string; code: string; sensitive: boolean; selected: boolean }[]
+  selected_files: string[]
+  held_sensitive_files: string[]
+  detail: string
+  code?: string
+}
+
+/**
+ * 任务上下文侧栏只读摘要：干净仓也返回分支；不进入交付、不创建 Job。
+ * 与 inspectGitWorkspace 分离：后者「无改动」为 ok:false，侧栏仍要展示环境。
+ */
+/** 侧栏每 4s 轮询工作区摘要，ls-remote 走网络，不能每次真打 */
+const REMOTE_HEAD_TTL_MS = 60_000
+const remoteHeadCache = new Map<string, { head: string; at: number }>()
+
+/** 远端默认分支；fresh=true 给交付前的 inspect 取实时值 */
+async function resolveRemoteHead(abs: string, remoteName: string, fresh = false): Promise<string> {
+  const key = `${abs}\u0000${remoteName}`
+  if (!fresh) {
+    const hit = remoteHeadCache.get(key)
+    if (hit && Date.now() - hit.at < REMOTE_HEAD_TTL_MS) return hit.head
+  }
+  const liveHead = await runGit(abs, ['ls-remote', '--symref', remoteName, 'HEAD'], { timeoutMs: 8_000 })
+  let remoteHead = liveHead.ok ? parseRemoteHeadSymref(liveHead.stdout) : ''
+  if (!remoteHead) {
+    const symRes = await runGit(abs, ['symbolic-ref', `refs/remotes/${remoteName}/HEAD`])
+    if (symRes.ok) {
+      const prefix = `refs/remotes/${remoteName}/`
+      const s = String(symRes.stdout || '').trim()
+      if (s.startsWith(prefix)) remoteHead = s.slice(prefix.length)
+    }
+  }
+  remoteHeadCache.set(key, { head: remoteHead, at: Date.now() })
+  return remoteHead
+}
+
+export async function summarizeGitWorkspace(workspace: string): Promise<WorkspaceSummary> {
+  const abs = String(workspace || '').trim()
+  if (!abs) {
+    return {
+      ok: true,
+      workspace: abs,
+      is_git: false,
+      current_branch: '',
+      head_detached: false,
+      remote_url: '',
+      base_branch: '',
+      dirty: false,
+      shortstat: { files: 0, add: 0, del: 0 },
+      entries: [],
+      selected_files: [],
+      held_sensitive_files: [],
+      detail: '缺少工作区路径',
+      code: 'not_dir',
+    }
+  }
+  try {
+    if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+      return {
+        ok: true,
+        workspace: abs,
+        is_git: false,
+        current_branch: '',
+        head_detached: false,
+        remote_url: '',
+        base_branch: '',
+        dirty: false,
+        shortstat: { files: 0, add: 0, del: 0 },
+        entries: [],
+        selected_files: [],
+        held_sensitive_files: [],
+        detail: `工程路径无效：${abs}`,
+        code: 'not_dir',
+      }
+    }
+  } catch {
+    return {
+      ok: true,
+      workspace: abs,
+      is_git: false,
+      current_branch: '',
+      head_detached: false,
+      remote_url: '',
+      base_branch: '',
+      dirty: false,
+      shortstat: { files: 0, add: 0, del: 0 },
+      entries: [],
+      selected_files: [],
+      held_sensitive_files: [],
+      detail: `无法读取工程路径：${abs}`,
+      code: 'not_dir',
+    }
+  }
+
+  const gitDir = join(abs, '.git')
+  if (!existsSync(gitDir)) {
+    return {
+      ok: true,
+      workspace: abs,
+      is_git: false,
+      current_branch: '',
+      head_detached: false,
+      remote_url: '',
+      base_branch: '',
+      dirty: false,
+      shortstat: { files: 0, add: 0, del: 0 },
+      entries: [],
+      selected_files: [],
+      held_sensitive_files: [],
+      detail: '当前工作区不是 Git 仓库',
+      code: 'not_git',
+    }
+  }
+
+  const rev = await runGit(abs, ['rev-parse', '--is-inside-work-tree'])
+  if (!rev.ok || !String(rev.stdout).trim().toLowerCase().includes('true')) {
+    return {
+      ok: true,
+      workspace: abs,
+      is_git: false,
+      current_branch: '',
+      head_detached: false,
+      remote_url: '',
+      base_branch: '',
+      dirty: false,
+      shortstat: { files: 0, add: 0, del: 0 },
+      entries: [],
+      selected_files: [],
+      held_sensitive_files: [],
+      detail: rev.stderr || '当前目录不是 Git 工作树',
+      code: 'not_git',
+    }
+  }
+
+  const branchRes = await runGit(abs, ['branch', '--show-current'])
+  const current_branch = String(branchRes.stdout || '').trim()
+  const head_detached = !current_branch
+
+  const remoteName = 'origin'
+  const remoteRes = await runGit(abs, ['remote', 'get-url', remoteName])
+  let remote_url = ''
+  if (remoteRes.ok) {
+    remote_url = displayRemoteUrl(String(remoteRes.stdout || '').trim())
+  } else {
+    const remotes = await runGit(abs, ['remote', '-v'])
+    const first = String(remotes.stdout || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => /\s\(fetch\)$/.test(l))
+    if (first) {
+      const parts = first.split(/\s+/)
+      if (parts.length >= 2) remote_url = displayRemoteUrl(parts[1])
+    }
+  }
+
+  const remoteHead = await resolveRemoteHead(abs, remoteName)
+  const localBr = await runGit(abs, ['branch', '--format=%(refname:short)'])
+  const localBranches = String(localBr.stdout || '')
+    .split(/\r?\n/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+  const base_branch = pickDefaultBaseBranch({
+    currentBranch: current_branch,
+    remoteHead,
+    localBranches,
+  })
+
+  const st = await runGit(abs, ['status', '--porcelain'])
+  const rows = st.ok ? expandDirStatusRows(abs, parsePorcelainLines(st.stdout)) : []
+  const { entries, selected_files, held_sensitive_files } = buildStatusEntries(rows)
+
+  // 相对 HEAD：含已暂存 + 未暂存的已跟踪改动；未跟踪无行数，只进 entries
+  const diffStat = await runGit(abs, ['diff', 'HEAD', '--shortstat'])
+  const shortstat = parseGitShortstat(diffStat.ok ? diffStat.stdout : '')
+
+  return {
+    ok: true,
+    workspace: abs,
+    is_git: true,
+    current_branch: current_branch || (head_detached ? '（detached HEAD）' : ''),
+    head_detached,
+    remote_url: remote_url || '',
+    base_branch,
+    dirty: rows.length > 0,
+    shortstat,
+    entries,
+    selected_files,
+    held_sensitive_files,
+    detail: rows.length
+      ? `工作区未提交改动：${rows.length} 个路径` +
+        (shortstat.add || shortstat.del ? `（+${shortstat.add} -${shortstat.del}）` : '')
+      : '工作区干净',
+    code: rows.length ? undefined : 'clean',
+  }
+}
+
 export async function inspectGitWorkspace(workspace: string): Promise<GitInspectResult> {
   const abs = String(workspace || '').trim()
   if (!abs) {
@@ -387,16 +603,7 @@ export async function inspectGitWorkspace(workspace: string): Promise<GitInspect
   const upstream = upstreamRes.ok ? String(upstreamRes.stdout || '').trim() : ''
 
   // 本机 origin/HEAD 可能还停在旧的 main。合并目标以远端当前默认分支为准。
-  const liveHead = await runGit(abs, ['ls-remote', '--symref', remoteName, 'HEAD'], { timeoutMs: 8_000 })
-  let remoteHead = liveHead.ok ? parseRemoteHeadSymref(liveHead.stdout) : ''
-  if (!remoteHead) {
-    const symRes = await runGit(abs, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
-    if (symRes.ok) {
-      remoteHead = String(symRes.stdout || '')
-        .trim()
-        .replace(/^refs\/remotes\/origin\//, '')
-    }
-  }
+  const remoteHead = await resolveRemoteHead(abs, remoteName, true)
 
   const localBr = await runGit(abs, ['branch', '--format=%(refname:short)'])
   const localBranches = String(localBr.stdout || '')

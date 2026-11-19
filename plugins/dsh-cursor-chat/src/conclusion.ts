@@ -573,11 +573,14 @@ function formatOpsConclusion(
   const failed = job.status === 'failed' || cancelled
   const status = statusHeadline(job.status || '')
   // 结果行仍单行；去掉 Cursor 偶发漏配的 **，避免「5 失败**」
-  const resultOne = resultSec
+  const cursorResult = resultSec
     .replace(/^说明方案\s*/i, '')
     .replace(/\*\*/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+  const authoritative = String(job.detail || '').replace(/\s+/g, ' ').trim()
+  // 失败时只认端口探测写进 detail 的结果。Cursor 正文里的「已拉起/正常」不能盖过未监听。
+  const resultOne = failed && authoritative ? authoritative : cursorResult
   const lines = [
     `## 本轮结论`,
     ``,
@@ -587,15 +590,15 @@ function formatOpsConclusion(
     `• 本轮未改代码`,
     ...didOutput,
   ]
-  // 已取消：不要再套「打开前端/健康检查」验收，避免误导用户去验未完成的任务
-  if (!cancelled && verifyOutput.length) {
+  // 失败或已取消：不要再套「打开前端/健康检查」，避免未监听还请用户去验收
+  if (!cancelled && !failed && verifyOutput.length) {
     lines.push(``)
     lines.push(`请你验收：`)
     lines.push(...verifyOutput)
   }
-  if (failed && job.detail) {
+  if (failed && authoritative && authoritative !== resultOne) {
     lines.push(``)
-    lines.push(`说明：${String(job.detail).replace(/\s+/g, ' ').trim()}`)
+    lines.push(`说明：${authoritative}`)
   }
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n'
 }
@@ -838,9 +841,12 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     synced.length ? `已同步 ${synced.length} 个文件` : '',
     deleted.length ? `已删除 ${deleted.length} 个文件` : '',
   ].filter(Boolean).join('，')
-  // 结果只认落盘。审计对不上、服务未就绪，都不改这一行。模型「已完成」也不采信。
+  // 落盘数量可以写，但审计或服务没过不得打已完成。模型「已完成」不采信。
+  const serviceMiss = Boolean(svc && svc.required && !svc.skipped && svc.ok === false)
+  const verifyMiss = auditFailed || serviceMiss
+  const landedOk = landed && !verifyMiss && job.status === 'succeeded'
   const resultOne = (
-    landed
+    landedOk || (landed && verifyMiss)
       ? `${landingText}。`
       : landingMiss
         ? String(landingMiss.detail || '落盘未完成').trim()
@@ -891,9 +897,9 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   }
   const status = job.status === 'cancelled'
     ? statusHeadline('cancelled')
-    : landed
+    : landedOk
       ? '✅ 已完成'
-      : statusHeadline(landingMiss ? 'failed' : job.status || '')
+      : statusHeadline(verifyMiss || landingMiss ? 'failed' : job.status || '')
   // synced / deleted / changed 仍参与上方 didBullets 兜底与「未同步」告警；路径清单本身由底座卡片展示
 
   const lines: string[] = []
@@ -954,8 +960,8 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     if (sandboxSkipped.length > 15) lines.push(`• …另有 ${sandboxSkipped.length - 15} 个`)
   }
 
-  // 已取消：无需验收段
-  if (job.status !== 'cancelled') {
+  // 已取消或验收未过：不再要求用户按成功路径去点
+  if (job.status !== 'cancelled' && !verifyMiss) {
     lines.push(``)
     lines.push(`请你验收：`)
     for (let i = 0; i < verifyLines.length; i++) {

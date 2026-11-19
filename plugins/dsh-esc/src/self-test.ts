@@ -12,7 +12,22 @@ import {
   skillSopNoticeText,
   wantsCreateEscSkill,
 } from './prompt.js'
-import { applyScene, clearSessionScene, loadState, patchState, resolveExpertId, resolveSkillPool, setActiveExpert, setConnectorEnabled, summonExpert, summonScene, unsummonExpert, unsummonScene } from './store.js'
+import {
+  applyScene,
+  clearSessionScene,
+  loadState,
+  noteSessionUsage,
+  patchState,
+  publicState,
+  resolveExpertId,
+  resolveSkillPool,
+  setActiveExpert,
+  setConnectorEnabled,
+  summonExpert,
+  summonScene,
+  unsummonExpert,
+  unsummonScene,
+} from './store.js'
 import { createUserScene, deleteUserScene, reviewSceneCombo, suggestCombo } from './scenes.js'
 import {
   UserAssetError,
@@ -596,6 +611,15 @@ async function main() {
     const sessBound = await applyScene(dir, 'pcb-ops-analysis', 'chat-1')
     assert(sessBound.sessions['chat-1']?.sceneId === 'pcb-ops-analysis', 'session scene')
     assert(sessBound.sessions['chat-1']?.skillIds.includes('mes-ops-analysis'), 'session skills')
+    const usedOnce = await noteSessionUsage(dir, 'chat-1', {
+      connectorId: 'mes',
+      skillId: 'mes-ops-analysis',
+    })
+    assert(usedOnce.sessions['chat-1']?.usedConnectorIds?.includes('mes'), 'note connector use')
+    assert(usedOnce.sessions['chat-1']?.usedSkillIds?.includes('mes-ops-analysis'), 'note skill use')
+    const pubUsed = publicState(usedOnce, 'chat-1', dir)
+    assert(pubUsed.sessionUsedConnectorIds.includes('mes'), 'public used connectors')
+    assert(pubUsed.sessionConnectorTitles?.mes, 'public connector title')
     assert(resolveExpertId(sessBound, 'chat-1') === 'pcb-data-analyst', 'bound expert')
     assert(resolveExpertId(sessBound, 'chat-unbound') === null, 'unbound chat ignores panel expert')
     assert(resolveSkillPool(sessBound, 'chat-unbound').length === 0, 'unbound chat no skill pool')

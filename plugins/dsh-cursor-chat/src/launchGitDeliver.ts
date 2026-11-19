@@ -454,6 +454,204 @@ function sealPausedGitDeliver(opts: {
   return { conclusion, job: jobId ? loadJob(jobId) : null }
 }
 
+/** 侧栏 begin-ui 进行中的会话锁，防止连点重复 prepare */
+const uiDeliverLocks = new Set<string>()
+
+function uiDeliverLockKey(sessionId: string, workspace: string): string {
+  return `${String(sessionId || '').trim()}::${normWorkspaceKey(workspace)}`
+}
+
+export type GitDeliverUiStart =
+  | {
+      ok: true
+      reused?: boolean
+      idle?: boolean
+      job: CursorCodingJob
+      confirm_token?: string
+      plan?: GitDeliverPlan
+      chat_body: string
+      detail?: string
+      code?: string
+    }
+  | {
+      ok: false
+      detail: string
+      code?: string
+      conclusion?: string
+      job?: CursorCodingJob
+    }
+
+/**
+ * 任务上下文侧栏入口：prepare 后在本进程挂 waiter，确认卡仍走现有 turnTail / confirm API。
+ * 禁止在此函数内直接 commit；确认后走 completeGitDeliverFromConfirm（含审码闸）。
+ */
+export async function startGitDeliverFromUi(
+  input: LaunchGitDeliverInput,
+): Promise<GitDeliverUiStart> {
+  const sid = String(input.sessionId || '').trim()
+  if (!sid) {
+    return { ok: false, detail: '缺少 session_id', code: 'session_required' }
+  }
+  const abs = resolve(String(input.workspace || '').trim())
+  if (!abs) {
+    return { ok: false, detail: '缺少工作区路径', code: 'not_dir' }
+  }
+  const lockKey = uiDeliverLockKey(sid, abs)
+  if (uiDeliverLocks.has(lockKey)) {
+    return { ok: false, detail: '提交流程已在进行中，请到对话区确认卡操作', code: 'busy' }
+  }
+
+  // 同会话同工作区已有待确认：复用，不新建 Job
+  for (const j of listJobs(40)) {
+    if (j.work_kind !== 'git_deliver') continue
+    if (j.status !== 'pending_review') continue
+    if (String(j.dsh_session_id || '').trim() !== sid) continue
+    if (normWorkspaceKey(j.workspace || '') !== normWorkspaceKey(abs)) continue
+    const token = String(j.git_deliver?.confirm_token || '').trim()
+    return {
+      ok: true,
+      reused: true,
+      job: j,
+      confirm_token: token || undefined,
+      chat_body: '已有待确认的 Git 交付，请在对话区确认卡核对后提交。',
+      detail: 'reused_pending',
+    }
+  }
+
+  const priorPaused = findRecentPausedGitDeliver(sid, abs)
+  if (priorPaused) {
+    const detail =
+      String(priorPaused.detail || '').trim() || '用户已选择暂停提交（未 commit）'
+    return {
+      ok: false,
+      detail,
+      code: 'risk_paused_replay',
+      conclusion: String(priorPaused.assistant_text || '').trim() || detail,
+      job: priorPaused,
+    }
+  }
+
+  uiDeliverLocks.add(lockKey)
+  let prepared: Awaited<ReturnType<typeof prepareGitDeliverSession>>
+  try {
+    prepared = await prepareGitDeliverSession({ ...input, sessionId: sid })
+  } catch (err) {
+    uiDeliverLocks.delete(lockKey)
+    const detail = `准备 Git 交付失败：${String(err).slice(0, 160)}`
+    return { ok: false, detail, code: 'prepare_error' }
+  }
+
+  if (!prepared.ok) {
+    uiDeliverLocks.delete(lockKey)
+    return {
+      ok: false,
+      detail: prepared.detail,
+      code: prepared.code,
+      conclusion: prepared.conclusion,
+      job: prepared.job,
+    }
+  }
+  if ('idle' in prepared && prepared.idle) {
+    uiDeliverLocks.delete(lockKey)
+    return {
+      ok: true,
+      idle: true,
+      job: prepared.job,
+      chat_body: prepared.conclusion,
+      detail: prepared.detail,
+      code: prepared.code,
+    }
+  }
+
+  const ready = prepared as GitDeliverPrepared
+  const { job, confirm_token, plan, chat_body } = ready
+
+  // 后台挂 waiter：与工具路径同盘决策；确认 API 只唤醒，不在侧栏进程外另起 commit
+  void (async () => {
+    try {
+      const waited = await waitForGitDeliverConfirm({
+        confirmToken: confirm_token,
+        plan,
+        jobId: job.id,
+      })
+      if (!waited.ok) {
+        const live = loadJob(job.id)
+        const cancelDetail = waited.detail || '用户取消 Git 交付'
+        if (live && !['succeeded', 'failed', 'cancelled'].includes(live.status)) {
+          const conclusion = formatGitDeliverConclusion({
+            status: 'cancelled',
+            plan,
+            cancelDetail,
+          })
+          patchJob(job.id, {
+            cancelled: true,
+            assistant_text: conclusion,
+            conclusion_delivered: true,
+            conclusion_at: new Date().toISOString(),
+            review_gate: null,
+            review_in_scope: [],
+            synced_files: [],
+            last_synced_files: [],
+            changed_files: [],
+          })
+          setStatus(loadJob(job.id) || live, 'cancelled', cancelDetail)
+        }
+        return
+      }
+      await completeGitDeliverFromConfirm({
+        jobId: job.id,
+        plan,
+        selected_files: waited.payload.selected_files,
+        commit_message: waited.payload.commit_message,
+        target_branch: waited.payload.target_branch,
+        base_branch: waited.payload.base_branch,
+        create_pr: waited.payload.create_pr,
+        confirm_token,
+        sessionId: sid,
+      })
+    } catch (err) {
+      const live = loadJob(job.id)
+      if (live && !['succeeded', 'failed', 'cancelled'].includes(live.status)) {
+        const detail = `Git 交付后台执行异常：${String(err).slice(0, 160)}`
+        patchJob(job.id, {
+          assistant_text: formatGitDeliverConclusion({
+            status: 'failed',
+            plan,
+            result: {
+              ok: false,
+              stage: 'inspect',
+              detail,
+              remote_url: plan.remote_url,
+              current_branch: plan.current_branch,
+              target_branch: plan.target_branch,
+              base_branch: plan.base_branch,
+              commit_sha: '',
+              commit_short: '',
+              pushed: false,
+              pr_url: '',
+              pr_manual_hint: '',
+              committed_files: [],
+            },
+          }),
+          conclusion_delivered: true,
+          conclusion_at: new Date().toISOString(),
+        })
+        setStatus(loadJob(job.id) || live, 'failed', detail)
+      }
+    } finally {
+      uiDeliverLocks.delete(lockKey)
+    }
+  })()
+
+  return {
+    ok: true,
+    job: loadJob(job.id) || job,
+    confirm_token,
+    plan,
+    chat_body,
+  }
+}
+
 /**
  * 中间件人审全程：prepare → 阻塞等确认卡 → commit/push。
  * 写码 begin/continue 不走此函数。

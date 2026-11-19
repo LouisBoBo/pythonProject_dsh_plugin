@@ -129,6 +129,12 @@ if prev_path.is_file():
 prev_by_name = {p["name"]: p for p in (prev_doc.get("plugins") or []) if p.get("name")}
 prev_order = [p["name"] for p in (prev_doc.get("plugins") or []) if p.get("name")]
 
+# 发现页不展示，但 npm 安装包和历史版本照常发布。
+# 浏览器壳 Profile 仍钉死旧版；删掉 tgz 会让该 Profile 里任意插件更新整份失败。
+HIDDEN_FROM_CATALOG = {
+    "@zhongruan/dsh-llm-meter",
+}
+
 (REG_DIR / "artifacts").mkdir(parents=True, exist_ok=True)
 (REG_DIR / "npm").mkdir(parents=True, exist_ok=True)
 
@@ -256,6 +262,16 @@ for plugin_dir, src_meta in discover_plugin_dirs():
     if len(versions) > 1:
         print(f"  保留历史版本: {', '.join(versions)}", flush=True)
 
+    print(f"  npm: {name}@{version}")
+    print(f"  tarball: {tarball_url}")
+    if want_ver and version != want_ver:
+        print(
+            f"  注意: {plugin_dir.name} 源码 {want_ver}，市场仍用制品 {version}（这次不会带上未打包改动）。",
+            flush=True,
+        )
+    if name in HIDDEN_FROM_CATALOG:
+        print(f"  发现页隐藏（npm 安装包保留）: {name}@{version}", flush=True)
+        continue
     prev = prev_by_name.get(name) or {}
     entry = {
         "name": name,
@@ -269,13 +285,6 @@ for plugin_dir, src_meta in discover_plugin_dirs():
         "added": prev.get("added") or TODAY,
     }
     built[name] = entry
-    if want_ver and version != want_ver:
-        print(
-            f"  注意: {plugin_dir.name} 源码 {want_ver}，市场仍用制品 {version}（这次不会带上未打包改动）。",
-            flush=True,
-        )
-    print(f"  npm: {name}@{version}")
-    print(f"  tarball: {tarball_url}")
 
 if not built:
     raise SystemExit("错误: 没有任何插件制品可写入市场目录")

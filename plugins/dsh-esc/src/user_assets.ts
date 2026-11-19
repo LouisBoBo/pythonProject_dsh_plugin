@@ -265,6 +265,8 @@ async function purgeExpertState(dataRoot: string, expertId: string): Promise<voi
         pinnedSkillId: null,
         skillIds: [],
         connectorIds: [],
+        usedConnectorIds: [],
+        usedSkillIds: [],
       }
     }
   }

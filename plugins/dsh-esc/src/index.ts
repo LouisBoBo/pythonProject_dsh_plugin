@@ -8,9 +8,11 @@ import {
   applyScene,
   clearSessionScene,
   loadState,
+  noteSessionUsage,
   publicState,
   resolveConnectorPool,
   resolveExpertId,
+  resolvePinnedSkillId,
   resolveSkillPool,
   setActiveExpert,
   setSessionOverride,
@@ -51,6 +53,18 @@ function sceneBlocksConnector(exec: ExecCtx | undefined, connectorId: string): s
     return `失败 · none · scene_not_bound\n本会话未选用场景卡，不能调用 ESC 连接器。请在输入框旁添加场景卡。`
   }
   return `失败 · none · connector_not_in_scene\n本会话场景卡未包含连接器「${connectorId}」，不能调用。请换一张含该连接器的场景卡，或在输入框旁添加场景。`
+}
+
+/** 连接器工具进入执行后记账，供任务上下文侧栏「实际调用优先」 */
+function noteConnectorUse(exec: ExecCtx | undefined, connectorId: string): void {
+  const sid = sessionIdOf(exec)
+  if (!sid) return
+  const cfg = loadConfig()
+  const pinned = resolvePinnedSkillId(loadState(cfg.dataRoot), sid)
+  void noteSessionUsage(cfg.dataRoot, sid, {
+    connectorId,
+    skillId: pinned || undefined,
+  }).catch(() => {})
 }
 
 function textBlocks(text: string | undefined) {
@@ -160,6 +174,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mes')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mes')
           const row = loadState(loadConfig().dataRoot).connectors.mes
           const result = await queryMes(
             row,
@@ -199,6 +214,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'dify')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'dify')
           const row = loadState(loadConfig().dataRoot).connectors.dify
           const result = await searchDify(row, String(args.query || ''))
           return { summary: summaryOfQuery(result) }
@@ -255,6 +271,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mcp-chart')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mcp-chart')
           const row = loadState(loadConfig().dataRoot).connectors['mcp-chart']
           const title = String(args.title || '')
           const result = await renderChart(
@@ -329,6 +346,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'excel')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'excel')
           const st = loadState(loadConfig().dataRoot)
           const title = String(args.title || '')
           const result = await excelToChart(
@@ -375,6 +393,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mcp-wecom')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mcp-wecom')
           const row = loadState(loadConfig().dataRoot).connectors['mcp-wecom']
           return { summary: summaryOfQuery(await sendWecom(row, String(args.markdown || ''))) }
         },
@@ -417,6 +436,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mcp-feishu')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mcp-feishu')
           const row = loadState(loadConfig().dataRoot).connectors['mcp-feishu']
           return {
             summary: summaryOfQuery(
@@ -454,6 +474,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mcp-lexiang')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mcp-lexiang')
           const row = loadState(loadConfig().dataRoot).connectors['mcp-lexiang']
           return { summary: summaryOfQuery(await searchLexiang(row, String(args.query || ''))) }
         },
@@ -487,6 +508,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mcp-lexiang')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mcp-lexiang')
           const row = loadState(loadConfig().dataRoot).connectors['mcp-lexiang']
           return {
             summary: summaryOfQuery(
@@ -528,6 +550,7 @@ function syncConnectorTools(ctx: Context): void {
         async execute(args, exec?: ExecCtx) {
           const blocked = sceneBlocksConnector(exec, 'mcp-web-read')
           if (blocked) return { summary: blocked }
+          noteConnectorUse(exec, 'mcp-web-read')
           const row = loadState(loadConfig().dataRoot).connectors['mcp-web-read']
           return { summary: summaryOfQuery(await readPublicUrl(row, String(args.url || ''))) }
         },

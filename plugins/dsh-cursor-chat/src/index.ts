@@ -587,6 +587,13 @@ const GIT_DELIVER_MODEL_STOP_PAUSED =
   '禁止再调用 zr_cchat_git_deliver，禁止 ask_user_question，禁止出任何选择题或「要怎么处理」。' +
   '禁止排查审码引擎、禁止建议跳过审码。须等用户发新消息明确要求提交后再调。回复留空。'
 
+/** 用户点取消：与暂停同属人审终态；禁止当工具故障重试（否则会「深度搜索/再调 git_deliver」） */
+const GIT_DELIVER_MODEL_STOP_CANCELLED =
+  GIT_DELIVER_MODEL_STOP +
+  '本次用户已取消 Git 交付，任务已结束（未 commit）。' +
+  '这不是工具故障，禁止重试，禁止再调用 zr_cchat_git_deliver，禁止 ask_user_question，禁止出任何选择题。' +
+  '须等用户发新消息明确要求提交后再调。回复留空。'
+
 /**
  * 聊天正文门禁：确认卡/进度过程中正文为空；
  * begin/continue/finish 在 done=true 时输出「本轮结论」（凡写码必有结论）。
@@ -598,6 +605,10 @@ function chatBodyRender(_args: unknown, value: unknown) {
   // 暂停终态：模型必须看见硬停止正文（空返回/只靠 model_next 仍会追问选择题）
   if (v.paused === true) {
     return textBlocks(GIT_DELIVER_MODEL_STOP_PAUSED)
+  }
+  // 用户取消：同属人审终态；须硬停止，禁止模型把取消当 error 再重试
+  if (v.cancelled === true && v.done === true) {
+    return textBlocks(GIT_DELIVER_MODEL_STOP_CANCELLED)
   }
   // 须澄清：模型必须看见下一步（否则空返回会编造「已发出确认卡」）；聊天卡由 toolview 藏掉
   if (v.need_clarify === true) {
@@ -1510,6 +1521,7 @@ export function apply(ctx: Context) {
         '读取当前工作区未提交改动，出绿色确认卡（默认展示当前仓库地址与分支）；本工具阻塞等人审，用户点确认后才 commit → push → 尝试开 PR 并返回结论。' +
         '推送遇网络瞬断会在工具内自动重试；重试耗尽后结论已在 chat_body，禁止再出「推送失败如何处理」等选择题。' +
         '若返回 paused=true（用户点了暂停提交）：任务已结束，禁止 ask_user_question，禁止出选择题，禁止再调本工具或排查审码引擎，回复留空。' +
+        '若返回 cancelled=true（用户点了取消）：任务已结束，不是工具故障，禁止重试，禁止再调本工具，禁止出选择题，回复留空。' +
         '普通改码/续改请用 zr_cchat_begin/continue，禁止用本工具代替写码，禁止自行 bash git commit。' +
         '进度卡会展示确认 UI；禁止复述仓库/分支清单，禁止写「已生成确认卡」，确认前不要再调其它工具。',
       parameters: {
@@ -1640,26 +1652,52 @@ export function apply(ctx: Context) {
             },
           })
         }
+        // 用户取消=人审终态成功收口；禁止 ok:false（否则模型当故障「Retry once」并深度搜索）
+        if (out.cancelled === true) {
+          return asJson({
+            ok: true,
+            cancelled: true,
+            started: true,
+            done: true,
+            show_error: false,
+            suppress_conclusion: true,
+            job_id: job?.id || '',
+            confirm_token: out.confirm_token || '',
+            status: 'cancelled',
+            detail: '用户已取消 Git 交付，任务已结束（未 commit）',
+            chat_body: out.conclusion,
+            source: 'cursor_chat',
+            model_next: GIT_DELIVER_MODEL_STOP_CANCELLED,
+            cursor_chat_ui: {
+              kind: 'git_deliver',
+              job_id: job?.id || '',
+              workspace: abs,
+              requirement: reqText,
+              confirm_token: out.confirm_token || '',
+              service: base,
+              status: 'cancelled',
+              git_plan: uiPlan,
+            },
+          })
+        }
         if (!out.ok) {
-          const cancelled = out.cancelled === true
           const detailText = String(out.detail || '')
           const pushExhausted =
-            !cancelled &&
-            (job?.git_deliver?.stage === 'push' ||
-              /已提交但推送失败|已重试\s*\d+\s*次/.test(detailText))
+            job?.git_deliver?.stage === 'push' ||
+            /已提交但推送失败|已重试\s*\d+\s*次/.test(detailText)
           return asJson({
             ok: false,
             started: true,
             done: true,
             // 推送已自动重试耗尽：结论即终态，勿标成可交互错误去诱出选择题
-            show_error: !cancelled && !pushExhausted,
-            cancelled,
+            show_error: !pushExhausted,
+            cancelled: false,
             push_exhausted: pushExhausted || undefined,
             // 会话 finalize 不落全文：只由 client turnTail 挂「Git 交付结论」，避免与模型复述双份
             suppress_conclusion: true,
             job_id: job?.id || '',
             confirm_token: out.confirm_token || '',
-            status: job?.status || (cancelled ? 'cancelled' : 'failed'),
+            status: job?.status || 'failed',
             detail: out.detail,
             chat_body: out.conclusion,
             source: 'cursor_chat',
@@ -1671,7 +1709,7 @@ export function apply(ctx: Context) {
               requirement: reqText,
               confirm_token: out.confirm_token || '',
               service: base,
-              status: job?.status || (cancelled ? 'cancelled' : 'failed'),
+              status: job?.status || 'failed',
               git_plan: uiPlan,
             },
           })

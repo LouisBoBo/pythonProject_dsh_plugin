@@ -96,7 +96,7 @@ export function buildAuditRepairPrompt(
 
 /**
  * 同步后交付审计。无同步且无删除时跳过（空跑闸门另管）。
- * 任一子检查失败则审计 ok=false。只有落盘指纹或删除验尸失败才拦住结果。
+ * 任一子检查失败则审计 ok=false。落盘/删除验尸在同步时直接失败；其余失败同样不得标已完成。
  */
 export function runDeliveryAudit(input: DeliveryAuditInput): DeliveryAuditResult {
   const synced = Array.isArray(input.synced_files) ? input.synced_files : []

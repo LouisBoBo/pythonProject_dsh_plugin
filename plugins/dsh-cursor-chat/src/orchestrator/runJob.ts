@@ -19,7 +19,7 @@ import {
 } from '../workKind.js'
 import { appendEvent, forceCancelJob, listJobs, loadJob, patchJob, setStatus } from '../jobs.js'
 import { compactParentHandoff } from '../sessionMemory.js'
-import { transcriptMutatedProject } from '../transcript.js'
+import { opsEvidenceProblem, transcriptMutatedProject } from '../transcript.js'
 import {
   isLocalDbRel,
   isSensitiveRel,
@@ -492,7 +492,7 @@ export async function foldLiveAudit(jobId: string): Promise<void> {
   }
 }
 
-/** 落盘之后再核对正在跑的服务。对不上只写进审计，不把已经同步的结果改成未完成。 */
+/** 落盘之后再核对正在跑的服务。审计或服务没过，标未完成，不得写成已完成。 */
 export async function sealWithServices(
   jobId: string,
   synced: string[],
@@ -538,6 +538,23 @@ export async function sealWithServices(
     deleted.length ? `已删除 ${deleted.length} 个` : '',
   ].filter(Boolean)
   const message = parts.join('，') || detail.trim() || '写码流程已结束'
+  const sealed = loadJob(jobId)
+  const auditNow = sealed?.delivery_audit
+  const svcNow = sealed?.service_check
+  const serviceMiss = Boolean(svcNow && svcNow.required && !svcNow.skipped && svcNow.ok === false)
+  const auditMiss = Boolean(auditNow && auditNow.ok === false)
+  if (serviceMiss || auditMiss) {
+    const why = [
+      auditMiss ? String(auditNow?.detail || '交付审计未通过') : '',
+      serviceMiss ? String(svcNow?.detail || '服务未就绪') : '',
+    ]
+      .filter(Boolean)
+      .join('；')
+    const failDetail = `${message}。验收未过：${why}`.replace(/\s+/g, ' ').trim()
+    setStatus(loadJob(jobId)!, 'failed', failDetail)
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: failDetail })
+    return
+  }
   setStatus(loadJob(jobId)!, 'succeeded', message)
   appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message })
 }
@@ -800,14 +817,14 @@ async function enterReviewFromDiff(
     const detail = crit.length
       ? `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围含 schemas/models 后走续改。`
       : `写码已结束；变更均在写范围外未同步（${deferredAll.length}）。`
-    setStatus(loadJob(jobId)!, 'succeeded', detail)
+    setStatus(loadJob(jobId)!, 'failed', detail)
     patchJob(jobId, {
       last_synced_files: [],
       review_in_scope: [],
       review_deferred: deferredAll,
       review_gate: null,
     })
-    appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
+    appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
     return
   }
 
@@ -1137,65 +1154,89 @@ async function executeOpsJob(jobId: string): Promise<void> {
     if (opsWantsRunningService(job.requirement)) {
       setStatus(job, 'running', '正在按项目命令重启，不改代码…')
       emit({ type: 'status', message: '本轮是开发操作，不准备写码沙箱' })
-      const started = await startRequestedServices(
+      const expectPorts = opsPortExpectation(job.requirement)
+      const reportLaunch = (ev: {
+        type: 'status' | 'command'
+        message?: string
+        command?: string
+        snippet?: string
+        tool_status?: string
+        call_id?: string
+      }) => {
+        if (ev.type === 'status' && ev.message) {
+          emit({ type: 'status', message: ev.message })
+          return
+        }
+        if (ev.type === 'command' && ev.command) {
+          emit({
+            type: 'tool_event',
+            name: 'Shell',
+            command: ev.command,
+            snippet: ev.snippet,
+            tool_status: ev.tool_status || 'running',
+            call_id: ev.call_id,
+          })
+        }
+      }
+      // 与写码交付审计同一条：先拉起，再按端口验收。过了才完成；不过把缺的一侧抛出来，再拉起一次。
+      // 缺端口不得再交给 Cursor：Agent 终端里的 nohup 会随会话被回收，结论还会和探测结果打架。
+      const maxAuditRounds = 2
+      let started = await startRequestedServices(
         job.workspace,
-        opsPortExpectation(job.requirement),
+        expectPorts,
         () => Boolean(loadJob(jobId)?.cancelled),
         undefined,
-        (ev) => {
-          if (ev.type === 'status' && ev.message) {
-            emit({ type: 'status', message: ev.message })
-            return
-          }
-          if (ev.type === 'command' && ev.command) {
-            emit({
-              type: 'tool_event',
-              name: 'Shell',
-              command: ev.command,
-              snippet: ev.snippet,
-              tool_status: ev.tool_status || 'running',
-              call_id: ev.call_id,
-            })
-          }
-        },
+        reportLaunch,
       )
-      const fresh = loadJob(jobId)
-      if (fresh?.cancelled || started.detail === '用户取消') {
-        forceCancelJob(jobId)
-        return
-      }
-      if (started.ok) {
-        const probe = await probeDevPorts(job.workspace, opsPortExpectation(job.requirement))
-        if (probe.missing.length) {
-          // 插件以为起来了但探测仍缺：降级 Cursor 灵活处理，不直接判死
-          restartFallback = true
-          restartAttemptDetail = `${started.detail} ${probe.line}`.trim()
-          setStatus(loadJob(jobId)!, 'running', '端口探测未齐，改由 Cursor 继续处理…')
-          emit({
-            type: 'status',
-            message: '插件已拉起，但端口探测未齐，改由 Cursor 按 IDE 方式继续排查并重启…',
-          })
-        } else {
-          const detail = started.detail.includes('已在听')
-            ? started.detail
-            : probe.line
-              ? `${started.detail} ${probe.line}`
-              : started.detail
+      for (let round = 1; round <= maxAuditRounds; round++) {
+        const fresh = loadJob(jobId)
+        if (fresh?.cancelled || started.detail === '用户取消') {
+          forceCancelJob(jobId)
+          return
+        }
+        if (started.no_commands) break
+        emit({ type: 'status', message: '正在验收端口是否在听…' })
+        const probe = await probeDevPorts(job.workspace, expectPorts)
+        const listened = /在听/.test(probe.line) && !/未监听/.test(probe.line)
+        if (!probe.missing.length && (started.ok || listened)) {
+          const detail = `验收通过。${probe.line || started.detail}`.trim()
+          emit({ type: 'status', message: detail })
           setStatus(loadJob(jobId)!, 'succeeded', detail)
           appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
           return
         }
-      } else if (started.no_commands || started.start_failed) {
-        // 认不出命令，或认出命令但没起来：都降级 Cursor（可见过程 + 灵活排障）
-        restartFallback = true
-        restartAttemptDetail = started.detail
-        const why = started.no_commands ? '未认出项目启动命令' : '按项目命令重启未全部起来'
-        setStatus(loadJob(jobId)!, 'running', `${why}，改由 Cursor 在项目终端处理…`)
+        const problem = probe.missing.length
+          ? `验收未过：${probe.missing.join('、')}没有在听。${probe.line} ${started.detail}`.replace(/\s+/g, ' ').trim()
+          : (started.detail || '验收未过：按项目命令拉起后端口仍未响应').replace(/\s+/g, ' ').trim()
+        if (round >= maxAuditRounds) {
+          setStatus(loadJob(jobId)!, 'failed', problem)
+          appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: problem })
+          return
+        }
         emit({
           type: 'status',
-          message: `${why}，改由 Cursor 按 IDE 方式在项目终端继续处理…`,
+          message: `${problem}。按同一项目命令再拉起一次…`,
         })
-      } else {
+        setStatus(loadJob(jobId)!, 'running', '验收未过，继续纠错拉起…')
+        started = await startRequestedServices(
+          job.workspace,
+          expectPorts,
+          () => Boolean(loadJob(jobId)?.cancelled),
+          undefined,
+          reportLaunch,
+        )
+      }
+      if (started.no_commands) {
+        // 一张启动命令都没有：才降级 Cursor。已认出命令的失败在上面收口。
+        restartFallback = true
+        restartAttemptDetail = started.detail
+        setStatus(loadJob(jobId)!, 'running', '未认出项目启动命令，改由 Cursor 在项目终端处理…')
+        emit({
+          type: 'status',
+          message: '未认出项目启动命令，改由 Cursor 按 IDE 方式在项目终端继续处理…',
+        })
+      } else if (started.start_failed || !started.no_commands) {
+        // 命令已认出但没拉起来：不得交给 Cursor
         setStatus(loadJob(jobId)!, 'failed', started.detail)
         appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: started.detail })
         return
@@ -1368,11 +1409,50 @@ async function executeOpsJob(jobId: string): Promise<void> {
       appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
       return
     }
+    if (!restartWanted && !cre.mocked) {
+      const evidenceKind = terminalKind === 'restart' ? 'generic' : terminalKind
+      let problem = opsEvidenceProblem(cre.transcript, evidenceKind)
+      if (problem) {
+        emit({ type: 'status', message: `${problem}。按同一诉求再处理一次…` })
+        setStatus(loadJob(jobId)!, 'running', '验收未过，继续纠错…')
+        cre = await runOpsCursor(problem)
+        patchJob(jobId, {
+          agent_id: cre.agent_id || null,
+          run_id: cre.run_id || null,
+          assistant_text: clampAssistantText(
+            [String(loadJob(jobId)?.assistant_text || ''), cre.text || ''].filter(Boolean).join('\n\n'),
+          ),
+          thinking_text: clampText(cre.thinking || ''),
+        })
+        if (loadJob(jobId)?.cancelled || cre.error === '已取消') {
+          forceCancelJob(jobId)
+          return
+        }
+        if (transcriptMutatedProject(cre.transcript || [])) {
+          const detail = '这次是开发操作，纠错时改到了真实项目上的文件，这些改动还在磁盘上，本轮结果不采用。'
+          setStatus(loadJob(jobId)!, 'failed', detail)
+          appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+          return
+        }
+        if (!cre.ok) {
+          const detail = cre.error || problem
+          setStatus(loadJob(jobId)!, 'failed', detail)
+          appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
+          return
+        }
+        problem = opsEvidenceProblem(cre.transcript, evidenceKind)
+        if (problem) {
+          setStatus(loadJob(jobId)!, 'failed', problem)
+          appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: problem })
+          return
+        }
+      }
+    }
     const detail = mutated
-      ? `已在项目目录完成重启；为启动做了必要处理。${probe.line}`.trim()
+      ? `验收通过。已在项目目录完成重启；为启动做了必要处理。${probe.line}`.trim()
       : probe.line
-        ? `已在项目目录完成开发操作，未改代码。${probe.line}`
-        : '已在项目目录完成开发操作，未改代码。'
+        ? `验收通过。已在项目目录完成开发操作，未改代码。${probe.line}`
+        : '验收通过。已在项目目录完成开发操作，未改代码。'
     setStatus(loadJob(jobId)!, 'succeeded', detail)
     appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
   } catch (err) {
@@ -2099,6 +2179,18 @@ export function applyJobReview(opts: {
       backend_restart: null,
       backend_restart_hint: settled.hint || null,
     })
+    if (!audit.ok) {
+      const failDetail = audit.detail || '交付审计未通过'
+      setStatus(loadJob(job.id)!, 'failed', failDetail)
+      appendEvent(loadJob(job.id)!, { type: 'done', status: 'failed', message: failDetail })
+      return {
+        ok: false,
+        detail: failDetail,
+        code: 'delivery_audit',
+        synced_files: synced,
+        deleted_files: deleted,
+      }
+    }
     if (opts.seal === false) {
       return { ok: true, job_id: job.id, synced_files: synced, deleted_files: deleted, detail }
     }
@@ -2157,8 +2249,8 @@ export function healStalePendingReview(jobId: string): ReturnType<typeof loadJob
     : inScope.length
       ? `写码已结束；请在进度卡勾选后同步（或已超时收口）。`
       : `写码已结束；变更均在写范围外未同步（${deferred.length}）。`
-  setStatus(loadJob(jobId)!, 'succeeded', detail)
-  appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message: detail })
+  setStatus(loadJob(jobId)!, 'failed', detail)
+  appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
   return loadJob(jobId)
 }
 

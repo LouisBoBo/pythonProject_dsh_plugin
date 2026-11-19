@@ -1,0 +1,71 @@
+{
+  "name": "@zhongruan/dsh-agent-context",
+  "version": "0.1.67",
+  "description": "任务上下文右侧薄栏（对标 Qode 右侧栏）：聚合环境/改动/提交入口/技能/产出；不进左侧导航槽",
+  "dshMarket": {
+    "zh": "任务上下文：对话右侧薄栏看改动与分支，并可发起提交确认（走写码人审）；不占左侧导航",
+    "en": "Right-rail task context: branch/changes/commit HITL beside chat; not a left-nav item"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "agent-context",
+    "sidebar"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && cp src/client.js lib/client.js",
+    "test": "tsc && node --test test/*.test.mjs",
+    "self-test": "tsc && node --test test/*.test.mjs"
+  },
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "http://175.178.238.31/dsh-plugins/npm/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-chat"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
