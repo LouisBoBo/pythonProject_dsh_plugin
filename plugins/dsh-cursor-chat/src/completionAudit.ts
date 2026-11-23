@@ -24,6 +24,18 @@ export type AuditCheck = { name: string; ok: boolean; detail: string }
 
 export type CompletionScore = { passed: number; total: number; percent: number }
 
+/**
+ * 运行环境探测：前后端端口单独失败只作提示，不挡「需求已落盘」完成态。
+ * requirement_api（本轮改了后端且核对运行中 OpenAPI）仍属硬失败；
+ * 纯前端 mock 字面量已由 shouldCheckLiveOpenApi 跳过，不会误入此项。
+ * 落盘指纹、删除验尸、页面/挂载/契约/库表/测试仍属硬失败。
+ */
+export const ADVISORY_AUDIT = new Set(['frontend_service', 'backend_service'])
+
+export function isAdvisoryAuditName(name: string): boolean {
+  return ADVISORY_AUDIT.has(String(name || ''))
+}
+
 export function scoreChecks(checks: AuditCheck[]): CompletionScore {
   const total = checks.length
   const passed = checks.filter((c) => c.ok).length
@@ -37,18 +49,31 @@ export function finishAudit(
 ): { ok: boolean; checks: AuditCheck[]; detail: string; completion?: CompletionScore } {
   const completion = checks.length ? scoreChecks(checks) : undefined
   const failed = checks.filter((c) => !c.ok)
+  const hardFailed = failed.filter((c) => !isAdvisoryAuditName(c.name))
+  const softFailed = failed.filter((c) => isAdvisoryAuditName(c.name))
   if (!checks.length) return { ok: true, checks, detail: emptyDetail }
-  if (!failed.length) {
+  if (!hardFailed.length) {
+    const softNote =
+      softFailed.length > 0
+        ? `（另有 ${softFailed.length} 项环境提示，不挡完成）：` +
+          softFailed
+            .map((c) => c.detail || c.name)
+            .filter(Boolean)
+            .slice(0, 3)
+            .join('；')
+        : ''
     return {
       ok: true,
       checks,
       completion,
-      detail: `交付审计通过，完成度 ${completion!.percent}%（${completion!.passed}/${completion!.total}）`,
+      detail:
+        `交付审计通过，完成度 ${completion!.percent}%（${completion!.passed}/${completion!.total}）` +
+        softNote,
     }
   }
   const detail =
     `交付审计未通过（禁止假完成），完成度 ${completion!.percent}%（${completion!.passed}/${completion!.total}）：` +
-    failed
+    hardFailed
       .map((c) => c.detail || c.name)
       .filter(Boolean)
       .slice(0, 4)
@@ -234,6 +259,18 @@ export function liveAuditScope(
 }
 
 /**
+ * 是否要用运行中 OpenAPI 核对「本轮接口」。
+ * 只认权威范围：本轮同步了后端运行时文件。
+ * 纯前端/演示数据轮次常在 mock 或 TODO 注释里写 `/api/...` 字面量，不得据此要求后端已挂载。
+ */
+export function shouldCheckLiveOpenApi(
+  scope: { backend: boolean },
+  routePaths: string[] | null | undefined,
+): boolean {
+  return Boolean(scope?.backend && Array.isArray(routePaths) && routePaths.length > 0)
+}
+
+/**
  * 同步之后对真实项目做探测。自检模式不探端口、不跑测试，避免把假通过写进账本。
  * 只探本轮改过的前端或后端；接口只核对本轮文件里出现的路径。
  */
@@ -272,44 +309,40 @@ export async function probeLiveAudit(opts: {
     ...collectRoutePaths(workspace, rels),
     ...quotedApiPaths(workspace, rels),
   ].filter((p, i, arr) => arr.indexOf(p) === i))
-  const needBackend = scope.backend || routePaths.length > 0
-  const backPort = needBackend ? readBackendPortFromViteProxy(workspace, rels) : null
+  // 后端服务探测只跟「本轮是否改了后端」挂钩；不得因前端 mock 字面量去探/卡后端
+  const backPort = scope.backend ? readBackendPortFromViteProxy(workspace, rels) : null
   let backendUp = false
-  if (needBackend) {
+  if (scope.backend) {
     if (!backPort) {
-      if (scope.backend) {
-        checks.push({
-          name: 'backend_service',
-          ok: false,
-          detail: '本轮改了后端，但 Vite 代理里没有本机后台端口，不能确认后端服务',
-        })
-      }
+      checks.push({
+        name: 'backend_service',
+        ok: false,
+        detail: '本轮改了后端，但 Vite 代理里没有本机后台端口，不能确认后端服务',
+      })
     } else {
       const assessed = await assessBackend(backPort, [])
       backendUp = assessed.ok
-      if (scope.backend) {
-        checks.push({
-          name: 'backend_service',
-          ok: assessed.ok,
-          detail: assessed.backend,
-        })
-      }
+      checks.push({
+        name: 'backend_service',
+        ok: assessed.ok,
+        detail: assessed.backend,
+      })
     }
   }
 
-  if (routePaths.length) {
+  if (shouldCheckLiveOpenApi(scope, routePaths)) {
     if (!backPort) {
       // 认不到端口时不得谎称「文档没打开」；落盘/挂载另有磁盘审计，此处跳过运行中核对
       checks.push({
         name: 'requirement_api',
         ok: true,
-        detail: '同步文件含接口路径，但未能从 Vite 代理识别后端端口，已跳过运行中接口文档核对',
+        detail: '本轮改了后端且含接口路径，但未能从 Vite 代理识别后端端口，已跳过运行中接口文档核对',
       })
     } else if (!backendUp) {
       checks.push({
         name: 'requirement_api',
         ok: false,
-        detail: `同步文件里有接口路径，但后端 :${backPort} 文档没打开，不能确认接口已加载`,
+        detail: `本轮改了后端且含接口路径，但后端 :${backPort} 文档没打开，不能确认接口已加载`,
       })
     } else {
       const settled = await openApiBodyWithRoutes(backPort, routePaths)
@@ -325,6 +358,13 @@ export async function probeLiveAudit(opts: {
             : `运行中的接口文档含本轮接口 ${routePaths.slice(0, 4).join('、')}`,
       })
     }
+  } else if (routePaths.length && !scope.backend) {
+    checks.push({
+      name: 'requirement_api',
+      ok: true,
+      detail:
+        '本轮未改后端运行时文件；前端文件中的 /api 路径视为引用或占位，已跳过运行中文档核对',
+    })
   }
 
   const tests = rels

@@ -77,10 +77,12 @@ import {
   diffSnapshots,
   filterMeaningfulRels,
   inferSparseBeforeAfter,
+  isSameWorkspaceRoot,
   listHeldSensitiveRels,
   listSandboxTargetDrift,
   prepareSandboxForJob,
   snapshotSandbox,
+  snapshotSensitiveFiles,
   syncChangedToTarget,
   type PrepareResult,
 } from '../sandbox.js'
@@ -492,7 +494,7 @@ export async function foldLiveAudit(jobId: string): Promise<void> {
   }
 }
 
-/** 落盘之后再核对正在跑的服务。审计或服务没过，标未完成，不得写成已完成。 */
+/** 落盘之后再核对正在跑的服务。硬审计或强制服务检查没过 → 未完成；环境探测提示不挡完成。 */
 export async function sealWithServices(
   jobId: string,
   synced: string[],
@@ -559,6 +561,13 @@ export async function sealWithServices(
   appendEvent(loadJob(jobId)!, { type: 'done', status: 'succeeded', message })
 }
 
+function outOfScopeDeferredDetail(count: number, inplace: boolean): string {
+  if (inplace) {
+    return `写码已结束；变更均在写范围外，但已直改真工程（${count}）；未纳入交付清单，请用 Git 核对/撤销或扩大写范围后续改。`
+  }
+  return `写码已结束；变更均在写范围外未同步（${count}）。`
+}
+
 async function enterReviewFromDiff(
   jobId: string,
   meta: PrepareResult,
@@ -573,6 +582,7 @@ async function enterReviewFromDiff(
     agent_id?: string
     run_id?: string
   },
+  beforeSensitive: ReturnType<typeof snapshotSensitiveFiles> = new Map(),
 ): Promise<void> {
   patchJob(jobId, {
     assistant_text: clampAssistantText(cre.text || loadJob(jobId)?.assistant_text || ''),
@@ -655,8 +665,14 @@ async function enterReviewFromDiff(
     })
   }
 
-  // 敏感文件不进 diff 快照，但可能已写在沙箱：单独记账，供结论说明「未进真工程」
-  const heldSensitive = listHeldSensitiveRels(meta.sandbox, job.workspace)
+  // 敏感文件不进 diff 快照：沙箱模式记「未同步」；inplace 对比开工基线记「真工程已改」
+  const heldSensitive = listHeldSensitiveRels(
+    meta.sandbox,
+    job.workspace,
+    20,
+    beforeSensitive,
+  )
+  const inplaceRoot = isSameWorkspaceRoot(meta.sandbox, job.workspace)
   patchJob(jobId, {
     changed_files: diff.changed,
     deleted_files: diff.deleted,
@@ -788,10 +804,17 @@ async function enterReviewFromDiff(
     const noiseOnly =
       filterMeaningfulRels([...diff.changed, ...diff.deleted]).length === 0 &&
       (diff.changed.length > 0 || diff.deleted.length > 0)
+    const sensitiveNote =
+      heldSensitive.length > 0
+        ? inplaceRoot
+          ? `；另检测到敏感文件已在真工程被改写：${heldSensitive.slice(0, 3).join(', ')}（方案 B 不回滚，请自行核对）`
+          : `；另有敏感文件仅在沙箱：${heldSensitive.slice(0, 3).join(', ')}`
+        : ''
     const detail =
       (noiseOnly
         ? '写码空跑已拦截：仅有本地库等噪音、无有效源码落盘。禁止当已交付；请续改并附仍复现的 URL/截图。'
-        : '写码空跑已拦截：沙箱相对开工快照无有效代码变更，且与目标工程无漂移可补同步（常见于本机已有未提交同款代码、Cursor 只核对）。禁止当已交付；若仍异常请续改说明现象。') +
+        : '写码空跑已拦截：相对开工快照无有效代码变更，且无可补同步的落盘漂移（常见于本机已有未提交同款代码、Cursor 只核对）。禁止当已交付；若仍异常请续改说明现象。') +
+      sensitiveNote +
       (cre.mocked ? '（Mock）' : '')
     setStatus(loadJob(jobId)!, 'failed', detail)
     patchJob(jobId, { last_synced_files: [], synced_files: [] })
@@ -815,8 +838,10 @@ async function enterReviewFromDiff(
   if (autoApply && !accept.length) {
     const crit = criticalDeferredFiles(deferredAll)
     const detail = crit.length
-      ? `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围含 schemas/models 后走续改。`
-      : `写码已结束；变更均在写范围外未同步（${deferredAll.length}）。`
+      ? inplaceRoot
+        ? `写码已结束；契约文件已在真工程直改但未纳入交付：${crit.join(', ')}。请确认写范围含 schemas/models 后走续改，并用 Git 核对。`
+        : `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围含 schemas/models 后走续改。`
+      : outOfScopeDeferredDetail(deferredAll.length, inplaceRoot)
     setStatus(loadJob(jobId)!, 'failed', detail)
     patchJob(jobId, {
       last_synced_files: [],
@@ -838,10 +863,17 @@ async function enterReviewFromDiff(
     const detail =
       (gateWhy ? `${gateWhy} ` : '') +
       `待审：范围内 ${inScope.length} 改 / ${deletedScoped.inScope.length} 删；范围外 ${deferredAll.length}` +
+      (inplaceRoot && deferredAll.length ? '（已直改真工程）' : '') +
       (cre.mocked ? '（Mock）' : '') +
-      (accept.length ? '。请勾选后同步。' : '。范围内无可同步项（均在范围外）。') +
+      (accept.length
+        ? '。请勾选后同步。'
+        : inplaceRoot
+          ? '。范围内无可认账项（范围外已在真工程，请用 Git 核对）。'
+          : '。范围内无可同步项（均在范围外）。') +
       (crit.length
-        ? ` ⚠ 契约文件未进范围：${crit.slice(0, 5).join(', ')}——扩大写范围或勾选同步，否则易「请求失败」。`
+        ? inplaceRoot
+          ? ` ⚠ 契约文件已直改未纳入交付：${crit.slice(0, 5).join(', ')}——扩大写范围后续改并用 Git 核对。`
+          : ` ⚠ 契约文件未进范围：${crit.slice(0, 5).join(', ')}——扩大写范围或勾选同步，否则易「请求失败」。`
         : '')
     patchJob(jobId, { review_gate: 'await_user' })
     setStatus(loadJob(jobId)!, 'pending_review', detail)
@@ -893,6 +925,7 @@ async function enterReviewFromDiff(
         jobId,
         meta,
         before,
+        beforeSensitive,
         cre,
         emit,
         firstAccept: accept,
@@ -923,13 +956,21 @@ async function enterReviewFromDiff(
   }
 
   const critLeft = criticalDeferredFiles(deferredAll)
+  const deferredNote = deferredAll.length
+    ? inplaceRoot
+      ? `；另有 ${deferredAll.length} 个范围外已直改真工程（未纳入交付）`
+      : `；另有 ${deferredAll.length} 个范围外未同步`
+    : ''
+  const critNote = critLeft.length
+    ? inplaceRoot
+      ? `；⚠ 契约文件已直改未纳入交付：${critLeft.slice(0, 5).join(', ')}`
+      : `；⚠ 仍有契约文件未同步：${critLeft.slice(0, 5).join(', ')}`
+    : ''
   const detail =
     `${applied.detail || '已自动同步'}；${compileNote}` +
     (part.promoted.length ? `；已连带/软放行 ${part.promoted.length} 个` : '') +
-    (deferredAll.length ? `；另有 ${deferredAll.length} 个范围外未同步` : '') +
-    (critLeft.length
-      ? `；⚠ 仍有契约文件未同步：${critLeft.slice(0, 5).join(', ')}`
-      : '') +
+    deferredNote +
+    critNote +
     (!cre.ok && cre.error
       ? `；Cursor 未正常收口（${String(cre.error).slice(0, 120)}），已按落盘变更自动同步`
       : '') +
@@ -955,6 +996,7 @@ async function repairAuditAndReapply(opts: {
   jobId: string
   meta: PrepareResult
   before: ReturnType<typeof snapshotSandbox>
+  beforeSensitive?: ReturnType<typeof snapshotSensitiveFiles>
   cre: {
     ok: boolean
     text: string
@@ -972,7 +1014,7 @@ async function repairAuditAndReapply(opts: {
   | { ok: true; applied: Extract<ApplyResult, { ok: true }> }
   | { ok: false }
 > {
-  const { jobId, meta, before, cre, emit, promoted, audit } = opts
+  const { jobId, meta, before, beforeSensitive, cre, emit, promoted, audit } = opts
   const cfg = loadConfig()
   const job = loadJob(jobId)
   if (!job?.sandbox_path) return { ok: false }
@@ -1049,7 +1091,12 @@ async function repairAuditAndReapply(opts: {
     review_deleted: repairDeleted.inScope,
     review_deferred: [...repairPart.deferred, ...repairDeleted.deferred],
     write_scope: repairPart.scopeOut,
-    held_sensitive_files: listHeldSensitiveRels(meta.sandbox, jobAfterRepair.workspace),
+    held_sensitive_files: listHeldSensitiveRels(
+      meta.sandbox,
+      jobAfterRepair.workspace,
+      20,
+      beforeSensitive,
+    ),
   })
 
   // 回到 pending_review 才能再 apply
@@ -1495,7 +1542,7 @@ async function executeJob(jobId: string): Promise<void> {
       return
     }
 
-    setStatus(job, 'running', '准备沙箱…')
+    setStatus(job, 'running', '准备工作区…')
 
     const parent = job.parent_job_id ? loadJob(job.parent_job_id) : null
     let parentSummary = ''
@@ -1548,13 +1595,17 @@ async function executeJob(jobId: string): Promise<void> {
       sandbox_skipped_files: meta.skipped_files || [],
     })
     {
-      let extra = ''
-      if (meta.mode === 'reuse') {
-        extra = ` · 父克隆 ${meta.parent_files ?? '?'} · 刷新 ${meta.refreshed_files ?? '?'}`
-      } else if (meta.mode === 'sparse' && (meta.context_files || 0) > 0) {
-        extra = ` · 写范围 ${meta.scope_files ?? '?'} + 只读上下文 ${meta.context_files}`
+      if (meta.mode === 'inplace') {
+        emit({ type: 'status', message: '工作区就绪' })
+      } else {
+        let extra = ''
+        if (meta.mode === 'reuse') {
+          extra = ` · 父克隆 ${meta.parent_files ?? '?'} · 刷新 ${meta.refreshed_files ?? '?'}`
+        } else if (meta.mode === 'sparse' && (meta.context_files || 0) > 0) {
+          extra = ` · 写范围 ${meta.scope_files ?? '?'} + 只读上下文 ${meta.context_files}`
+        }
+        emit({ type: 'status', message: `沙箱就绪（${meta.mode} · ${meta.copied_files} 文件${extra}）` })
       }
-      emit({ type: 'status', message: `沙箱就绪（${meta.mode} · ${meta.copied_files} 文件${extra}）` })
     }
 
     job = loadJob(jobId)!
@@ -1591,6 +1642,7 @@ async function executeJob(jobId: string): Promise<void> {
     }
 
     const before = snapshotSandbox(meta.sandbox)
+    const beforeSensitive = snapshotSensitiveFiles(meta.sandbox)
     const { copyImagesIntoSandbox, toSdkImages } = await import('../images.js')
     const imageRels = copyImagesIntoSandbox(job.images, meta.sandbox)
     const sdkImages = toSdkImages(job.images)
@@ -1663,7 +1715,13 @@ async function executeJob(jobId: string): Promise<void> {
             { forced_deletes: [], patched: [], detail: '' },
             { mode: 'already_done' },
           )
-          await enterReviewFromDiff(jobId, meta, before, { ...cre, text: delivery })
+          await enterReviewFromDiff(
+            jobId,
+            meta,
+            before,
+            { ...cre, text: delivery },
+            beforeSensitive,
+          )
           return
         }
       }
@@ -1945,7 +2003,7 @@ async function executeJob(jobId: string): Promise<void> {
       })
     }
 
-    await enterReviewFromDiff(jobId, meta, before, cre)
+    await enterReviewFromDiff(jobId, meta, before, cre, beforeSensitive)
   } catch (err) {
     const msg = String(err)
     const j = loadJob(jobId)
@@ -1965,6 +2023,7 @@ async function executeSteer(jobId: string, message: string): Promise<void> {
   try {
     setStatus(job, 'running', '追问续跑 Cursor…')
     const before = snapshotSandbox(job.sandbox_path)
+    const beforeSensitive = snapshotSensitiveFiles(job.sandbox_path)
     const steerPrefs = loadPreferences(cfg.dataRoot)
     const prompt = buildPrompt({
       requirement: message,
@@ -1999,6 +2058,7 @@ async function executeSteer(jobId: string, message: string): Promise<void> {
       { sandbox: job.sandbox_path!, mode: 'sparse', copied_files: 0, total_bytes: 0 },
       before,
       cre,
+      beforeSensitive,
     )
   } catch (err) {
     const msg = String(err).slice(0, 500)
@@ -2243,12 +2303,17 @@ export function healStalePendingReview(jobId: string): ReturnType<typeof loadJob
     }
   }
 
+  const inplace = Boolean(
+    job.sandbox_path && job.workspace && isSameWorkspaceRoot(job.sandbox_path, job.workspace),
+  )
   const crit = criticalDeferredFiles(deferred)
   const detail = crit.length
-    ? `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围后走续改。`
+    ? inplace
+      ? `写码已结束；契约文件已在真工程直改但未纳入交付：${crit.join(', ')}。请确认写范围后走续改，并用 Git 核对。`
+      : `写码已结束；契约文件未同步：${crit.join(', ')}。请确认写范围后走续改。`
     : inScope.length
       ? `写码已结束；请在进度卡勾选后同步（或已超时收口）。`
-      : `写码已结束；变更均在写范围外未同步（${deferred.length}）。`
+      : outOfScopeDeferredDetail(deferred.length, inplace)
   setStatus(loadJob(jobId)!, 'failed', detail)
   appendEvent(loadJob(jobId)!, { type: 'done', status: 'failed', message: detail })
   return loadJob(jobId)
@@ -2283,6 +2348,10 @@ export async function recoverOrphanRunningJobs(): Promise<number> {
         job.write_scope || [],
         false,
       )
+      // 崩溃收口无开工敏感基线：inplace 下不误报仓内已有 .env；沙箱模式仍走 listHeld 对照
+      const beforeSensitive = isSameWorkspaceRoot(job.sandbox_path, job.workspace)
+        ? snapshotSensitiveFiles(job.sandbox_path)
+        : new Map()
       await enterReviewFromDiff(
         job.id,
         {
@@ -2297,6 +2366,7 @@ export async function recoverOrphanRunningJobs(): Promise<number> {
           text: job.assistant_text || '',
           thinking: (job.thinking_text || '') + '\n（空等 Vite / 进程中断，已按沙箱改动收口）',
         },
+        beforeSensitive,
       )
       n += 1
     } catch (err) {

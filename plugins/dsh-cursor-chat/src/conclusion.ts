@@ -3,6 +3,7 @@
  * 固定友好三段：任务结果 → 做了什么 → 如何验证（格式硬约束）。
  */
 import { isLocalDbRel, normalizeRel } from './pathScope.js'
+import { isSameWorkspaceRoot } from './sandbox.js'
 import { criticalDeferredFiles } from './scopeCompanions.js'
 import { preferredConclusionAssistantText } from './transcript.js'
 import { readBackendPortFromViteProxy } from './backendRestart.js'
@@ -645,6 +646,9 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   // sqlite 等本机库不算「有效代码变更」
   const changed = changedRaw.filter((p) => !isLocalDbRel(p))
   const delivered = synced.length > 0 || deleted.length > 0
+  const inplaceRoot = Boolean(
+    job.sandbox_path && job.workspace && isSameWorkspaceRoot(job.sandbox_path, job.workspace),
+  )
   const heldSet = new Set(heldSensitive.map((p) => normalizeRel(p)))
   const heldBase = new Set(
     heldSensitive.map((p) => {
@@ -724,7 +728,7 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n'
   }
 
-  // 显式 writeScope（source=config）硬闸：沙箱有范围外变更但未同步——不是空跑
+  // 显式 writeScope（source=config）硬闸：范围外变更未纳入交付——不是空跑
   if (
     !delivered &&
     deferred.length > 0 &&
@@ -736,12 +740,18 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     lines.push(`## 本轮结论`)
     lines.push(``)
     lines.push(
-      `结果：${mark} 硬配置拦截，未同步。本机 writeScope 为硬边界，变更落在范围外，目标工程未改写。`,
+      inplaceRoot
+        ? `结果：${mark} 硬配置拦截。本机 writeScope 为硬边界，范围外变更已直改真工程但未纳入交付。`
+        : `结果：${mark} 硬配置拦截，未同步。本机 writeScope 为硬边界，变更落在范围外，目标工程未改写。`,
     )
     lines.push(``)
     lines.push(`改动：`)
     lines.push(`• 本轮同步文件数：0`)
-    lines.push(`• 范围外未同步 ${deferred.length} 个：`)
+    lines.push(
+      inplaceRoot
+        ? `• 范围外已直改真工程 ${deferred.length} 个：`
+        : `• 范围外未同步 ${deferred.length} 个：`,
+    )
     for (const f of deferred.slice(0, 15)) lines.push(`• \`${f}\``)
     if (deferred.length > 15) lines.push(`• …另有 ${deferred.length - 15} 个`)
     const scope = uniqPaths(job.write_scope || [])
@@ -754,10 +764,18 @@ export function formatChatConclusion(job: CursorCodingJob): string {
     lines.push(``)
     lines.push(`说明：`)
     lines.push(`• 这是本机 \`config.json\` 的 \`writeScope\` 硬闸生效，不是写码空跑。`)
-    lines.push(`• 若确需同步这些文件：扩大 writeScope 后完全退出客户端再开，或清空 writeScope 恢复画像自动范围。`)
+    lines.push(
+      inplaceRoot
+        ? `• 真工程直改模式下范围外文件已落盘；请用 Git 核对/撤销，或扩大 writeScope 后完全退出客户端再开。`
+        : `• 若确需同步这些文件：扩大 writeScope 后完全退出客户端再开，或清空 writeScope 恢复画像自动范围。`,
+    )
     lines.push(``)
     lines.push(`请你验收：`)
-    lines.push(`1. 确认真工程中上述范围外文件未被本轮改写。`)
+    lines.push(
+      inplaceRoot
+        ? `1. 用 Git 核对上述范围外文件是否被本轮改写，不需要则自行撤销。`
+        : `1. 确认真工程中上述范围外文件未被本轮改写。`,
+    )
     lines.push(`2. 若本轮是在测硬配置：结果符合预期；测完请把 writeScope 改回 \`[]\` 并重启客户端。`)
     lines.push(``)
     lines.push(`如需微调或修 bug，直接说具体问题即可（小改续改，大改会先澄清）。`)
@@ -909,6 +927,7 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   lines.push(``)
   if (audit && delivered) {
     const score = completionOf(audit)
+    const softFails = (audit.checks || []).filter((c) => !c.ok)
     if (auditFailed) {
       lines.push(auditHeadline(false, true, score))
       for (const c of audit.checks || []) {
@@ -918,8 +937,20 @@ export function formatChatConclusion(job: CursorCodingJob): string {
       }
     } else if (audit.ok) {
       const scope = auditScopeLines(audit.checks || [], synced)
-      lines.push(auditHeadline(true, scope.length > 0, score))
-      for (const line of scope) lines.push(line)
+      if (softFails.length) {
+        lines.push(
+          `审计：⚠ 通过（含环境提示）` +
+            (score ? ` 完成度 ${score.percent}%（${score.passed}/${score.total}）` : ''),
+        )
+        for (const line of scope) lines.push(line)
+        for (const c of softFails) {
+          const text = String(c.detail || c.name || '').trim()
+          if (text) lines.push(`• 提示：${text}`)
+        }
+      } else {
+        lines.push(auditHeadline(true, scope.length > 0, score))
+        for (const line of scope) lines.push(line)
+      }
     }
     lines.push(``)
   }
@@ -932,23 +963,35 @@ export function formatChatConclusion(job: CursorCodingJob): string {
   if (deferred.length) {
     const crit = criticalDeferredFiles(deferred)
     lines.push(``)
-    lines.push(`范围外未同步 ${deferred.length} 个：`)
+    lines.push(
+      inplaceRoot
+        ? `范围外已直改真工程（未纳入交付） ${deferred.length} 个：`
+        : `范围外未同步 ${deferred.length} 个：`,
+    )
     for (const f of deferred.slice(0, 15)) lines.push(`• \`${f}\``)
     if (deferred.length > 15) lines.push(`• …另有 ${deferred.length - 15} 个`)
     if (crit.length) {
       lines.push(
-        `⚠ 契约文件未同步（${crit.join(', ')}）：易出现「页面已改但接口失败」。请扩大可写范围后续改，或在设置里补上 \`schemas.py\` / \`models.py\`。`,
+        inplaceRoot
+          ? `⚠ 契约文件已直改未纳入交付（${crit.join(', ')}）：请用 Git 核对，并扩大可写范围后续改。`
+          : `⚠ 契约文件未同步（${crit.join(', ')}）：易出现「页面已改但接口失败」。请扩大可写范围后续改，或在设置里补上 \`schemas.py\` / \`models.py\`。`,
       )
     }
   }
 
   if (heldSensitive.length) {
     lines.push(``)
-    lines.push(`安全拦截（仅沙箱、未同步真工程） ${heldSensitive.length} 个：`)
+    lines.push(
+      inplaceRoot
+        ? `安全警示（敏感文件已在真工程被改写） ${heldSensitive.length} 个：`
+        : `安全拦截（仅沙箱、未同步真工程） ${heldSensitive.length} 个：`,
+    )
     for (const f of heldSensitive.slice(0, 15)) lines.push(`• \`${f}\``)
     if (heldSensitive.length > 15) lines.push(`• …另有 ${heldSensitive.length - 15} 个`)
     lines.push(
-      `说明：敏感/密钥类文件不会写入目标工程；请勿按沙箱路径验收这些文件，以真工程为准。`,
+      inplaceRoot
+        ? `说明：方案 B 不做自动回滚；请立即核对上述密钥/环境文件，不需要则用 Git 撤销。`
+        : `说明：敏感/密钥类文件不会写入目标工程；请勿按沙箱路径验收这些文件，以真工程为准。`,
     )
   }
 

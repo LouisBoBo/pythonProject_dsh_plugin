@@ -26,6 +26,11 @@ export const COPY_SKIP_DIR_NAMES = new Set([
   '.cursor',
   'sandboxes',
   'local_dev',
+  // .NET / Visual Studio：构建产物与本地缓存（整仓拷沙箱时极易顶满体积上限）
+  // 故意不含 packages：JS monorepo 常用 packages/ 放源码；NuGet 本地缓存多在用户目录
+  'bin',
+  'obj',
+  '.vs',
   // 沙箱内刷新用的临时目录，不能进快照/同步
   '.cc-tmp',
 ])
@@ -116,6 +121,8 @@ export function isSensitiveRel(rel: string): boolean {
   for (const part of parts) {
     if (SENSITIVE_PATH_PARTS.has(part) || SENSITIVE_BASENAMES.has(part)) return true
     const lower = part.toLowerCase()
+    // .env / .env.production.local / .envrc 等变体（后缀表 alone 盖不住中间段）
+    if (lower === '.env' || lower.startsWith('.env.') || lower === '.envrc') return true
     if (SENSITIVE_SUFFIXES.some((suf) => lower.endsWith(suf))) return true
   }
   return false

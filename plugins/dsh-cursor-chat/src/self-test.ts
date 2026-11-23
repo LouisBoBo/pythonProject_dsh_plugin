@@ -34,7 +34,7 @@ import {
   resolveEffectiveWriteScope,
   selectAutoScopePromotions,
 } from './autoWriteScope.js'
-import { listHeldSensitiveRels } from './sandbox.js'
+import { listHeldSensitiveRels, snapshotSensitiveFiles } from './sandbox.js'
 import {
   _resetPendingConfirmForTests,
   bindPendingJob,
@@ -43,9 +43,11 @@ import {
 } from './pendingConfirm.js'
 import {
   dropStaleFrontendDownNote,
+  finishAudit,
   liveAuditScope,
   pathsForThisRound,
   probeLiveAudit,
+  shouldCheckLiveOpenApi,
   requirementEvidenceChecks,
 } from './completionAudit.js'
 import {
@@ -1146,6 +1148,29 @@ async function main() {
     assert(held.includes('.env'), '沙箱新增 .env 须记入 held_sensitive')
     assert(!(held.includes('README.md')), '非敏感文件不得进 held_sensitive')
 
+    // inplace：对比开工基线；无基线不得误报仓内已有 .env；本轮新增/改写须记入
+    const beforeEmpty = snapshotSensitiveFiles(ws)
+    writeFileSync(join(ws, '.env'), 'EXISTING=1\n', 'utf8')
+    assert(
+      listHeldSensitiveRels(ws, ws, 20, beforeEmpty).includes('.env'),
+      'inplace 本轮新增 .env 须记入 held_sensitive',
+    )
+    const beforeWithEnv = snapshotSensitiveFiles(ws)
+    writeFileSync(join(ws, '.env'), 'EXISTING=2\n', 'utf8')
+    assert(
+      listHeldSensitiveRels(ws, ws, 20, beforeWithEnv).includes('.env'),
+      'inplace 本轮改写既有 .env 须记入',
+    )
+    assert(
+      listHeldSensitiveRels(ws, ws, 20, snapshotSensitiveFiles(ws)).length === 0,
+      'inplace 基线与现状一致时不得误报',
+    )
+    assert(listHeldSensitiveRels(ws, ws, 20, null).length === 0, 'inplace 无基线不得误报')
+    {
+      const { isSensitiveRel } = await import('./pathScope.js')
+      assert(isSensitiveRel('.env.production.local') === true, '.env 变体须识别为敏感')
+    }
+
     const { createJob, patchJob, loadJob } = await import('./jobs.js')
     const { saveConfig, loadConfig } = await import('./config.js')
     const prevRoot = loadConfig().dataRoot
@@ -1258,8 +1283,8 @@ async function main() {
     )
     assert(runJobSrc.indexOf("workKind === 'ops'") >= 0, '开工须能走上开发操作分支')
     assert(
-      runJobSrc.indexOf("workKind === 'ops'") < runJobSrc.indexOf("setStatus(job, 'running', '准备沙箱…')"),
-      '开发操作必须在准备写码沙箱之前返回',
+      runJobSrc.indexOf("workKind === 'ops'") < runJobSrc.indexOf("setStatus(job, 'running', '准备工作区…')"),
+      '开发操作必须在准备写码工作区之前返回',
     )
     assert(clientSrcEarly.includes('正在准备执行，不改代码'), '进度卡不得把重启显示成准备写码环境')
     assert(classifyWork('重启前后端服务') === 'ops', '重启前后端是启动服务')
@@ -1335,6 +1360,14 @@ async function main() {
       workspace,
     })
     assert(kept.parentSandbox === join(workspace, 'sandbox') && kept.resumeAgentId === 'code-agent', '写码父沙箱仍应继承')
+    const inplaceLink = codingParentLink({
+      work_kind: 'code',
+      sandbox_path: workspace,
+      agent_id: 'inplace-agent',
+      workspace,
+    })
+    assert(inplaceLink.parentSandbox === null, '真工程直改不得把工作区当父沙箱 clone')
+    assert(inplaceLink.resumeAgentId === 'inplace-agent', '真工程直改续改仍须 resume Agent')
     {
       const proj = mkdtempSync(join(tmpdir(), 'cc-ops-plan-'))
       mkdirSync(join(proj, 'frontend'), { recursive: true })
@@ -2043,8 +2076,51 @@ async function main() {
     )
     const onlyFront = liveAuditScope(['frontend/src/views/kanban/EquipmentOeeKanbanView.vue'])
     assert(onlyFront.frontend && !onlyFront.backend, '只改前端时不探后端')
+    assert(
+      shouldCheckLiveOpenApi(onlyFront, ['/api/reports/employee-work-hours/filters']) === false,
+      '纯前端 mock/TODO 接口字面量不得要求运行中 OpenAPI',
+    )
+    {
+      const softOnly = finishAudit([
+        { name: 'synced_bytes', ok: true, detail: '落盘指纹与沙箱一致' },
+        { name: 'requirement_page', ok: true, detail: '需求里的页面已有前端页面文件落盘' },
+        {
+          name: 'frontend_service',
+          ok: false,
+          detail: '前端端口未响应',
+        },
+        {
+          name: 'backend_service',
+          ok: false,
+          detail: '后端端口未响应',
+        },
+      ])
+      assert(softOnly.ok === true, '仅端口探测失败时审计仍算通过，不得挡完成')
+      assert(softOnly.detail.includes('环境提示'), '通过结论须标明环境提示')
+      const apiHard = finishAudit([
+        { name: 'synced_bytes', ok: true, detail: '落盘指纹一致' },
+        {
+          name: 'requirement_api',
+          ok: false,
+          detail: '正在跑的文档里还没有本轮接口：/api/reports/employee-work-hours',
+        },
+      ])
+      assert(apiHard.ok === false, '本轮改后端且 OpenAPI 缺接口须硬失败')
+      const hard = finishAudit([
+        { name: 'synced_bytes', ok: true, detail: '落盘指纹一致' },
+        { name: 'api_mount', ok: false, detail: '新 router 未挂载' },
+        { name: 'requirement_api', ok: false, detail: '文档尚无接口' },
+      ])
+      assert(hard.ok === false, '挂载等硬失败仍须未通过')
+      assert(hard.detail.includes('未挂载') || hard.detail.includes('api_mount') || hard.detail.includes('挂载'), '硬失败明细须保留')
+    }
     const onlyBack = liveAuditScope(['backend/app/routers/kanban_equipment_oee.py'])
     assert(!onlyBack.frontend && onlyBack.backend, '只改后端时不探前端')
+    assert(
+      shouldCheckLiveOpenApi(onlyBack, ['/api/reports/employee-work-hours']) === true,
+      '本轮改了后端且有本轮接口路径时须核对运行中 OpenAPI',
+    )
+    assert(shouldCheckLiveOpenApi(onlyBack, []) === false, '无本轮接口路径时不核对 OpenAPI')
     const onlyDoc = liveAuditScope(['docs/API.md'])
     assert(!onlyDoc.frontend && !onlyDoc.backend, '没改前后端文件时不探服务')
     const nestedScope = liveAuditScope([
@@ -4336,15 +4412,24 @@ async function main() {
         job?: {
           parent_job_id?: string
           continue_count?: number
+          sandbox_path?: string | null
+          agent_id?: string | null
           transcript?: { kind?: string; text?: string }[]
         }
       }
       assert(jobBody.job?.parent_job_id === jobId, '应记录 parent_job_id')
       assert((jobBody.job?.continue_count || 0) >= 1, 'continue_count 应 >= 1')
-      const reuseStatus = (jobBody.job?.transcript || []).find(
-        (it) => it.kind === 'status' && String(it.text || '').includes('reuse'),
+      const readyStatus = (jobBody.job?.transcript || []).find(
+        (it) =>
+          it.kind === 'status' &&
+          (String(it.text || '').includes('工作区就绪') || String(it.text || '').includes('reuse')),
       )
-      assert(reuseStatus, '续改应复用父沙箱（status 含 reuse）')
+      assert(readyStatus, '续改应就绪（工作区就绪或旧沙箱 reuse）')
+      const childRoot = String(jobBody.job?.sandbox_path || '')
+      assert(
+        childRoot === workspace || childRoot.includes('sandboxes'),
+        '续改须有有效工作根',
+      )
     }
 
     // 稀疏沙箱加厚（只读上下文；不扩大同步权限）
@@ -4403,6 +4488,8 @@ async function main() {
           readFileSync(join(child.sandbox, 'src/a.ts'), 'utf8').includes('a = 2'),
           '写范围文件应从真工程刷新',
         )
+        // 旧沙箱复用链路：显式关闭 inplace，避免被默认真工程直改短路
+        process.env.CURSOR_CHAT_INPLACE = '0'
         const disabled = await prepareSandboxForJob({
           dataRoot: parentHome,
           jobId: 'cch-child-noreuse',
@@ -4424,9 +4511,25 @@ async function main() {
         assert(fallback.mode === 'sparse', '开关关闭应回退 sparse，实际=' + fallback.mode)
         assert(!existsSync(join(fallback.sandbox, 'src/only-in-parent.ts')), '回退新建不应带父独有文件')
         assert(disabled.mode === 'reuse', '开启时应 reuse')
-        console.log('[self-test] 父沙箱复用 + 开关回退 OK', child.copied_files, fallback.mode)
+        // 默认真工程直改
+        delete process.env.CURSOR_CHAT_INPLACE
+        const inplaceMeta = await prepareSandboxForJob({
+          dataRoot: parentHome,
+          jobId: 'cch-child-inplace',
+          targetWorkspace: reuseWs,
+          writeScope: ['src/a.ts'],
+          parentSandbox: parentMeta.sandbox,
+        })
+        assert(inplaceMeta.mode === 'inplace', '默认应为 inplace')
+        assert(inplaceMeta.sandbox === reuseWs, 'inplace 的 cwd 须是真工程')
+        const acknowledged = syncChangedToTarget(reuseWs, reuseWs, ['src/a.ts'])
+        assert(acknowledged.includes('src/a.ts'), '同根同步应认账已落盘文件')
+        const fp = verifySyncedFingerprints(reuseWs, reuseWs, ['src/a.ts'])
+        assert(fp.ok, '同根交付审计指纹须通过')
+        console.log('[self-test] 父沙箱复用 + 开关回退 + inplace OK', child.copied_files, fallback.mode, inplaceMeta.mode)
       } finally {
         delete process.env.CURSOR_CHAT_REUSE_PARENT
+        delete process.env.CURSOR_CHAT_INPLACE
         try {
           rmSync(reuseWs, { recursive: true, force: true })
         } catch {

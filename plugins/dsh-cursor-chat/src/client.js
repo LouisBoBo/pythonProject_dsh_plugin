@@ -5385,7 +5385,7 @@ window.__ModuleLoader__.load({
             if (/【本轮结论】|^##\s*本轮结论|^##\s*Git\s*交付结论|说明方案/.test(m)) return
             if (!m) return
             if (
-              /准备沙箱|稀疏拷贝|沙箱就绪|启动 Cursor|正在启动|Mock Cursor|已入队|确认入队|写范围|只读上下文/i.test(
+              /准备沙箱|准备工作区|真工程直改|稀疏拷贝|沙箱就绪|工作区就绪|启动 Cursor|正在启动|Mock Cursor|已入队|确认入队|写范围|只读上下文/i.test(
                 m,
               )
             ) {
@@ -5612,7 +5612,7 @@ window.__ModuleLoader__.load({
             if (!msg) return
             // 沙箱/启动细节：进行中改写为友好占位，禁止静默丢掉导致大块空白
             if (
-              /准备沙箱|稀疏拷贝|沙箱就绪|启动 Cursor|正在启动|Mock Cursor|已入队|确认入队|写范围|只读上下文/i.test(
+              /准备沙箱|准备工作区|真工程直改|稀疏拷贝|沙箱就绪|工作区就绪|启动 Cursor|正在启动|Mock Cursor|已入队|确认入队|写范围|只读上下文/i.test(
                 msg,
               )
             ) {

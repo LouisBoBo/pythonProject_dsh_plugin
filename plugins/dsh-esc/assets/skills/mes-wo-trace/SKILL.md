@@ -66,3 +66,7 @@ optionalConnectorIds:
 ```
 
 有工序节点且图表已启用：最多一张 `funnel`（工序通过量）或 `column`（各站停留）。数字必须来自 `work_order` / `wip`。禁止为凑图补查其它 kind。
+
+## 落盘资料库（必须）
+
+正文写完后调用一次 `zr_mom_save`：`directory`=当前工程根目录，`filename`=`工单追溯_<工单号>_<窗口止>.md`，`title`=正文一级标题，`content`=完整 Markdown（含表格与图片链接）。成功后末尾加一行「报告已存资料库：<relativePath>」；工具不可用或失败写「未落盘：<code> <message>」，不要假装已保存，不要用 Bash 绕过。用户明确说不用存时跳过。

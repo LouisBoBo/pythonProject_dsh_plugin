@@ -33,7 +33,7 @@ import {
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024
 export const COPY_MAX_FILES = 4000
-export const COPY_MAX_TOTAL_BYTES = 80 * 1024 * 1024
+export const COPY_MAX_TOTAL_BYTES = 200 * 1024 * 1024
 export const MAX_TOTAL_WRITE_BYTES = 40 * 1024 * 1024
 /** 单文件拷贝超时（毫秒）；超时跳过该文件，避免整 job 卡死 */
 export const COPY_FILE_TIMEOUT_MS = 8_000
@@ -73,7 +73,7 @@ export const SPARSE_CONTEXT_MAX_EXTRA = 120
 export type PrepareResult = {
   sandbox: string
   copied_files: number
-  mode: 'copy' | 'sparse' | 'reuse'
+  mode: 'copy' | 'sparse' | 'reuse' | 'inplace'
   total_bytes: number
   /** 稀疏模式：写范围内文件数 */
   scope_files?: number
@@ -87,6 +87,42 @@ export type PrepareResult = {
   reused_from?: string
   /** 拷贝超时/失败而未进入沙箱的文件（相对路径） */
   skipped_files?: string[]
+}
+
+/** 对齐 Cursor IDE：写码默认在真工程直改；设 CURSOR_CHAT_INPLACE=0 可回退旧沙箱拷贝。 */
+export function isInPlaceCodingEnabled(): boolean {
+  const raw = String(process.env.CURSOR_CHAT_INPLACE || '').trim().toLowerCase()
+  if (!raw) return true
+  return !(raw === '0' || raw === 'false' || raw === 'off' || raw === 'no')
+}
+
+export function isSameWorkspaceRoot(a: string, b: string): boolean {
+  const left = resolve(String(a || ''))
+  const right = resolve(String(b || ''))
+  if (!left || !right) return false
+  return left.replace(/[\\/]+$/, '').toLowerCase() === right.replace(/[\\/]+$/, '').toLowerCase()
+}
+
+/**
+ * 真工程直改：不拷贝、不占额外盘；cwd 即工作区。
+ * 方案 B：不做快照自动回滚，乱改靠 HITL / 范围闸 / Git 自行撤销。
+ */
+export function prepareWorkspaceInPlace(
+  targetWorkspace: string,
+  onProgress?: (msg: string) => void,
+): PrepareResult {
+  const target = resolve(targetWorkspace)
+  if (!existsSync(target) || !statSync(target).isDirectory()) {
+    throw new Error('目标工程目录无效')
+  }
+  onProgress?.('准备工作区…')
+  return {
+    sandbox: target,
+    copied_files: 0,
+    mode: 'inplace',
+    total_bytes: 0,
+    skipped_files: [],
+  }
 }
 
 function safeJobDirName(jobId: string): string {
@@ -558,6 +594,10 @@ export async function prepareSandboxForJob(opts: {
   onProgress?: (msg: string) => void
 }): Promise<PrepareResult> {
   const { dataRoot, jobId, targetWorkspace, writeScope, parentSandbox, onProgress } = opts
+  // 默认真工程直改（Cursor IDE 对齐）。旧沙箱拷贝仅 CURSOR_CHAT_INPLACE=0 时启用。
+  if (isInPlaceCodingEnabled()) {
+    return prepareWorkspaceInPlace(targetWorkspace, onProgress)
+  }
   if (isReuseParentSandboxEnabled() && canReuseParentSandbox(parentSandbox)) {
     try {
       return await prepareSandboxReuse(
@@ -659,18 +699,80 @@ export function snapshotSandbox(sandbox: string): Map<string, string> {
 }
 
 /**
- * 快照故意跳过敏感文件，但 Cursor 仍可能在沙箱里写出 .env 等。
- * 找出「沙箱有、且相对真工程为新增/改写」的敏感路径，供结论标明：仅沙箱、未同步真工程。
- * 不参与同步清单，不影响 write_scope / deferred。
+ * 只采敏感路径指纹（walkFiles 故意跳过敏感文件；inplace 收口须另比这一本）。
+ */
+export function snapshotSensitiveFiles(root: string, maxVisit = 4000): Map<string, string> {
+  const map = new Map<string, string>()
+  const sbRoot = resolve(root)
+  if (!sbRoot || !existsSync(sbRoot)) return map
+  const stack = [sbRoot]
+  let visited = 0
+  while (stack.length && visited < maxVisit) {
+    const dir = stack.pop()!
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const ent of entries) {
+      if (visited >= maxVisit) break
+      const name = String(ent.name)
+      const full = join(dir, name)
+      if (ent.isDirectory()) {
+        if (shouldSkipDirname(name)) continue
+        stack.push(full)
+        continue
+      }
+      if (!ent.isFile()) continue
+      visited += 1
+      const rel = relative(sbRoot, full).split(sep).join('/')
+      const relN = normalizeRel(rel)
+      if (!relN || !isSensitiveRel(relN)) continue
+      try {
+        map.set(relN, fingerprintFile(full))
+      } catch {
+        map.set(relN, 'unreadable')
+      }
+    }
+  }
+  return map
+}
+
+/**
+ * 快照故意跳过敏感文件，但 Cursor 仍可能写出 .env 等。
+ * - 旧沙箱模式：沙箱有、真工程无/不同 → held（未同步真工程）
+ * - 真工程直改：须传入开工前 snapshotSensitiveFiles；仅列出本轮相对基线新增/改写/消失的敏感路径（方案 B 不回滚，供结论警示）
  */
 export function listHeldSensitiveRels(
   sandbox: string,
   workspace: string,
   maxItems = 20,
+  beforeSensitive?: Map<string, string> | null,
 ): string[] {
   const sbRoot = resolve(sandbox)
   const wsRoot = resolve(workspace)
   if (!sbRoot || !wsRoot || !existsSync(sbRoot)) return []
+  if (isSameWorkspaceRoot(sbRoot, wsRoot)) {
+    if (!beforeSensitive) return []
+    const after = snapshotSensitiveFiles(sbRoot)
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const [rel, fp] of after) {
+      if (out.length >= maxItems) break
+      const prev = beforeSensitive.get(rel)
+      if (prev === undefined || prev !== fp) {
+        out.push(rel)
+        seen.add(rel)
+      }
+    }
+    for (const rel of beforeSensitive.keys()) {
+      if (out.length >= maxItems) break
+      if (seen.has(rel) || after.has(rel)) continue
+      out.push(rel)
+    }
+    return out
+  }
   const out: string[] = []
   const stack = [sbRoot]
   let visited = 0
@@ -859,6 +961,24 @@ export function syncChangedToTarget(
   const tg = resolve(target)
   if (!existsSync(tg) || !statSync(tg).isDirectory()) {
     throw new Error('目标目录无效')
+  }
+  // 真工程直改：文件已在目标盘，同步=校验存在并认账（不做拷贝、不回滚）
+  if (isSameWorkspaceRoot(sb, tg)) {
+    const written: string[] = []
+    for (const raw of changedRels) {
+      const rel = normalizeRel(raw)
+      if (!rel || isNonDeliverableRel(rel)) continue
+      const dest = join(tg, rel)
+      assertInside(tg, dest)
+      if (!existsSync(dest) || !statSync(dest).isFile()) {
+        throw new Error(`真工程中缺少已改文件：${rel}`)
+      }
+      const st = statSync(dest)
+      if (st.size > MAX_FILE_BYTES) throw new Error(`文件过大，拒绝认账：${rel}`)
+      written.push(rel)
+    }
+    if (!written.length) throw new Error('没有可认账的有效文件')
+    return written
   }
   const planned: { rel: string; src: string; dest: string }[] = []
   let totalBytes = 0

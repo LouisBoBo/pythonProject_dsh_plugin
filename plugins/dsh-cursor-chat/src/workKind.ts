@@ -1,6 +1,6 @@
 /**
  * 不改文件的开发需求，按 Cursor IDE 在真实项目里做：启动/重启、测试、装依赖、看日志、查环境、排障。
- * 一旦要改代码，整轮仍走写码沙箱，避免直接改真实项目。
+ * 一旦要改代码，整轮走写码路径（默认真工程直改，对齐 Cursor IDE）。
  */
 
 import { isDeleteIntent } from './deleteIntent.js'
@@ -97,8 +97,14 @@ export function codingParentLink(parent: {
   }
   const sandbox = String(parent.sandbox_path || '').trim()
   const workspace = String(parent.workspace || '').trim()
-  const same = sandbox && workspace && sandbox.replace(/[\\/]+$/, '').toLowerCase() === workspace.replace(/[\\/]+$/, '').toLowerCase()
-  if (same) return { parentSandbox: null, resumeAgentId: null }
+  const same =
+    sandbox &&
+    workspace &&
+    sandbox.replace(/[\\/]+$/, '').toLowerCase() === workspace.replace(/[\\/]+$/, '').toLowerCase()
+  // 真工程直改：sandbox_path===workspace，不能当「父沙箱」去 clone，但仍可 resume Agent
+  if (same) {
+    return { parentSandbox: null, resumeAgentId: parent.agent_id || null }
+  }
   return {
     parentSandbox: sandbox || null,
     resumeAgentId: parent.agent_id || null,

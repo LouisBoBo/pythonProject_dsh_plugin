@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     var LS_CC_PORT = 'dsh-cursor-chat-port'
     var LS_CC_HOST = 'dsh-cursor-chat-host'
     var LS_ESC_PORT = 'dsh-esc-port'
-    var CSS_VER = '0.1.67'
+    var CSS_VER = '0.1.68'
     /** 右栏宽度：每次启动回到默认 300；运行中由用户拖拽说了算（不再跨启动沿用） */
     var RAIL_MIN_W = 300
     var RAIL_DEFAULT_W = 300
@@ -127,6 +127,15 @@ window.__ModuleLoader__.load({
         '.acx-item-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
         'font-size:13px;color:#1f1f1f;font-weight:400}' +
         'body[data-ds-dark-theme] .acx-item-label{color:#e8e8e8}' +
+        '.acx-item-file:hover{background:rgba(127,127,127,.1)}' +
+        '.acx-item-main{appearance:none;border:0;background:transparent;flex:1;min-width:0;display:flex;' +
+        'align-items:center;gap:10px;padding:0;margin:0;color:inherit;font:inherit;text-align:left;' +
+        'cursor:pointer;min-height:24px}' +
+        '.acx-item-dl{appearance:none;border:0;background:transparent;color:inherit;flex:0 0 auto;' +
+        'height:24px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;' +
+        'gap:4px;padding:0 8px;font-size:12px;line-height:1;opacity:.7;white-space:nowrap}' +
+        '.acx-item-dl:hover{background:rgba(127,127,127,.15);opacity:1}' +
+        '.acx-item-dl svg{width:13px!important;height:13px!important;display:block}' +
         '.acx-diff{font-variant-numeric:tabular-nums;font-weight:600;font-size:13px;letter-spacing:0}' +
         '.acx-diff .plus{color:#34c759}' +
         '.acx-diff .minus{color:#ff3b30;margin-left:6px}' +
@@ -293,6 +302,14 @@ window.__ModuleLoader__.load({
       return svgIcon([
         h('circle', { cx: '12', cy: '12', r: '9' }),
         h('path', { d: 'M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18' }),
+      ])
+    }
+
+    function IcoDownload() {
+      return svgIcon([
+        h('path', { d: 'M12 4v10' }),
+        h('path', { d: 'M7.5 10.2 12 14.7l4.5-4.5' }),
+        h('path', { d: 'M5 19h14' }),
       ])
     }
 
@@ -1668,6 +1685,10 @@ window.__ModuleLoader__.load({
       var escState = useState(null)
       var esc = escState[0]
       var setEsc = escState[1]
+      // 资料库产出：zr_mom_save 落盘的分析报告（MES 等）
+      var momDocsState = useState([])
+      var momDocs = momDocsState[0]
+      var setMomDocs = momDocsState[1]
       var ccReadyState = useState(null)
       var ccReady = ccReadyState[0]
       var setCcReady = ccReadyState[1]
@@ -1806,6 +1827,43 @@ window.__ModuleLoader__.load({
                 })
             } else if (!stopped) {
               setEsc(null)
+            }
+
+            // 本会话落盘资料库的报告（MES 分析等），作为「产出」的一种
+            if (ws) {
+              fetch('/mom-docs/v1/files?directory=' + encodeURIComponent(ws), {
+                headers: { 'x-dsh-mom-client': 'library' },
+                cache: 'no-store',
+              })
+                .then(function (r) {
+                  return r.json()
+                })
+                .then(function (d) {
+                  if (stopped) return
+                  var groups = (d && d.ok && d.workspaces) || []
+                  var flat = []
+                  groups.forEach(function (g) {
+                    if (!g || String(g.directory || '') !== String(ws)) return
+                    ;(g.days || []).forEach(function (day) {
+                      ;((day && day.items) || []).forEach(function (it) {
+                        if (!it || !it.fileName) return
+                        flat.push({
+                          date: String((day && day.date) || ''),
+                          fileName: String(it.fileName),
+                          title: String(it.title || ''),
+                          savedAt: String(it.savedAt || ''),
+                          mtimeMs: Number(it.mtimeMs || 0),
+                        })
+                      })
+                    })
+                  })
+                  setMomDocs(flat)
+                })
+                .catch(function () {
+                  if (!stopped) setMomDocs([])
+                })
+            } else if (!stopped) {
+              setMomDocs([])
             }
           }
 
@@ -2194,6 +2252,7 @@ window.__ModuleLoader__.load({
         })
       })
       // 宿主会话：仅用户消息里「像上传」的附件块（有 attachment/mime/uploads 特征）
+      var sessionStartMs = 0
       try {
         var sessBag = ctx && ctx.get && ctx.get('sessions')
         var snap =
@@ -2205,6 +2264,10 @@ window.__ModuleLoader__.load({
             ? sessRow.snapshotEvents()
             : null
         if (Array.isArray(events)) {
+          events.forEach(function (ev) {
+            var t0 = Number(ev && ev.time)
+            if (t0 > 0 && (!sessionStartMs || t0 < sessionStartMs)) sessionStartMs = t0
+          })
           events.forEach(function (ev) {
             if (!ev || String(ev.type || '') !== 'user/message') return
             var data = ev.data && typeof ev.data === 'object' ? ev.data : null
@@ -2265,6 +2328,121 @@ window.__ModuleLoader__.load({
           })
         }
       } catch (eSrc) {}
+
+      // 资料库报告：只算本会话开始后保存的；拿不到会话起始时间则退化为只看当天
+      var momToday = ''
+      try {
+        momToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(
+          new Date(),
+        )
+      } catch (eDay) {}
+      var momSeen = {}
+      ;(momDocs || []).forEach(function (it) {
+        if (!it || !it.fileName) return
+        var momKey = it.date + '/' + it.fileName
+        if (momSeen[momKey]) return
+        var savedMs = Date.parse(String(it.savedAt || ''))
+        if (!(savedMs > 0)) savedMs = Number(it.mtimeMs || 0)
+        if (sessionStartMs > 0) {
+          if (!(savedMs >= sessionStartMs - 60000)) return
+        } else if (momToday && it.date !== momToday) {
+          return
+        }
+        momSeen[momKey] = true
+        outputRows.push({
+          name: it.title || it.fileName,
+          path:
+            (workspace ? String(workspace).replace(/\/+$/, '') + '/' : '') +
+            'MOM/' +
+            it.date +
+            '/' +
+            it.fileName,
+          kind: fileKind(it.fileName),
+          mom: { date: it.date, fileName: it.fileName, title: it.title },
+        })
+      })
+
+      function downloadMomDoc(it) {
+        var dir = String(workspace || '').trim()
+        if (!dir || !it || !it.fileName) {
+          setErr('下载失败：缺少资料库路径')
+          return
+        }
+        var q =
+          '/mom-docs/v1/file?directory=' +
+          encodeURIComponent(dir) +
+          '&date=' +
+          encodeURIComponent(it.date || '') +
+          '&name=' +
+          encodeURIComponent(it.fileName)
+        fetch(q, { headers: { 'x-dsh-mom-client': 'library' }, cache: 'no-store' })
+          .then(function (r) {
+            return r.json()
+          })
+          .then(function (d) {
+            if (!d || d.ok !== true) throw new Error((d && d.message) || '读取失败')
+            var name = /\.txt$/i.test(it.fileName) ? 'text/plain' : 'text/markdown'
+            var blob = new Blob([String(d.content || '')], { type: name + ';charset=utf-8' })
+            var url = URL.createObjectURL(blob)
+            var a = document.createElement('a')
+            a.href = url
+            a.download = it.fileName
+            a.style.display = 'none'
+            document.body.appendChild(a)
+            a.click()
+            setTimeout(function () {
+              try {
+                a.remove()
+                URL.revokeObjectURL(url)
+              } catch (e) {}
+            }, 1000)
+            setErr('')
+            setMsg('已下载：' + it.fileName)
+          })
+          .catch(function (e) {
+            setMsg('')
+            setErr('下载失败：' + String((e && e.message) || '').slice(0, 60))
+          })
+      }
+
+      // 资料库报告行：点击打开预览，右侧下载到本机
+      function momReportRow(row, idx) {
+        return h(
+          'div',
+          { key: 'out-' + idx + '-' + row.name, className: 'acx-item acx-item-file', title: row.path },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'acx-item-main',
+              onClick: function () {
+                if (!openWorkspaceFile(ctx, sessionId, workspace, row.path)) {
+                  setErr('无法打开文件（需绑定会话工作区）')
+                }
+              },
+            },
+            tile(IcoFile(row.kind), fileIcoClass(row.kind)),
+            h('span', { className: 'acx-item-label' }, row.name),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'acx-item-dl',
+              title: '下载到本机',
+              'aria-label': '下载 ' + row.mom.fileName,
+              onClick: function (ev) {
+                try {
+                  ev.stopPropagation()
+                } catch (e) {}
+                downloadMomDoc(row.mom)
+              },
+            },
+            IcoDownload(),
+            h('span', null, '下载'),
+          ),
+        )
+      }
 
       function refreshAll() {
         tickRef.current += 1
@@ -2442,6 +2620,7 @@ window.__ModuleLoader__.load({
           '产出',
           outputRows.length
             ? outputRows.map(function (row, idx) {
+                if (row.mom) return momReportRow(row, idx)
                 return itemRow({
                   key: 'out-' + idx + '-' + row.name,
                   ico: IcoFile(row.kind),

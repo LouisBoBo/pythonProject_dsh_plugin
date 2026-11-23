@@ -96,7 +96,8 @@ export function buildAuditRepairPrompt(
 
 /**
  * 同步后交付审计。无同步且无删除时跳过（空跑闸门另管）。
- * 任一子检查失败则审计 ok=false。落盘/删除验尸在同步时直接失败；其余失败同样不得标已完成。
+ * 硬失败（落盘/删除/页面/挂载/契约/库表/测试/运行中 OpenAPI）→ ok=false，不得标已完成。
+ * 环境探测类（前后端端口）单独失败只作提示，见 completionAudit.ADVISORY_AUDIT。
  */
 export function runDeliveryAudit(input: DeliveryAuditInput): DeliveryAuditResult {
   const synced = Array.isArray(input.synced_files) ? input.synced_files : []

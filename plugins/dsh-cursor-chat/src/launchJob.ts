@@ -110,7 +110,7 @@ export function launchCodingJob(input: LaunchJobInput): LaunchJobResult {
       ? opsWantsRunningService(requirement)
         ? '已开工，按项目命令启动/重启服务，不改代码…'
         : `已开工，${opsRunningStatus(classifyOpsTerminal(requirement)).replace(/^正在/, '准备')}`
-      : '已开工，后台准备沙箱与 Cursor…'
+      : '已开工，后台准备真工程写码与 Cursor…'
   setStatus(job, 'queued', queuedDetail)
   // 落盘 pending(call_id→job_id)：begin 阻塞未返回时，进度卡用 pending-latest 挂 SSE
   // （兼容尚未热加载 jobs-by-call 的旧 HTTP 子进程）
