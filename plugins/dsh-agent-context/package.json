@@ -1,6 +1,6 @@
 {
   "name": "@zhongruan/dsh-agent-context",
-  "version": "0.1.68",
+  "version": "0.1.69",
   "description": "任务上下文右侧薄栏（对标 Qode 右侧栏）：聚合环境/改动/提交入口/技能/产出；不进左侧导航槽",
   "dshMarket": {
     "zh": "任务上下文：对话右侧薄栏看改动与分支，并可发起提交确认（走写码人审）；不占左侧导航",

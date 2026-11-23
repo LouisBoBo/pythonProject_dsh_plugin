@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     var LS_CC_PORT = 'dsh-cursor-chat-port'
     var LS_CC_HOST = 'dsh-cursor-chat-host'
     var LS_ESC_PORT = 'dsh-esc-port'
-    var CSS_VER = '0.1.68'
+    var CSS_VER = '0.1.69'
     /** 右栏宽度：每次启动回到默认 300；运行中由用户拖拽说了算（不再跨启动沿用） */
     var RAIL_MIN_W = 300
     var RAIL_DEFAULT_W = 300
