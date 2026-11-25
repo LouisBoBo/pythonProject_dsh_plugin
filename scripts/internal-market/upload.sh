@@ -72,7 +72,8 @@ rsync -az -e "ssh -i $KEY" "$HOST:$REMOTE_ROOT/npm/" "$REG_DIR/npm/"
 echo "==> 核对源码版本与本机 Profile 钉死版本…"
 ROOT="$ROOT" REG_DIR="$REG_DIR" python3 "$ROOT/scripts/internal-market/check-pins.py"
 
-scp -i "$KEY" "$REG_DIR/plugins.json" "$HOST:$REMOTE_ROOT/plugins.json"
+# dsh-tools 的 scp 是 Cygwin，不认 Git Bash 的 /d/ 路径。目录清单与制品一样走 rsync。
+rsync -az -e "ssh -i $KEY" "$REG_DIR/plugins.json" "$HOST:$REMOTE_ROOT/plugins.json"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/artifacts/" "$HOST:$REMOTE_ROOT/artifacts/"
 rsync -az -e "ssh -i $KEY" --delete "$REG_DIR/npm/" "$HOST:$REMOTE_ROOT/npm/"
 
